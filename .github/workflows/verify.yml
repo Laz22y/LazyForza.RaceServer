@@ -1,0 +1,47 @@
+name: Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet:
+    name: .NET server
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+      - name: Restore
+        run: dotnet restore LazyForza.RaceServer.sln --configfile NuGet.Config
+      - name: Build
+        run: dotnet build LazyForza.RaceServer.sln --configuration Release --no-restore
+      - name: Test
+        run: dotnet test LazyForza.RaceServer.sln --configuration Release --no-build --no-restore
+
+  cloudflare:
+    name: Cloudflare Worker
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cloudflare/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Type check
+        run: npm run check
+      - name: Test
+        run: npm test
+      - name: Verify deploy bundle
+        run: npm run dry-run

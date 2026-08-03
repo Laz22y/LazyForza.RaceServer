@@ -1,0 +1,366 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
+
+namespace LazyForza.RaceServer.Protocol;
+
+public static class RaceProtocol
+{
+    public const int CurrentVersion = 1;
+    public const int MaximumParticipants = 12;
+    public const int MaximumMessageBytes = 64 * 1024;
+    public const int MaximumDisplayNameLength = 20;
+    public const int MaximumTeamNameLength = 24;
+}
+
+public enum RaceSessionPhase
+{
+    Lobby,
+    Qualifying,
+    Grid,
+    Countdown,
+    Race,
+    Suspended,
+    Finished
+}
+
+public enum RaceControlFlag
+{
+    Green,
+    Yellow,
+    Red,
+    Chequered
+}
+
+public enum RaceParticipantStatus
+{
+    Connected,
+    Ready,
+    OnTrack,
+    InPitLane,
+    InService,
+    Finished,
+    DidNotFinish,
+    Disqualified,
+    Disconnected
+}
+
+public enum RaceGripCondition
+{
+    Unknown,
+    SlightlyReduced,
+    ModeratelyReduced,
+    SeverelyReduced,
+    AtLimit
+}
+
+public enum RacePenaltyKind
+{
+    Warning,
+    Time,
+    DriveThrough,
+    StopAndGo,
+    GridDrop,
+    Disqualification
+}
+
+public enum RaceBannerKind
+{
+    Information,
+    FastestLap,
+    Penalty,
+    YellowFlag,
+    RedFlag,
+    BlueFlag,
+    ChequeredFlag,
+    Winner
+}
+
+public static class RaceMessageTypes
+{
+    public const string Login = "login";
+    public const string LoginAccepted = "loginAccepted";
+    public const string LoginRejected = "loginRejected";
+    public const string Ready = "ready";
+    public const string Telemetry = "telemetry";
+    public const string LapCompleted = "lapCompleted";
+    public const string Snapshot = "snapshot";
+    public const string Ping = "ping";
+    public const string Pong = "pong";
+    public const string Error = "error";
+}
+
+public sealed record RaceEnvelope(
+    int ProtocolVersion,
+    string Type,
+    long Sequence,
+    JsonElement Payload);
+
+public sealed record RaceServerDescriptor(
+    string ServerName,
+    int ProtocolVersion,
+    int MaximumParticipants,
+    bool RequiresPassword,
+    string WebSocketPath,
+    string ControlPanelPath,
+    string? ActiveTrackId,
+    string? ActiveTrackRevision,
+    RaceSessionPhase Phase,
+    DateTimeOffset ServerTime,
+    string? ActiveTrackName = null,
+    string? ActiveTrackPackageHash = null,
+    bool AllowTeams = true,
+    int SectorCount = 0);
+
+public sealed record RaceLoginRequest(
+    string Password,
+    string DisplayName,
+    string ThemeColor,
+    string? TeamName,
+    string ClientVersion,
+    string? ResumeToken,
+    string? TrackId,
+    string? TrackRevision,
+    string? TrackPackageHash,
+    int? SectorCount = null);
+
+public sealed record RaceLoginAccepted(
+    Guid ParticipantId,
+    string ResumeToken,
+    RaceSessionSnapshot Snapshot,
+    DateTimeOffset ServerTime);
+
+public sealed record RaceLoginRejected(string Code, string Message);
+
+public sealed record RaceReadyUpdate(bool IsReady);
+
+public sealed record RaceClockPing(long ClientMonotonicMilliseconds);
+
+public sealed record RaceClockPong(
+    long ClientMonotonicMilliseconds,
+    long ServerUnixMilliseconds);
+
+public sealed record RaceTelemetryUpdate(
+    long ClientMonotonicMilliseconds,
+    double TrackProgress,
+    double LateralOffsetMeters,
+    double MapX,
+    double MapY,
+    double SpeedKph,
+    int CompletedLaps,
+    int CurrentSector,
+    double CurrentLapSeconds,
+    bool IsInPitLane,
+    bool IsInServiceZone,
+    bool IsTelemetryValid,
+    bool IsPausedOrRewinding,
+    RaceGripCondition GripCondition,
+    double PitServiceElapsedSeconds,
+    bool PitServiceRequirementMet,
+    int CompletedPitServices);
+
+public sealed record RaceLapCompleted(
+    Guid EventId,
+    int LapNumber,
+    double LapSeconds,
+    IReadOnlyList<double> SectorSeconds,
+    bool IsValid,
+    string? InvalidReason,
+    long ClientMonotonicMilliseconds);
+
+public sealed record RacePenaltySnapshot(
+    Guid Id,
+    Guid ParticipantId,
+    RacePenaltyKind Kind,
+    double? ValueSeconds,
+    int? GridPlaces,
+    string Reason,
+    DateTimeOffset IssuedAt,
+    bool IsServed,
+    bool IsRevoked);
+
+public sealed record RaceParticipantSnapshot(
+    Guid Id,
+    int Position,
+    string DisplayName,
+    string ThemeColor,
+    string? TeamName,
+    RaceParticipantStatus Status,
+    bool IsConnected,
+    bool IsReady,
+    int CompletedLaps,
+    int CurrentSector,
+    double TrackProgress,
+    double MapX,
+    double MapY,
+    double SpeedKph,
+    double CurrentLapSeconds,
+    double? LastLapSeconds,
+    double? BestLapSeconds,
+    double? GapToLeaderSeconds,
+    double? IntervalSeconds,
+    bool IsInPitLane,
+    bool IsInServiceZone,
+    double PitServiceElapsedSeconds,
+    bool PitServiceRequirementMet,
+    int CompletedPitServices,
+    RaceGripCondition GripCondition,
+    IReadOnlyList<double?> BestSectorSeconds,
+    IReadOnlyList<RacePenaltySnapshot> Penalties,
+    DateTimeOffset LastSeenAt);
+
+public sealed record RaceBannerSnapshot(
+    Guid Id,
+    RaceBannerKind Kind,
+    string Title,
+    string? Detail,
+    Guid? ParticipantId,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset? ExpiresAt);
+
+public sealed record RaceYellowZoneSnapshot(
+    int? SectorIndex,
+    bool IsAutomatic,
+    string Reason,
+    Guid? ParticipantId,
+    string? ParticipantName);
+
+public sealed record RaceBlueFlagSnapshot(
+    Guid RecipientParticipantId,
+    Guid ApproachingParticipantId,
+    double DistanceAhead);
+
+public sealed record RaceSessionSnapshot(
+    long Revision,
+    string SessionName,
+    RaceSessionPhase Phase,
+    RaceControlFlag Flag,
+    string? FlagMessage,
+    string? TrackId,
+    string? TrackRevision,
+    string? TrackPackageHash,
+    int TotalRaceLaps,
+    DateTimeOffset? StartsAt,
+    DateTimeOffset? QualifyingEndsAt,
+    Guid? FastestParticipantId,
+    double? FastestLapSeconds,
+    IReadOnlyList<double?> FastestSectorSeconds,
+    RaceBannerSnapshot? Banner,
+    IReadOnlyList<RaceParticipantSnapshot> Participants,
+    DateTimeOffset ServerTime,
+    IReadOnlyList<RaceYellowZoneSnapshot>? YellowZones = null,
+    int SectorCount = 0,
+    bool AllowTeams = true,
+    string? TrackName = null,
+    IReadOnlyList<RaceBlueFlagSnapshot>? BlueFlags = null);
+
+public sealed record RaceAdminLoginRequest(string Password);
+
+public sealed record RaceAdminSessionCommand(
+    RaceSessionPhase Phase,
+    string? SessionName,
+    int? TotalRaceLaps,
+    int? CountdownSeconds,
+    int? QualifyingMinutes);
+
+public sealed record RaceAdminFlagCommand(
+    RaceControlFlag Flag,
+    string? Message,
+    int? SectorIndex = null);
+
+public sealed record RaceAdminRoomSettingsCommand(
+    string SessionName,
+    int TotalRaceLaps,
+    int SectorCount,
+    bool AutomaticYellowEnabled,
+    double SlowSpeedKph,
+    double SlowDurationSeconds,
+    double SevereLateralOffsetMeters,
+    double RecoveryDurationSeconds,
+    bool AllowTeams = true,
+    string? TrackName = null,
+    string? TrackId = null,
+    string? TrackRevision = null,
+    string? TrackPackageHash = null);
+
+public sealed record RaceRoomSettingsSnapshot(
+    string SessionName,
+    int TotalRaceLaps,
+    int SectorCount,
+    bool AutomaticYellowEnabled,
+    double SlowSpeedKph,
+    double SlowDurationSeconds,
+    double SevereLateralOffsetMeters,
+    double RecoveryDurationSeconds,
+    bool AllowTeams = true,
+    string? TrackName = null,
+    string? TrackId = null,
+    string? TrackRevision = null,
+    string? TrackPackageHash = null);
+
+public sealed record RaceAdminPenaltyCommand(
+    Guid ParticipantId,
+    RacePenaltyKind Kind,
+    double? ValueSeconds,
+    int? GridPlaces,
+    string Reason);
+
+public sealed record RaceAdminParticipantCommand(
+    Guid ParticipantId,
+    RaceParticipantStatus Status,
+    string? Reason);
+
+public static partial class RaceProtocolValidation
+{
+    [GeneratedRegex("^#[0-9A-Fa-f]{6}$", RegexOptions.CultureInvariant)]
+    private static partial Regex ThemeColorPattern();
+
+    public static string NormalizeDisplayName(string? value)
+    {
+        var normalized = NormalizeSingleLine(value, RaceProtocol.MaximumDisplayNameLength);
+        if (normalized.Length is < 2 or > RaceProtocol.MaximumDisplayNameLength)
+            throw new ArgumentException($"Display name must contain 2-{RaceProtocol.MaximumDisplayNameLength} characters.", nameof(value));
+        return normalized;
+    }
+
+    public static string? NormalizeTeamName(string? value)
+    {
+        var normalized = NormalizeSingleLine(value, RaceProtocol.MaximumTeamNameLength);
+        return normalized.Length == 0 ? null : normalized;
+    }
+
+    public static string NormalizeThemeColor(string? value)
+    {
+        var normalized = value?.Trim() ?? string.Empty;
+        if (!ThemeColorPattern().IsMatch(normalized))
+            throw new ArgumentException("Theme color must use #RRGGBB format.", nameof(value));
+        return normalized.ToUpperInvariant();
+    }
+
+    public static RaceTelemetryUpdate NormalizeTelemetry(RaceTelemetryUpdate value) => value with
+    {
+        TrackProgress = FiniteClamp(value.TrackProgress, 0, 1),
+        LateralOffsetMeters = FiniteClamp(value.LateralOffsetMeters, -500, 500),
+        MapX = FiniteClamp(value.MapX, 0, 1),
+        MapY = FiniteClamp(value.MapY, 0, 1),
+        SpeedKph = FiniteClamp(value.SpeedKph, 0, 800),
+        CompletedLaps = Math.Clamp(value.CompletedLaps, 0, 9999),
+        CurrentSector = Math.Clamp(value.CurrentSector, 0, 99),
+        CurrentLapSeconds = FiniteClamp(value.CurrentLapSeconds, 0, 86_400),
+        PitServiceElapsedSeconds = FiniteClamp(value.PitServiceElapsedSeconds, 0, 60),
+        CompletedPitServices = Math.Clamp(value.CompletedPitServices, 0, 999)
+    };
+
+    private static string NormalizeSingleLine(string? value, int maximumLength)
+    {
+        var source = value?.Trim() ?? string.Empty;
+        var filtered = new string(source
+            .Where(character => !char.IsControl(character) && character is not '\r' and not '\n')
+            .Take(maximumLength)
+            .ToArray());
+        return string.Join(' ', filtered.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    private static double FiniteClamp(double value, double minimum, double maximum) =>
+        double.IsFinite(value) ? Math.Clamp(value, minimum, maximum) : minimum;
+}

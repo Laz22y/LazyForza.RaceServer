@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\LazyForza.RaceServer.Protocol\LazyForza.RaceServer.Protocol.csproj" />
+    <ProjectReference Include="..\LazyForza.RaceServer.Core\LazyForza.RaceServer.Core.csproj" />
+  </ItemGroup>
+</Project>

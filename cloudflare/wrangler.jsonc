@@ -1,0 +1,39 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "lazyforza-race-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-03",
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS",
+    "run_worker_first": [
+      "/api/*",
+      "/ws",
+      "/health",
+      "/.well-known/*"
+    ]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RACE_ROOM",
+        "class_name": "RaceRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RaceRoom"]
+    }
+  ],
+  "vars": {
+    "SERVER_NAME": "LazyForza 地产赛事",
+    "SESSION_NAME": "地产赛事",
+    "MAXIMUM_PARTICIPANTS": "12",
+    "TOTAL_RACE_LAPS": "10",
+    "TRACK_ID": "",
+    "TRACK_REVISION": "",
+    "TRACK_PACKAGE_HASH": ""
+  }
+}

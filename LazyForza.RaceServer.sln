@@ -1,0 +1,39 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LazyForza.RaceServer.Protocol", "src\LazyForza.RaceServer.Protocol\LazyForza.RaceServer.Protocol.csproj", "{B2000001-2222-4222-8222-222222222221}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LazyForza.RaceServer.Core", "src\LazyForza.RaceServer.Core\LazyForza.RaceServer.Core.csproj", "{B2000002-2222-4222-8222-222222222222}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LazyForza.RaceServer.Web", "src\LazyForza.RaceServer.Web\LazyForza.RaceServer.Web.csproj", "{B2000003-2222-4222-8222-222222222223}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LazyForza.RaceServer.Tests", "tests\LazyForza.RaceServer.Tests\LazyForza.RaceServer.Tests.csproj", "{B2000004-2222-4222-8222-222222222224}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B2000001-2222-4222-8222-222222222221}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B2000001-2222-4222-8222-222222222221}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B2000001-2222-4222-8222-222222222221}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B2000001-2222-4222-8222-222222222221}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B2000002-2222-4222-8222-222222222222}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B2000002-2222-4222-8222-222222222222}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B2000002-2222-4222-8222-222222222222}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B2000002-2222-4222-8222-222222222222}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B2000003-2222-4222-8222-222222222223}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B2000003-2222-4222-8222-222222222223}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B2000003-2222-4222-8222-222222222223}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B2000003-2222-4222-8222-222222222223}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B2000004-2222-4222-8222-222222222224}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B2000004-2222-4222-8222-222222222224}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B2000004-2222-4222-8222-222222222224}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B2000004-2222-4222-8222-222222222224}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

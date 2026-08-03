@@ -1,0 +1,17 @@
+bin/
+obj/
+.packages/
+artifacts/
+data/
+**/data/
+node_modules/
+.wrangler/
+.wrangler-dry-run/
+.vs/
+.idea/
+*.user
+*.suo
+*.db
+*.db-shm
+*.db-wal
+*.log

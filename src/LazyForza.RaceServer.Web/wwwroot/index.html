@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LazyForza 地产赛事总控</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand-mark">LF</div>
+      <div class="brand-copy"><p class="eyebrow">LAZYFORZA RACE CONTROL</p><h1>地产赛事总控</h1></div>
+      <div id="connectionState" class="connection-state"><i></i><span>正在读取服务端状态</span></div>
+    </header>
+
+    <section id="setupPanel" class="auth-panel panel hidden">
+      <div class="auth-intro">
+        <span class="step-mark">首次设置</span>
+        <h2>创建你的赛事房间</h2>
+        <p>这一步只会出现一次。设置完成后，车手使用房间密码加入；网页总控使用另一组密码登录。</p>
+        <ul><li>两个密码不要相同，也不要把总控密码发给参赛车手。</li><li>分段数需要与将要使用的地产赛道一致。</li><li>密码只保存为加盐摘要，不写入网页或赛事日志。</li></ul>
+      </div>
+      <form id="setupForm" class="auth-form">
+        <div class="form-grid two">
+          <label>赛事名称<input id="setupSessionName" maxlength="64" value="地产赛事" required></label>
+          <label>赛道分段数<input id="setupSectorCount" type="number" min="1" max="20" value="3" required></label>
+          <label>正赛圈数<input id="setupRaceLaps" type="number" min="1" max="999" value="10" required></label>
+          <span></span>
+          <label>房间密码（可留空）<input id="setupPlayerPassword" type="password" maxlength="128" autocomplete="new-password"></label>
+          <label>总控密码<input id="setupAdminPassword" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
+        </div>
+        <button type="submit" class="primary wide">保存并启用房间</button>
+        <p id="setupError" class="form-error" aria-live="polite"></p>
+      </form>
+    </section>
+
+    <section id="loginPanel" class="auth-panel panel hidden">
+      <div class="auth-intro"><span class="step-mark">赛事总控</span><h2>登录控制台</h2><p>请输入首次设置时保存的总控密码。参赛车手使用的是另一组房间密码。</p></div>
+      <form id="loginForm" class="auth-form compact-form">
+        <label>总控密码<input id="adminPassword" type="password" autocomplete="current-password" required></label>
+        <button type="submit" class="primary">登录总控</button>
+        <p id="loginError" class="form-error" aria-live="polite"></p>
+      </form>
+    </section>
+
+    <div id="dashboard" class="dashboard hidden">
+      <section id="raceBanner" class="race-banner hidden" aria-live="polite"><span id="bannerKind" class="banner-kind">INFO</span><strong id="bannerTitle"></strong><span id="bannerDetail"></span></section>
+
+      <section class="summary-grid">
+        <article class="panel summary-card phase-card"><p class="label">赛事阶段</p><strong id="phaseValue">—</strong><span id="sessionValue">—</span></article>
+        <article id="flagCard" class="panel summary-card flag-card green"><p class="label">赛道旗语</p><strong id="flagValue">GREEN</strong><span id="flagMessage">赛道正常</span></article>
+        <article class="panel summary-card"><p class="label">在线车手</p><strong><span id="onlineValue">0</span><small> / 12</small></strong><span id="readyValue">0 人已准备</span></article>
+        <article class="panel summary-card fastest-card"><p class="label">本场最快圈</p><strong id="fastestValue">—</strong><span id="fastestDriver">尚无有效圈</span></article>
+      </section>
+
+      <section class="control-grid">
+        <article class="panel controls room-settings">
+          <div class="section-heading"><div><p class="eyebrow">ROOM SETTINGS</p><h2>房间设置</h2></div><span id="settingsSaved" class="save-state"></span></div>
+          <div class="field-grid room-fields">
+            <label>赛事名称<input id="sessionName" maxlength="64"></label>
+            <label>正赛圈数<input id="raceLaps" type="number" min="1" max="999"></label>
+            <label>赛道分段数<input id="sectorCount" type="number" min="1" max="20"></label>
+            <label class="toggle"><input id="automaticYellow" type="checkbox"><span>启用自动黄旗</span></label>
+          </div>
+          <div class="field-grid room-fields">
+            <label class="toggle"><input id="allowTeams" type="checkbox"><span>允许车队</span></label>
+            <label>赛道名称<input id="trackName" maxlength="128" placeholder="例如：英国塔俱乐部环道"></label>
+            <label>赛道标识<input id="trackId" maxlength="128" placeholder="导出时显示的 UUID"></label>
+            <label>赛道数据 SHA-256<input id="trackPackageHash" maxlength="128" placeholder="导出时显示的 64 位摘要"></label>
+          </div>
+          <details>
+            <summary>自动黄旗判定</summary>
+            <div class="field-grid hazard-fields">
+              <label>极低速阈值 km/h<input id="slowSpeedKph" type="number" min="3" max="50" step="1"></label>
+              <label>低速持续秒数<input id="slowDurationSeconds" type="number" min="1" max="15" step="0.5"></label>
+              <label>严重偏离距离 m<input id="severeLateralOffsetMeters" type="number" min="5" max="200" step="1"></label>
+              <label>恢复确认秒数<input id="recoveryDurationSeconds" type="number" min="1" max="15" step="0.5"></label>
+            </div>
+          </details>
+          <button id="saveSettings" class="primary align-start">保存房间设置</button>
+          <p class="muted compact">赛事名称与规则不会再被实时刷新覆盖。发车后需要先返回大厅，才能修改圈数、分段和自动黄旗参数。</p>
+        </article>
+
+        <article class="panel controls session-flow">
+          <div class="section-heading"><div><p class="eyebrow">SESSION</p><h2>比赛流程</h2></div></div>
+          <div class="form-grid two slim">
+            <label>排位时长（分钟）<input id="qualifyingMinutes" type="number" min="1" max="180" value="10"></label>
+            <label>发车倒计时（秒）<input id="countdownSeconds" type="number" min="3" max="60" value="10"></label>
+          </div>
+          <div class="button-grid"><button data-session="lobby">返回大厅</button><button data-session="qualifying" class="accent">开始排位</button><button data-session="grid">冻结排位</button><button data-session="countdown" class="primary">开始倒计时</button></div>
+          <p class="muted compact">方格旗不需要人工操作：领跑者完成预定圈数时自动亮起，其他车手在随后第一次过线时完成比赛。</p>
+        </article>
+      </section>
+
+      <section class="panel flag-control controls">
+        <div class="section-heading"><div><p class="eyebrow">TRACK STATUS</p><h2>旗语与赛道状态</h2></div><span class="auto-note">自动黄旗会在故障解除后恢复</span></div>
+        <div class="flag-form">
+          <label>作用范围<select id="flagSector"><option value="all">全场</option></select></label>
+          <label>旗语说明<input id="flagReason" maxlength="160" placeholder="例如：第 2 分段有车辆停在赛道上"></label>
+          <div class="flag-buttons"><button data-flag="green" class="flag-green">恢复绿旗</button><button data-flag="yellow" class="flag-yellow">发布黄旗</button><button data-flag="red" class="flag-red">发布红旗</button></div>
+        </div>
+        <div id="yellowZones" class="zone-list"><span class="zone-empty">当前没有黄旗分区</span></div>
+        <p class="muted compact">选择某个分段后，黄旗和绿旗只影响该分段；选择“全场”则发布或解除全场人工黄旗。红旗始终作用于全场。自动黄旗与人工黄旗分别保存。</p>
+      </section>
+
+      <section class="panel timing-panel">
+        <div class="section-heading"><div><p class="eyebrow">LIVE TIMING</p><h2>实时排名与赛事管理</h2></div><button id="logoutButton" class="quiet">退出总控</button></div>
+        <div class="table-wrap"><table><thead><tr><th>排名</th><th>车手</th><th>状态</th><th>圈数</th><th>当前圈</th><th>最快圈</th><th>差距</th><th>管理</th></tr></thead><tbody id="timingRows"></tbody></table></div>
+        <p id="actionError" class="form-error" aria-live="polite"></p>
+      </section>
+    </div>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>
