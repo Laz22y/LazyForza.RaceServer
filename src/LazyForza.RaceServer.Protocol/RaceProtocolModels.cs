@@ -6,7 +6,7 @@ namespace LazyForza.RaceServer.Protocol;
 
 public static class RaceProtocol
 {
-    public const int CurrentVersion = 1;
+    public const int CurrentVersion = 2;
     public const int MaximumParticipants = 12;
     public const int MaximumMessageBytes = 64 * 1024;
     public const int MaximumDisplayNameLength = 20;
@@ -18,6 +18,8 @@ public enum RaceSessionPhase
     Lobby,
     Qualifying,
     Grid,
+    OutLap,
+    FormationLap,
     Countdown,
     Race,
     Suspended,
@@ -207,7 +209,8 @@ public sealed record RaceParticipantSnapshot(
     RaceGripCondition GripCondition,
     IReadOnlyList<double?> BestSectorSeconds,
     IReadOnlyList<RacePenaltySnapshot> Penalties,
-    DateTimeOffset LastSeenAt);
+    DateTimeOffset LastSeenAt,
+    bool QualifyingFinalLapPending = false);
 
 public sealed record RaceBannerSnapshot(
     Guid Id,
@@ -252,7 +255,11 @@ public sealed record RaceSessionSnapshot(
     int SectorCount = 0,
     bool AllowTeams = true,
     string? TrackName = null,
-    IReadOnlyList<RaceBlueFlagSnapshot>? BlueFlags = null);
+    IReadOnlyList<RaceBlueFlagSnapshot>? BlueFlags = null,
+    DateTimeOffset? StartSequenceAt = null,
+    int IlluminatedStartLights = 0,
+    bool StartLightsOut = false,
+    bool QualifyingTimeExpired = false);
 
 public sealed record RaceAdminLoginRequest(string Password);
 

@@ -3,7 +3,7 @@ const loginPanel=$('#loginPanel'),setupPanel=$('#setupPanel'),dashboard=$('#dash
 const loginError=$('#loginError'),setupError=$('#setupError'),actionError=$('#actionError');
 const connectionState=$('#connectionState span'),timingRows=$('#timingRows');
 let polling=null;
-const phaseLabels={lobby:'大厅',qualifying:'排位赛',grid:'发车区',countdown:'发车倒计时',race:'正赛',suspended:'比赛暂停',finished:'比赛结束'};
+const phaseLabels={lobby:'大厅',qualifying:'排位赛',grid:'发车区',outLap:'出场圈',formationLap:'暖胎圈',countdown:'五盏红灯',race:'正赛',suspended:'比赛暂停',finished:'比赛结束'};
 const statusLabels={connected:'已连接',ready:'已准备',onTrack:'赛道上',inPitLane:'维修区通道',inService:'正在维修',finished:'已完赛',didNotFinish:'退赛',disqualified:'取消资格',disconnected:'已掉线'};
 const flagLabels={green:'GREEN',yellow:'YELLOW',red:'RED',chequered:'CHEQUERED'};
 

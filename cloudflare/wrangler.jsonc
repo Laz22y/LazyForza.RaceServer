@@ -31,9 +31,6 @@
     "SERVER_NAME": "LazyForza 地产赛事",
     "SESSION_NAME": "地产赛事",
     "MAXIMUM_PARTICIPANTS": "12",
-    "TOTAL_RACE_LAPS": "10",
-    "TRACK_ID": "",
-    "TRACK_REVISION": "",
-    "TRACK_PACKAGE_HASH": ""
+    "TOTAL_RACE_LAPS": "10"
   }
 }

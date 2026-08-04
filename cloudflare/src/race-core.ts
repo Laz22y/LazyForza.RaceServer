@@ -78,6 +78,11 @@ interface ParticipantState {
   automaticYellowActive?: boolean;
   automaticYellowSector?: number;
   automaticYellowReason?: string | null;
+  qualifyingFinalLapPending?: boolean;
+  falseStartArmedAt?: string | null;
+  falseStartReferenceProgress?: number | null;
+  falseStartMovementStartedAt?: string | null;
+  falseStartPenalized?: boolean;
 }
 
 export interface StoredRaceState {
@@ -89,7 +94,11 @@ export interface StoredRaceState {
   flagMessage?: string | null;
   totalRaceLaps: number;
   startsAt?: string | null;
+  startSequenceAt?: string | null;
+  illuminatedStartLights: number;
+  startLightsOut: boolean;
   qualifyingEndsAt?: string | null;
+  qualifyingTimeExpired: boolean;
   banner?: BannerSnapshot | null;
   participants: ParticipantState[];
   penalties: PenaltySnapshot[];
@@ -137,7 +146,11 @@ export class RaceCore {
       flagMessage: null,
       totalRaceLaps: clampInteger(configuration.totalRaceLaps, 1, 999),
       startsAt: null,
+      startSequenceAt: null,
+      illuminatedStartLights: 0,
+      startLightsOut: false,
       qualifyingEndsAt: null,
+      qualifyingTimeExpired: false,
       banner: null,
       participants: [],
       penalties: [],
@@ -228,7 +241,12 @@ export class RaceCore {
       pitServiceElapsedSeconds: 0,
       pitServiceRequirementMet: false,
       completedPitServices: 0,
-      gripCondition: "unknown"
+      gripCondition: "unknown",
+      qualifyingFinalLapPending: false,
+      falseStartArmedAt: null,
+      falseStartReferenceProgress: null,
+      falseStartMovementStartedAt: null,
+      falseStartPenalized: false
     };
     this.state.participants.push(participant);
     this.touch();
@@ -244,6 +262,8 @@ export class RaceCore {
     participant.hazardCandidateStartedAt = null;
     participant.hazardRecoveryStartedAt = null;
     participant.lastSeenAt = now.toISOString();
+    participant.qualifyingFinalLapPending = false;
+    this.completeQualifyingIfReady(now);
     this.refreshYellowFlag(now);
     this.touch();
     return true;
@@ -295,6 +315,7 @@ export class RaceCore {
         ? "inService"
         : participant.isInPitLane ? "inPitLane" : "onTrack";
     }
+    this.evaluateFalseStart(participant, now);
     this.evaluateAutomaticYellow(participant, now);
     this.refreshYellowFlag(now);
     // completedLaps is deliberately ignored. Only a unique, valid lap event
@@ -307,6 +328,8 @@ export class RaceCore {
     if (!participant) return rejected("车手不存在。");
     if (this.state.phase !== "qualifying" && this.state.phase !== "race")
       return rejected("当前阶段不接收圈速成绩。");
+    if (this.state.phase === "qualifying" && this.state.qualifyingTimeExpired && !participant.qualifyingFinalLapPending)
+      return rejected("排位赛计时已结束，该车手没有待完成的最后一圈。");
     const eventId = cleanText(completed.eventId, 80);
     if (!eventId) return rejected("圈速事件编号无效。");
     if (this.state.receivedLapEvents.includes(eventId)) return accepted();
@@ -314,10 +337,12 @@ export class RaceCore {
     if (this.state.receivedLapEvents.length > 20_000)
       this.state.receivedLapEvents.splice(0, this.state.receivedLapEvents.length - 10_000);
     if (!completed.isValid) {
+      participant.qualifyingFinalLapPending = false;
+      this.completeQualifyingIfReady(now);
       this.touch();
       return accepted();
     }
-    if (!Number.isFinite(completed.lapSeconds) || completed.lapSeconds < 5 || completed.lapSeconds > 7_200)
+    if (!Number.isFinite(completed.lapSeconds) || completed.lapSeconds < 3 || completed.lapSeconds > 21_600)
       return rejected("圈速数值超出有效范围。");
 
     const priorFastest = this.fastestLap();
@@ -330,6 +355,7 @@ export class RaceCore {
     participant.currentSector = 0;
     participant.lastSeenAt = now.toISOString();
     this.updateBestSectors(participant, completed.sectorSeconds);
+    participant.qualifyingFinalLapPending = false;
 
     const newFastest = this.fastestLap();
     if (newFastest && (!priorFastest || newFastest.time < priorFastest.time - 0.0005)) {
@@ -357,6 +383,7 @@ export class RaceCore {
       if (this.state.flag === "chequered" && classified.every(candidate => candidate.status === "finished"))
         this.state.phase = "finished";
     }
+    this.completeQualifyingIfReady(now);
     this.touch();
     return accepted();
   }
@@ -380,7 +407,7 @@ export class RaceCore {
   }
 
   applyRoomSettings(command: RoomSettings, now = new Date()): CommandResult {
-    if (["countdown", "race", "suspended"].includes(this.state.phase))
+    if (["outLap", "formationLap", "countdown", "race", "suspended"].includes(this.state.phase))
       return rejected("发车后不能修改房间规则。请先返回大厅。");
     const sessionName = cleanText(command.sessionName, 64);
     if (!sessionName) return rejected("赛事名称不能为空。");
@@ -437,6 +464,7 @@ export class RaceCore {
         this.resetCompetitiveState();
         this.state.phase = "qualifying";
         this.state.flag = "green";
+        this.state.qualifyingTimeExpired = false;
         this.state.qualifyingEndsAt = new Date(
           now.getTime() + clampInteger(command.qualifyingMinutes ?? 10, 1, 180) * 60_000).toISOString();
         for (const participant of this.state.participants) {
@@ -448,24 +476,46 @@ export class RaceCore {
       case "grid":
         this.state.phase = "grid";
         this.state.qualifyingEndsAt = null;
+        this.state.qualifyingTimeExpired = false;
         this.state.flag = "green";
-        for (const participant of this.state.participants.filter(candidate => candidate.isConnected))
+        for (const participant of this.state.participants.filter(candidate => candidate.isConnected)) {
           participant.status = "ready";
+          participant.qualifyingFinalLapPending = false;
+        }
+        break;
+      case "outLap":
+        this.prepareRace();
+        this.state.phase = "outLap";
+        this.state.flag = "green";
+        this.state.banner = this.newBanner("information", "出场圈", "按总控指令驶离维修区，前往发车准备位置。", null, 6_000, now);
+        break;
+      case "formationLap":
+        if (this.state.phase !== "outLap") this.prepareRace();
+        this.state.phase = "formationLap";
+        this.state.flag = "green";
+        this.state.banner = this.newBanner("information", "暖胎圈", "保持队列，返回发车位置。", null, 6_000, now);
         break;
       case "countdown":
         this.prepareRace();
         this.state.phase = "countdown";
         this.state.flag = "green";
-        this.state.startsAt = new Date(
-          now.getTime() + clampInteger(command.countdownSeconds ?? 10, 3, 60) * 1_000).toISOString();
+        this.state.startSequenceAt = new Date(
+          now.getTime() + clampInteger(command.countdownSeconds ?? 10, 0, 120) * 1_000).toISOString();
+        const randomHoldMilliseconds = randomInteger(1_000, 4_000);
+        this.state.startsAt = new Date(Date.parse(this.state.startSequenceAt) + 4_000 + randomHoldMilliseconds).toISOString();
+        this.state.illuminatedStartLights = 0;
+        this.state.startLightsOut = false;
         this.state.banner = this.newBanner(
-          "information", "准备发车", `${this.state.totalRaceLaps} 圈`, null,
-          Date.parse(this.state.startsAt) - now.getTime(), now);
+          "information", "准备发车", `首盏红灯将在 ${clampInteger(command.countdownSeconds ?? 10, 0, 120)} 秒后亮起`, null,
+          Math.max(1_000, Date.parse(this.state.startSequenceAt) - now.getTime()), now);
         break;
       case "race":
         if (this.state.phase !== "countdown") this.prepareRace();
         this.state.phase = "race";
         this.state.startsAt = now.toISOString();
+        this.state.startSequenceAt = null;
+        this.state.illuminatedStartLights = 0;
+        this.state.startLightsOut = true;
         this.state.flag = "green";
         this.state.banner = this.newBanner("information", "比赛开始", this.state.sessionName, null, 4_000, now);
         break;
@@ -558,19 +608,37 @@ export class RaceCore {
 
   tick(now = new Date()): boolean {
     let changed = false;
-    if (this.state.phase === "countdown" && this.state.startsAt && now.getTime() >= Date.parse(this.state.startsAt)) {
-      this.state.phase = "race";
-      this.state.flag = "green";
-      this.state.banner = this.newBanner("information", "比赛开始", this.state.sessionName, null, 4_000, now);
-      changed = true;
-    } else if (this.state.phase === "qualifying" && this.state.qualifyingEndsAt &&
-               now.getTime() >= Date.parse(this.state.qualifyingEndsAt)) {
-      this.state.phase = "grid";
+    if (this.state.phase === "countdown" && this.state.startsAt && this.state.startSequenceAt) {
+      if (now.getTime() >= Date.parse(this.state.startsAt)) {
+        this.state.phase = "race";
+        this.state.flag = "green";
+        this.state.illuminatedStartLights = 0;
+        this.state.startLightsOut = true;
+        this.state.banner = this.newBanner("information", "比赛开始", this.state.sessionName, null, 4_000, now);
+        changed = true;
+      } else {
+        const nextLights = calculateIlluminatedStartLights(now, new Date(this.state.startSequenceAt));
+        if (nextLights !== this.state.illuminatedStartLights) {
+          this.state.illuminatedStartLights = nextLights;
+          if (nextLights > 0) this.armFalseStartDetection(now);
+          changed = true;
+        }
+      }
+    }
+    if (this.state.phase === "qualifying" && !this.state.qualifyingTimeExpired && this.state.qualifyingEndsAt &&
+        now.getTime() >= Date.parse(this.state.qualifyingEndsAt)) {
       this.state.flag = "chequered";
-      this.state.qualifyingEndsAt = null;
-      this.state.banner = this.newBanner("chequeredFlag", "排位赛结束", "成绩已冻结", null, 8_000, now);
+      this.state.qualifyingTimeExpired = true;
+      for (const participant of this.state.participants)
+        participant.qualifyingFinalLapPending = this.eligibleForFinalQualifyingLap(participant);
+      const pendingCount = this.state.participants.filter(participant => participant.qualifyingFinalLapPending).length;
+      this.state.banner = this.newBanner(
+        "chequeredFlag", "排位赛计时结束",
+        pendingCount > 0 ? `仍有 ${pendingCount} 名车手可完成最后飞驰圈` : "成绩已冻结", null, 8_000, now);
+      this.completeQualifyingIfReady(now);
       changed = true;
-    } else if (this.state.banner?.expiresAt && now.getTime() >= Date.parse(this.state.banner.expiresAt)) {
+    }
+    if (this.state.banner?.expiresAt && now.getTime() >= Date.parse(this.state.banner.expiresAt)) {
       this.state.banner = null;
       changed = true;
     }
@@ -579,10 +647,18 @@ export class RaceCore {
   }
 
   nextAlarmMilliseconds(): number | null {
-    const values = [this.state.startsAt, this.state.qualifyingEndsAt, this.state.banner?.expiresAt]
+    const values = [
+      this.state.phase === "countdown" ? this.state.startsAt : null,
+      this.state.phase === "qualifying" && !this.state.qualifyingTimeExpired ? this.state.qualifyingEndsAt : null,
+      this.state.banner?.expiresAt
+    ]
       .filter((value): value is string => Boolean(value))
       .map(value => Date.parse(value))
       .filter(Number.isFinite);
+    if (this.state.phase === "countdown" && this.state.startSequenceAt && this.state.illuminatedStartLights < 5) {
+      const sequenceAt = Date.parse(this.state.startSequenceAt);
+      values.push(sequenceAt + this.state.illuminatedStartLights * 1_000);
+    }
     return values.length === 0 ? null : Math.min(...values);
   }
 
@@ -623,7 +699,8 @@ export class RaceCore {
         bestSectorSeconds: [...participant.bestSectorSeconds],
         penalties: this.state.penalties.filter(penalty =>
           penalty.participantId === participant.id && !penalty.isRevoked),
-        lastSeenAt: participant.lastSeenAt
+        lastSeenAt: participant.lastSeenAt,
+        qualifyingFinalLapPending: participant.qualifyingFinalLapPending ?? false
       };
       if (comparable !== null) priorComparable = comparable;
       return result;
@@ -640,7 +717,11 @@ export class RaceCore {
       trackPackageHash: this.state.trackPackageHash,
       totalRaceLaps: this.state.totalRaceLaps,
       startsAt: this.state.startsAt,
+      startSequenceAt: this.state.startSequenceAt,
+      illuminatedStartLights: this.state.illuminatedStartLights,
+      startLightsOut: this.state.startLightsOut,
       qualifyingEndsAt: this.state.qualifyingEndsAt,
+      qualifyingTimeExpired: this.state.qualifyingTimeExpired,
       fastestParticipantId: fastest?.participant.id ?? null,
       fastestLapSeconds: fastest?.time ?? null,
       fastestSectorSeconds: this.fastestSectors(),
@@ -664,9 +745,20 @@ export class RaceCore {
       phaseBeforeSuspension: stored.phaseBeforeSuspension ?? "race",
       totalRaceLaps: clampInteger(stored.totalRaceLaps, 1, 999),
       startsAt: stored.startsAt ?? null,
+      startSequenceAt: stored.startSequenceAt ?? null,
+      illuminatedStartLights: clampInteger(stored.illuminatedStartLights ?? 0, 0, 5),
+      startLightsOut: stored.startLightsOut ?? false,
       qualifyingEndsAt: stored.qualifyingEndsAt ?? null,
+      qualifyingTimeExpired: stored.qualifyingTimeExpired ?? false,
       banner: stored.banner ?? null,
-      participants: Array.isArray(stored.participants) ? stored.participants.slice(0, 12) : [],
+      participants: Array.isArray(stored.participants) ? stored.participants.slice(0, 12).map(participant => ({
+        ...participant,
+        qualifyingFinalLapPending: participant.qualifyingFinalLapPending ?? false,
+        falseStartArmedAt: participant.falseStartArmedAt ?? null,
+        falseStartReferenceProgress: participant.falseStartReferenceProgress ?? null,
+        falseStartMovementStartedAt: participant.falseStartMovementStartedAt ?? null,
+        falseStartPenalized: participant.falseStartPenalized ?? false
+      })) : [],
       penalties: Array.isArray(stored.penalties) ? stored.penalties : [],
       receivedLapEvents: Array.isArray(stored.receivedLapEvents) ? stored.receivedLapEvents.slice(-10_000) : []
       ,sectorCount: clampInteger(stored.sectorCount ?? 3, 1, 20)
@@ -792,6 +884,60 @@ export class RaceCore {
     return flags;
   }
 
+  private armFalseStartDetection(now: Date): void {
+    for (const participant of this.state.participants) {
+      participant.falseStartArmedAt = now.toISOString();
+      participant.falseStartReferenceProgress = participant.trackProgress;
+      participant.falseStartMovementStartedAt = null;
+      participant.falseStartPenalized = false;
+    }
+  }
+
+  private evaluateFalseStart(participant: ParticipantState, now: Date): void {
+    if (this.state.phase !== "countdown" || !this.state.startSequenceAt || !this.state.startsAt ||
+        now.getTime() < Date.parse(this.state.startSequenceAt) || now.getTime() >= Date.parse(this.state.startsAt) ||
+        participant.falseStartPenalized || participant.isInPitLane || participant.isInServiceZone ||
+        participant.status === "disqualified" || participant.status === "disconnected") return;
+    participant.falseStartReferenceProgress ??= participant.trackProgress;
+    let delta = participant.trackProgress - participant.falseStartReferenceProgress;
+    if (delta > .5) delta -= 1;
+    else if (delta < -.5) delta += 1;
+    const forwardProgress = Math.max(0, delta);
+    if (participant.speedKph < 5 && forwardProgress < .0008) {
+      participant.falseStartMovementStartedAt = null;
+      return;
+    }
+    participant.falseStartMovementStartedAt ??= now.toISOString();
+    if (forwardProgress < .002 && now.getTime() - Date.parse(participant.falseStartMovementStartedAt) < 250) return;
+    participant.falseStartPenalized = true;
+    const penalty: PenaltySnapshot = {
+      id: crypto.randomUUID(), participantId: participant.id, kind: "time", valueSeconds: 5, gridPlaces: null,
+      reason: "抢跑：五盏红灯熄灭前车辆已经移动", issuedAt: now.toISOString(), isServed: false, isRevoked: false
+    };
+    this.state.penalties.push(penalty);
+    this.state.banner = this.newBanner("penalty", `抢跑 · ${participant.displayName}`, "自动加罚 5 秒", participant.id, 8_000, now);
+    this.touch();
+  }
+
+  private eligibleForFinalQualifyingLap(participant: ParticipantState): boolean {
+    return participant.isConnected && !participant.isInPitLane && !participant.isInServiceZone &&
+      participant.currentLapSeconds > .05 && participant.status !== "disqualified" &&
+      participant.status !== "didNotFinish" && participant.status !== "disconnected";
+  }
+
+  private completeQualifyingIfReady(now: Date): void {
+    if (this.state.phase !== "qualifying" || !this.state.qualifyingTimeExpired ||
+        this.state.participants.some(participant => participant.qualifyingFinalLapPending)) return;
+    this.state.phase = "grid";
+    this.state.flag = "green";
+    this.state.flagMessage = null;
+    this.state.qualifyingEndsAt = null;
+    this.state.qualifyingTimeExpired = false;
+    for (const participant of this.state.participants.filter(candidate => candidate.isConnected))
+      participant.status = "ready";
+    this.state.banner ??= this.newBanner("chequeredFlag", "排位赛结束", "成绩已冻结", null, 8_000, now);
+  }
+
   private clearYellowState(): void {
     this.state.manualFullCourseYellow = null;
     this.state.manualSectorYellows = {};
@@ -805,7 +951,11 @@ export class RaceCore {
   private prepareRace(): void {
     this.clearYellowState();
     this.state.startsAt = null;
+    this.state.startSequenceAt = null;
+    this.state.illuminatedStartLights = 0;
+    this.state.startLightsOut = false;
     this.state.qualifyingEndsAt = null;
+    this.state.qualifyingTimeExpired = false;
     this.state.banner = null;
     this.state.receivedLapEvents = [];
     for (const participant of this.state.participants) this.resetParticipant(participant, true);
@@ -816,7 +966,11 @@ export class RaceCore {
     this.state.penalties = [];
     this.state.receivedLapEvents = [];
     this.state.startsAt = null;
+    this.state.startSequenceAt = null;
+    this.state.illuminatedStartLights = 0;
+    this.state.startLightsOut = false;
     this.state.qualifyingEndsAt = null;
+    this.state.qualifyingTimeExpired = false;
     this.state.banner = null;
     for (const participant of this.state.participants) this.resetParticipant(participant, false);
   }
@@ -839,6 +993,11 @@ export class RaceCore {
     participant.automaticYellowActive = false;
     participant.hazardCandidateStartedAt = null;
     participant.hazardRecoveryStartedAt = null;
+    participant.qualifyingFinalLapPending = false;
+    participant.falseStartArmedAt = null;
+    participant.falseStartReferenceProgress = null;
+    participant.falseStartMovementStartedAt = null;
+    participant.falseStartPenalized = false;
     participant.status = participant.isConnected ? (onTrack ? "onTrack" : "connected") : "disconnected";
   }
 
@@ -883,7 +1042,7 @@ export class RaceCore {
         return left.bestLapSeconds - right.bestLapSeconds || left.joinedAt.localeCompare(right.joinedAt);
       });
     }
-    if (["race", "countdown", "suspended", "finished"].includes(this.state.phase)) {
+    if (["outLap", "formationLap", "race", "countdown", "suspended", "finished"].includes(this.state.phase)) {
       return participants.sort((left, right) =>
         terminalRank(left.status) - terminalRank(right.status) ||
         compareNullableText(left.status === "finished" ? left.finishedAt : null,
@@ -946,6 +1105,15 @@ function createResumeToken(): string {
   const bytes = new Uint8Array(24);
   crypto.getRandomValues(bytes);
   return [...bytes].map(value => value.toString(16).padStart(2, "0")).join("");
+}
+function calculateIlluminatedStartLights(now: Date, sequenceAt: Date): number {
+  if (now.getTime() < sequenceAt.getTime()) return 0;
+  return clampInteger(Math.floor((now.getTime() - sequenceAt.getTime()) / 1_000) + 1, 1, 5);
+}
+function randomInteger(minimum: number, maximum: number): number {
+  const values = new Uint32Array(1);
+  crypto.getRandomValues(values);
+  return minimum + values[0] % (maximum - minimum + 1);
 }
 function formatLap(seconds: number): string {
   const minutes = Math.floor(seconds / 60);

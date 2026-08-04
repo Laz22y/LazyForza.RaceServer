@@ -1,11 +1,11 @@
 # Cloudflare Durable Objects 部署
 
-这个目录提供与 LazyForza 地产赛事客户端协议 v1 兼容的 Cloudflare Workers + Durable Objects 服务端。一个 Worker 固定使用一个名为 `main` 的赛事房间，支持 1–12 名车手。
+这个目录提供与 LazyForza 地产赛事客户端协议 v2 兼容的 Cloudflare Workers + Durable Objects 服务端。一个 Worker 固定使用一个名为 `main` 的赛事房间，支持 1–12 名车手。
 
 实现范围：
 
 - 比赛密码、总控密码、显示名、主题色、可选车队和断线恢复；
-- 大厅、排位赛、发车倒计时、正赛、红旗暂停、自动方格旗；
+- 大厅、排位赛最后飞驰圈、出场圈、暖胎圈、五盏红灯随机熄灭发车、抢跑自动加罚、正赛、红旗暂停和自动方格旗；
 - 全场最快圈、排名、排位/正赛自动黄旗、人工分区/全场黄旗、自动蓝旗、处罚、DNF/DSQ、维修停留进度；
 - WebSocket Hibernation，空闲连接不要求 Worker 一直驻留；
 - SQLite 后端 Durable Object 保存关键赛事状态；
@@ -21,7 +21,7 @@
 
 Cloudflare 会把这个公开模板复制到你的 GitHub 或 GitLab 账号，自动创建 Durable Object 绑定并配置后续提交的构建部署。`cloudflare` 子目录已包含 Worker、依赖锁文件和控制面板静态资源，不依赖仓库上级目录。
 
-部署完成后直接打开 Cloudflare 分配的域名。网页第一次打开会要求设置房间密码、总控密码、圈数和赛道分段数；房间密码没有最少位数限制，总控密码仍需 8–128 个字符，密码只以加盐摘要保存在 Durable Object 中。完成设置后，把域名与房间密码发给车手，总控密码只由赛事管理员保留。
+部署完成后直接打开 Cloudflare 分配的域名。网页第一次打开只需要设置密码和房间基础规则，不要求填写赛道文件信息；房间密码没有最少位数限制，总控密码仍需 8–128 个字符，密码只以加盐摘要保存在 Durable Object 中。初始化完成后，再到总控页面填写 LazyForza 显示的赛道名称、标识和 SHA-256。完成设置后，把域名与房间密码发给车手，总控密码只由赛事管理员保留。
 
 ## PowerShell 部署
 
@@ -41,13 +41,14 @@ Cloudflare 会把这个公开模板复制到你的 GitHub 或 GitLab 账号，�
 
 首次部署后，Wrangler 会输出 `workers.dev` 地址。这个脚本会预先写入两组 Secret，因此打开网页后可以直接使用总控密码登录，不会再次出现首次设置页。
 
-## 赛道锁定与初始参数
+## 初始参数与赛道锁定
 
 编辑 `wrangler.jsonc` 的 `vars`：
 
 - `MAXIMUM_PARTICIPANTS`：服务端仍会强制限制在 1–12；
 - `TOTAL_RACE_LAPS`：初始正赛圈数，可在总控中保存修改；
-- 赛道身份建议直接在网页总控填写；LazyForza 导出 `.lfzestate` 后会显示准确的赛道名称、标识和数据 SHA-256；
+- 一键部署和首次初始化都不要求赛道文件信息；初始化后在网页总控填写即可；
+- LazyForza 的“赛事信息”按钮以及 `.lfzestate` 导出完成窗口都会显示可复制的赛道名称、标识和数据 SHA-256；
 - `SERVER_NAME`、`SESSION_NAME`：服务名和初始赛事名。
 
 修改非 Secret 配置后重新运行部署脚本即可。更新密码可单独执行：

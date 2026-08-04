@@ -86,9 +86,10 @@
           <div class="section-heading"><div><p class="eyebrow">SESSION</p><h2>比赛流程</h2></div></div>
           <div class="form-grid two slim">
             <label>排位时长（分钟）<input id="qualifyingMinutes" type="number" min="1" max="180" value="10"></label>
-            <label>发车倒计时（秒）<input id="countdownSeconds" type="number" min="3" max="60" value="10"></label>
+            <label>首盏红灯前倒计时（秒）<input id="countdownSeconds" type="number" min="0" max="120" value="10"></label>
           </div>
-          <div class="button-grid"><button data-session="lobby">返回大厅</button><button data-session="qualifying" class="accent">开始排位</button><button data-session="grid">冻结排位</button><button data-session="countdown" class="primary">开始倒计时</button></div>
+          <div class="button-grid"><button data-session="lobby">返回大厅</button><button data-session="qualifying" class="accent">开始排位</button><button data-session="grid">冻结排位</button><button data-session="outLap">下发出场圈</button><button data-session="formationLap">下发暖胎圈</button><button data-session="countdown" class="primary">启动发车程序</button></div>
+          <p class="muted compact">倒计时结束后首盏红灯亮起，五盏红灯每秒依次点亮；全部亮起后会在 1–4 秒内随机熄灭并开始正赛。</p>
           <p class="muted compact">方格旗不需要人工操作：领跑者完成预定圈数时自动亮起，其他车手在随后第一次过线时完成比赛。</p>
         </article>
       </section>

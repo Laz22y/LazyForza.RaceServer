@@ -188,6 +188,58 @@ describe("RaceCore", () => {
     expect(core.snapshot().flag).toBe("yellow");
     expect(core.snapshot().banner?.kind).not.toBe("yellowFlag");
   });
+
+  it("runs out lap, formation lap and the five-light start sequence", () => {
+    const core = createCore();
+    connect(core, "甲");
+    expect(core.applySession({ phase: "outLap" }).ok).toBe(true);
+    expect(core.applySession({ phase: "formationLap" }).ok).toBe(true);
+    const now = new Date("2026-08-04T10:00:00Z");
+    expect(core.applySession({ phase: "countdown", countdownSeconds: 0 }, now).ok).toBe(true);
+    const start = core.snapshot(now);
+    expect(start.startSequenceAt).toBe(now.toISOString());
+    const duration = Date.parse(start.startsAt!) - Date.parse(start.startSequenceAt!);
+    expect(duration).toBeGreaterThanOrEqual(5_000);
+    expect(duration).toBeLessThanOrEqual(8_000);
+    core.tick(now);
+    expect(core.snapshot(now).illuminatedStartLights).toBe(1);
+    core.tick(new Date(now.getTime() + 4_100));
+    expect(core.snapshot().illuminatedStartLights).toBe(5);
+    core.tick(new Date(Date.parse(start.startsAt!) + 1));
+    expect(core.snapshot().phase).toBe("race");
+    expect(core.snapshot().startLightsOut).toBe(true);
+  });
+
+  it("penalizes a false start once", () => {
+    const core = createCore();
+    const participantId = connect(core, "甲");
+    const now = new Date("2026-08-04T10:00:00Z");
+    core.applySession({ phase: "countdown", countdownSeconds: 0 }, now);
+    core.tick(now);
+    core.updateTelemetry(participantId, { ...telemetry(), speedKph: 18 }, new Date(now.getTime() + 50));
+    let penalties = core.snapshot().participants[0].penalties;
+    expect(penalties).toHaveLength(1);
+    expect(penalties[0]).toMatchObject({ kind: "time", valueSeconds: 5 });
+    expect(penalties[0].reason).toContain("抢跑");
+    core.updateTelemetry(participantId, { ...telemetry(), trackProgress: .6 }, new Date(now.getTime() + 500));
+    penalties = core.snapshot().participants[0].penalties;
+    expect(penalties).toHaveLength(1);
+  });
+
+  it("keeps qualifying open for a final flying lap already in progress", () => {
+    const core = createCore();
+    const participantId = connect(core, "甲");
+    const now = new Date("2026-08-04T10:00:00Z");
+    core.applySession({ phase: "qualifying", qualifyingMinutes: 1 }, now);
+    core.updateTelemetry(participantId, { ...telemetry(), currentLapSeconds: 31 }, new Date(now.getTime() + 59_000));
+    core.tick(new Date(now.getTime() + 60_001));
+    expect(core.snapshot().phase).toBe("qualifying");
+    expect(core.snapshot().qualifyingTimeExpired).toBe(true);
+    expect(core.snapshot().participants[0].qualifyingFinalLapPending).toBe(true);
+    expect(core.completeLap(participantId, lap("final-flying-lap", 71.25, true, 1)).ok).toBe(true);
+    expect(core.snapshot().phase).toBe("grid");
+    expect(core.snapshot().participants[0].bestLapSeconds).toBe(71.25);
+  });
 });
 
 function createCore(maximumParticipants = 12): RaceCore {

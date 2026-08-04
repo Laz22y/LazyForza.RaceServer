@@ -49,7 +49,11 @@ public sealed class RaceCoordinator
     private string? trackRevision;
     private string? trackPackageHash;
     private DateTimeOffset? startsAt;
+    private DateTimeOffset? startSequenceAt;
     private DateTimeOffset? qualifyingEndsAt;
+    private int illuminatedStartLights;
+    private bool startLightsOut;
+    private bool qualifyingTimeExpired;
     private RaceBannerSnapshot? banner;
     private long revision;
 
@@ -161,7 +165,8 @@ public sealed class RaceCoordinator
                     resumed.IsConnected = true;
                     resumed.LastSeenAt = DateTimeOffset.UtcNow;
                     if (resumed.Status == RaceParticipantStatus.Disconnected)
-                        resumed.Status = phase is RaceSessionPhase.Race or RaceSessionPhase.Countdown
+                        resumed.Status = phase is RaceSessionPhase.Race or RaceSessionPhase.Countdown or
+                            RaceSessionPhase.OutLap or RaceSessionPhase.FormationLap
                             ? RaceParticipantStatus.OnTrack
                             : RaceParticipantStatus.Connected;
                     IncrementRevision();
@@ -171,7 +176,9 @@ public sealed class RaceCoordinator
                     goto Complete;
                 }
 
-                if (phase is RaceSessionPhase.Countdown or RaceSessionPhase.Race or RaceSessionPhase.Suspended or RaceSessionPhase.Finished)
+                if (phase is RaceSessionPhase.OutLap or RaceSessionPhase.FormationLap or
+                    RaceSessionPhase.Countdown or RaceSessionPhase.Race or
+                    RaceSessionPhase.Suspended or RaceSessionPhase.Finished)
                 {
                     rejected = new RaceLoginRejected("sessionLocked", "比赛已开始，只允许已有车手重新连接。");
                     goto Complete;
@@ -238,6 +245,7 @@ public sealed class RaceCoordinator
         DateTimeOffset? receivedAt = null)
     {
         RaceSessionSnapshot snapshot;
+        RaceAuditEntry? audit = null;
         lock (sync)
         {
             var now = receivedAt ?? DateTimeOffset.UtcNow;
@@ -280,16 +288,24 @@ public sealed class RaceCoordinator
                 ? RaceParticipantStatus.InService
                 : normalized.IsInPitLane
                     ? RaceParticipantStatus.InPitLane
-                    : phase is RaceSessionPhase.Race or RaceSessionPhase.Countdown or RaceSessionPhase.Qualifying
+                    : phase is RaceSessionPhase.Race or RaceSessionPhase.Countdown or RaceSessionPhase.Qualifying or
+                        RaceSessionPhase.OutLap or RaceSessionPhase.FormationLap
                         ? RaceParticipantStatus.OnTrack
                         : participant.IsReady ? RaceParticipantStatus.Ready : RaceParticipantStatus.Connected;
+            if (EvaluateFalseStart(participant, now) is { } falseStartPenalty)
+                audit = new RaceAuditEntry(
+                    now,
+                    "falseStart",
+                    $"{participant.DisplayName} 在红灯熄灭前移动，自动加罚 5 秒。",
+                    participant.Id,
+                    falseStartPenalty);
             EvaluateAutomaticYellow(participant, now);
             RefreshYellowFlag(now);
             IncrementRevision();
             snapshot = BuildSnapshot(now);
         Complete:;
         }
-        Publish(snapshot, important: false);
+        Publish(snapshot, important: audit is not null, audit);
         return RaceCommandResult.Accepted;
     }
 
@@ -301,6 +317,11 @@ public sealed class RaceCoordinator
         {
             var participant = Find(participantId);
             if (participant is null) return RaceCommandResult.Reject("参赛者不存在。");
+            if (phase is not (RaceSessionPhase.Qualifying or RaceSessionPhase.Race))
+                return RaceCommandResult.Reject("当前阶段不接收圈速成绩。");
+            if (phase == RaceSessionPhase.Qualifying && qualifyingTimeExpired &&
+                !participant.QualifyingFinalLapPending)
+                return RaceCommandResult.Reject("排位赛计时已结束，该车手没有待完成的最后一圈。");
             if (!receivedLapEvents.Add(completed.EventId)) return RaceCommandResult.Accepted;
             if (completed.LapSeconds is < 3 or > 21_600 || !double.IsFinite(completed.LapSeconds))
                 return RaceCommandResult.Reject("圈速超出允许范围。");
@@ -316,6 +337,11 @@ public sealed class RaceCoordinator
                     ? completed.LapSeconds
                     : Math.Min(participant.BestLapSeconds.Value, completed.LapSeconds);
                 UpdateBestSectors(participant, completed.SectorSeconds);
+            }
+            if (phase == RaceSessionPhase.Qualifying && qualifyingTimeExpired)
+            {
+                participant.QualifyingFinalLapPending = false;
+                CompleteQualifyingIfReady();
             }
             var fastestAfter = FastestLap();
             if (completed.IsValid && (fastestBefore is null || fastestAfter?.Time < fastestBefore.Value.Time - 0.0005))
@@ -389,6 +415,8 @@ public sealed class RaceCoordinator
             participant.HazardCandidateStartedAt = null;
             participant.HazardRecoveryStartedAt = null;
             participant.LastSeenAt = DateTimeOffset.UtcNow;
+            participant.QualifyingFinalLapPending = false;
+            CompleteQualifyingIfReady();
             RefreshYellowFlag(DateTimeOffset.UtcNow);
             IncrementRevision();
             snapshot = BuildSnapshot(DateTimeOffset.UtcNow);
@@ -417,7 +445,8 @@ public sealed class RaceCoordinator
             if (normalizedTrackHash is not null &&
                 (normalizedTrackHash.Length != 64 || normalizedTrackHash.Any(character => !Uri.IsHexDigit(character))))
                 return RaceCommandResult.Reject("赛道 SHA-256 必须是导出提示中的 64 位十六进制摘要。");
-            if (phase is RaceSessionPhase.Countdown or RaceSessionPhase.Race or RaceSessionPhase.Suspended)
+            if (phase is RaceSessionPhase.OutLap or RaceSessionPhase.FormationLap or
+                RaceSessionPhase.Countdown or RaceSessionPhase.Race or RaceSessionPhase.Suspended)
                 return RaceCommandResult.Reject("发车后不能修改房间规则。请先返回大厅。");
 
             sessionName = normalizedName;
@@ -482,6 +511,7 @@ public sealed class RaceCoordinator
                     phase = RaceSessionPhase.Qualifying;
                     flag = RaceControlFlag.Green;
                     qualifyingEndsAt = now.AddMinutes(Math.Clamp(command.QualifyingMinutes ?? 10, 1, 180));
+                    qualifyingTimeExpired = false;
                     foreach (var participant in participants)
                     {
                         participant.Status = participant.IsConnected ? RaceParticipantStatus.OnTrack : RaceParticipantStatus.Disconnected;
@@ -492,21 +522,62 @@ public sealed class RaceCoordinator
                 case RaceSessionPhase.Grid:
                     phase = RaceSessionPhase.Grid;
                     qualifyingEndsAt = null;
+                    qualifyingTimeExpired = false;
                     flag = RaceControlFlag.Green;
-                    foreach (var participant in participants.Where(candidate => candidate.IsConnected))
-                        participant.Status = RaceParticipantStatus.Ready;
+                    foreach (var participant in participants)
+                    {
+                        participant.QualifyingFinalLapPending = false;
+                        if (participant.IsConnected) participant.Status = RaceParticipantStatus.Ready;
+                    }
+                    break;
+                case RaceSessionPhase.OutLap:
+                    PrepareRace();
+                    phase = RaceSessionPhase.OutLap;
+                    flag = RaceControlFlag.Green;
+                    flagMessage = null;
+                    banner = NewBanner(
+                        RaceBannerKind.Information,
+                        "出场圈",
+                        "按总控指令驶离维修区并前往发车区",
+                        null,
+                        TimeSpan.FromSeconds(7));
+                    break;
+                case RaceSessionPhase.FormationLap:
+                    if (phase != RaceSessionPhase.OutLap) PrepareRace();
+                    phase = RaceSessionPhase.FormationLap;
+                    flag = RaceControlFlag.Green;
+                    flagMessage = null;
+                    banner = NewBanner(
+                        RaceBannerKind.Information,
+                        "暖胎圈",
+                        "保持队列，返回各自发车位",
+                        null,
+                        TimeSpan.FromSeconds(7));
                     break;
                 case RaceSessionPhase.Countdown:
                     PrepareRace();
                     phase = RaceSessionPhase.Countdown;
                     flag = RaceControlFlag.Green;
-                    startsAt = now.AddSeconds(Math.Clamp(command.CountdownSeconds ?? 10, 3, 60));
-                    banner = NewBanner(RaceBannerKind.Information, "准备发车", $"{totalRaceLaps} 圈", null, startsAt - now);
+                    flagMessage = null;
+                    startSequenceAt = now.AddSeconds(Math.Clamp(command.CountdownSeconds ?? 10, 0, 120));
+                    var randomHoldMilliseconds = RandomNumberGenerator.GetInt32(1_000, 4_001);
+                    startsAt = startSequenceAt.Value.AddSeconds(4).AddMilliseconds(randomHoldMilliseconds);
+                    illuminatedStartLights = 0;
+                    startLightsOut = false;
+                    banner = NewBanner(
+                        RaceBannerKind.Information,
+                        "准备发车",
+                        $"距第一盏红灯亮起还有 {Math.Max(0, (startSequenceAt.Value - now).TotalSeconds):0} 秒",
+                        null,
+                        startSequenceAt - now);
                     break;
                 case RaceSessionPhase.Race:
                     if (phase != RaceSessionPhase.Countdown) PrepareRace();
                     phase = RaceSessionPhase.Race;
                     startsAt = now;
+                    startSequenceAt = null;
+                    illuminatedStartLights = 0;
+                    startLightsOut = true;
                     flag = RaceControlFlag.Green;
                     banner = NewBanner(RaceBannerKind.Information, "比赛开始", sessionName, null, TimeSpan.FromSeconds(4));
                     break;
@@ -664,24 +735,52 @@ public sealed class RaceCoordinator
         RaceAuditEntry? audit = null;
         lock (sync)
         {
-            if (phase == RaceSessionPhase.Countdown && startsAt is DateTimeOffset scheduled && now >= scheduled)
+            if (phase == RaceSessionPhase.Countdown)
             {
-                phase = RaceSessionPhase.Race;
-                flag = RaceControlFlag.Green;
-                banner = NewBanner(RaceBannerKind.Information, "比赛开始", sessionName, null, TimeSpan.FromSeconds(4));
-                IncrementRevision();
-                snapshot = BuildSnapshot(now);
-                audit = new RaceAuditEntry(now, "raceStarted", "倒计时结束，比赛开始。");
+                var nextLights = CalculateIlluminatedStartLights(now);
+                if (nextLights > 0 && illuminatedStartLights == 0)
+                    ArmFalseStartDetection();
+                if (nextLights != illuminatedStartLights)
+                {
+                    illuminatedStartLights = nextLights;
+                    IncrementRevision();
+                    snapshot = BuildSnapshot(now);
+                }
+                if (startsAt is DateTimeOffset scheduled && now >= scheduled)
+                {
+                    phase = RaceSessionPhase.Race;
+                    flag = RaceControlFlag.Green;
+                    illuminatedStartLights = 0;
+                    startLightsOut = true;
+                    banner = NewBanner(RaceBannerKind.Information, "比赛开始", sessionName, null, TimeSpan.FromSeconds(4));
+                    IncrementRevision();
+                    snapshot = BuildSnapshot(now);
+                    audit = new RaceAuditEntry(now, "raceStarted", "五盏红灯熄灭，比赛开始。");
+                }
             }
-            else if (phase == RaceSessionPhase.Qualifying && qualifyingEndsAt is DateTimeOffset ending && now >= ending)
+            else if (phase == RaceSessionPhase.Qualifying && !qualifyingTimeExpired &&
+                     qualifyingEndsAt is DateTimeOffset ending && now >= ending)
             {
-                phase = RaceSessionPhase.Grid;
                 flag = RaceControlFlag.Chequered;
-                qualifyingEndsAt = null;
-                banner = NewBanner(RaceBannerKind.ChequeredFlag, "排位赛结束", "成绩已冻结", null, TimeSpan.FromSeconds(8));
+                qualifyingTimeExpired = true;
+                foreach (var participant in participants)
+                    participant.QualifyingFinalLapPending = IsEligibleForQualifyingFinalLap(participant);
+                var pending = participants.Count(participant => participant.QualifyingFinalLapPending);
+                banner = NewBanner(
+                    RaceBannerKind.ChequeredFlag,
+                    "排位计时结束",
+                    pending == 0 ? "成绩已冻结" : $"{pending} 名车手可完成已经开始的最后一圈",
+                    null,
+                    TimeSpan.FromSeconds(8));
+                CompleteQualifyingIfReady();
                 IncrementRevision();
                 snapshot = BuildSnapshot(now);
-                audit = new RaceAuditEntry(now, "qualifyingEnded", "排位赛计时结束。");
+                audit = new RaceAuditEntry(
+                    now,
+                    "qualifyingEnded",
+                    pending == 0
+                        ? "排位赛计时结束，成绩已冻结。"
+                        : $"排位赛计时结束，等待 {pending} 名车手完成最后一圈。");
             }
             else if (banner?.ExpiresAt is DateTimeOffset expiresAt && now >= expiresAt)
             {
@@ -691,6 +790,93 @@ public sealed class RaceCoordinator
             }
         }
         if (snapshot is not null) Publish(snapshot, important: audit is not null, audit);
+    }
+
+    private int CalculateIlluminatedStartLights(DateTimeOffset now)
+    {
+        if (phase != RaceSessionPhase.Countdown || startSequenceAt is not DateTimeOffset sequence ||
+            now < sequence || startsAt is DateTimeOffset raceStart && now >= raceStart)
+            return 0;
+        return Math.Clamp((int)Math.Floor((now - sequence).TotalSeconds) + 1, 1, 5);
+    }
+
+    private void ArmFalseStartDetection()
+    {
+        foreach (var participant in participants)
+        {
+            participant.FalseStartBaselineProgress = participant.TrackProgress;
+            participant.FalseStartCandidateStartedAt = null;
+            participant.FalseStartPenalized = false;
+        }
+    }
+
+    private RacePenaltySnapshot? EvaluateFalseStart(ParticipantState participant, DateTimeOffset now)
+    {
+        if (phase != RaceSessionPhase.Countdown || startSequenceAt is not DateTimeOffset sequence ||
+            startsAt is not DateTimeOffset raceStart || now < sequence || now >= raceStart ||
+            participant.FalseStartPenalized || participant.IsInPitLane || participant.IsInServiceZone ||
+            participant.Status is RaceParticipantStatus.Disqualified or RaceParticipantStatus.Disconnected)
+            return null;
+
+        participant.FalseStartBaselineProgress ??= participant.TrackProgress;
+        var delta = participant.TrackProgress - participant.FalseStartBaselineProgress.Value;
+        if (delta > 0.5) delta -= 1;
+        else if (delta < -0.5) delta += 1;
+        var forwardProgress = Math.Max(0, delta);
+        var movementDetected = participant.SpeedKph >= 5 || forwardProgress >= 0.0008;
+        if (!movementDetected)
+        {
+            participant.FalseStartCandidateStartedAt = null;
+            return null;
+        }
+
+        participant.FalseStartCandidateStartedAt ??= now;
+        if (forwardProgress < 0.002 &&
+            now - participant.FalseStartCandidateStartedAt.Value < TimeSpan.FromMilliseconds(250))
+            return null;
+
+        participant.FalseStartPenalized = true;
+        var penalty = new RacePenaltySnapshot(
+            Guid.NewGuid(),
+            participant.Id,
+            RacePenaltyKind.Time,
+            5,
+            null,
+            "抢跑：五盏红灯熄灭前车辆已经移动",
+            now,
+            false,
+            false);
+        penalties.Add(penalty);
+        banner = NewBanner(
+            RaceBannerKind.Penalty,
+            $"抢跑 · {participant.DisplayName}",
+            "自动加罚 5 秒",
+            participant.Id,
+            TimeSpan.FromSeconds(8));
+        return penalty;
+    }
+
+    private bool IsEligibleForQualifyingFinalLap(ParticipantState participant) =>
+        participant.IsConnected &&
+        participant.TelemetryValid &&
+        !participant.IsInPitLane &&
+        !participant.IsInServiceZone &&
+        participant.CurrentLapSeconds > 0.05 &&
+        participant.Status is not (RaceParticipantStatus.Disqualified or
+            RaceParticipantStatus.DidNotFinish or RaceParticipantStatus.Disconnected);
+
+    private void CompleteQualifyingIfReady()
+    {
+        if (phase != RaceSessionPhase.Qualifying || !qualifyingTimeExpired ||
+            participants.Any(participant => participant.QualifyingFinalLapPending))
+            return;
+        phase = RaceSessionPhase.Grid;
+        flag = RaceControlFlag.Green;
+        flagMessage = null;
+        qualifyingEndsAt = null;
+        qualifyingTimeExpired = false;
+        foreach (var participant in participants.Where(candidate => candidate.IsConnected))
+            participant.Status = RaceParticipantStatus.Ready;
     }
 
     private void EvaluateAutomaticYellow(ParticipantState participant, DateTimeOffset now)
@@ -859,7 +1045,8 @@ public sealed class RaceCoordinator
                 participant.GripCondition,
                 participant.BestSectorSeconds.ToArray(),
                 participantPenalties,
-                participant.LastSeenAt));
+                participant.LastSeenAt,
+                participant.QualifyingFinalLapPending));
             if (comparable is not null) priorComparable = comparable;
         }
 
@@ -886,7 +1073,11 @@ public sealed class RaceCoordinator
             sectorCount,
             allowTeams,
             trackName,
-            BuildBlueFlags());
+            BuildBlueFlags(),
+            startSequenceAt,
+            illuminatedStartLights,
+            startLightsOut,
+            qualifyingTimeExpired);
     }
 
     private List<ParticipantState> OrderParticipants()
@@ -898,7 +1089,9 @@ public sealed class RaceCoordinator
                 .ThenBy(candidate => candidate.JoinedAt)
                 .ToList();
 
-        if (phase is RaceSessionPhase.Race or RaceSessionPhase.Countdown or RaceSessionPhase.Suspended or RaceSessionPhase.Finished)
+        if (phase is RaceSessionPhase.OutLap or RaceSessionPhase.FormationLap or
+            RaceSessionPhase.Race or RaceSessionPhase.Countdown or
+            RaceSessionPhase.Suspended or RaceSessionPhase.Finished)
             return participants
                 .OrderBy(candidate => TerminalRank(candidate.Status))
                 .ThenBy(candidate => candidate.Status == RaceParticipantStatus.Finished ? candidate.FinishedAt : null)
@@ -926,7 +1119,11 @@ public sealed class RaceCoordinator
     {
         ClearYellowState();
         startsAt = null;
+        startSequenceAt = null;
         qualifyingEndsAt = null;
+        illuminatedStartLights = 0;
+        startLightsOut = false;
+        qualifyingTimeExpired = false;
         banner = null;
         receivedLapEvents.Clear();
         foreach (var participant in participants)
@@ -944,6 +1141,10 @@ public sealed class RaceCoordinator
             participant.PitServiceElapsedSeconds = 0;
             participant.PitServiceRequirementMet = false;
             participant.CompletedPitServices = 0;
+            participant.QualifyingFinalLapPending = false;
+            participant.FalseStartBaselineProgress = null;
+            participant.FalseStartCandidateStartedAt = null;
+            participant.FalseStartPenalized = false;
             participant.Status = participant.IsConnected ? RaceParticipantStatus.OnTrack : RaceParticipantStatus.Disconnected;
         }
     }
@@ -954,7 +1155,11 @@ public sealed class RaceCoordinator
         penalties.Clear();
         receivedLapEvents.Clear();
         startsAt = null;
+        startSequenceAt = null;
         qualifyingEndsAt = null;
+        illuminatedStartLights = 0;
+        startLightsOut = false;
+        qualifyingTimeExpired = false;
         banner = null;
         if (clearParticipants)
         {
@@ -980,6 +1185,10 @@ public sealed class RaceCoordinator
             participant.AutomaticYellowActive = false;
             participant.HazardCandidateStartedAt = null;
             participant.HazardRecoveryStartedAt = null;
+            participant.QualifyingFinalLapPending = false;
+            participant.FalseStartBaselineProgress = null;
+            participant.FalseStartCandidateStartedAt = null;
+            participant.FalseStartPenalized = false;
             participant.Status = participant.IsConnected ? RaceParticipantStatus.Connected : RaceParticipantStatus.Disconnected;
         }
     }
@@ -1162,5 +1371,9 @@ public sealed class RaceCoordinator
         public bool AutomaticYellowActive { get; set; }
         public int AutomaticYellowSector { get; set; }
         public string? AutomaticYellowReason { get; set; }
+        public bool QualifyingFinalLapPending { get; set; }
+        public double? FalseStartBaselineProgress { get; set; }
+        public DateTimeOffset? FalseStartCandidateStartedAt { get; set; }
+        public bool FalseStartPenalized { get; set; }
     }
 }

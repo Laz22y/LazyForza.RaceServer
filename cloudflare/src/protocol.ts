@@ -1,7 +1,7 @@
-export const protocolVersion = 1;
+export const protocolVersion = 2;
 export const maximumMessageBytes = 64 * 1024;
 
-export type SessionPhase = "lobby" | "qualifying" | "grid" | "countdown" | "race" | "suspended" | "finished";
+export type SessionPhase = "lobby" | "qualifying" | "grid" | "outLap" | "formationLap" | "countdown" | "race" | "suspended" | "finished";
 export type ControlFlag = "green" | "yellow" | "red" | "chequered";
 export type ParticipantStatus = "connected" | "ready" | "onTrack" | "inPitLane" | "inService" | "finished" | "didNotFinish" | "disqualified" | "disconnected";
 export type GripCondition = "unknown" | "slightlyReduced" | "moderatelyReduced" | "severelyReduced" | "atLimit";
@@ -101,6 +101,7 @@ export interface ParticipantSnapshot {
   bestSectorSeconds: Array<number | null>;
   penalties: PenaltySnapshot[];
   lastSeenAt: string;
+  qualifyingFinalLapPending: boolean;
 }
 
 export interface BannerSnapshot {
@@ -124,7 +125,11 @@ export interface SessionSnapshot {
   trackPackageHash?: string | null;
   totalRaceLaps: number;
   startsAt?: string | null;
+  startSequenceAt?: string | null;
+  illuminatedStartLights: number;
+  startLightsOut: boolean;
   qualifyingEndsAt?: string | null;
+  qualifyingTimeExpired: boolean;
   fastestParticipantId?: string | null;
   fastestLapSeconds?: number | null;
   fastestSectorSeconds: Array<number | null>;

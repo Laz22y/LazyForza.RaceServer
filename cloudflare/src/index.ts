@@ -23,9 +23,6 @@ interface Env {
   SESSION_NAME: string;
   MAXIMUM_PARTICIPANTS: string;
   TOTAL_RACE_LAPS: string;
-  TRACK_ID: string;
-  TRACK_REVISION: string;
-  TRACK_PACKAGE_HASH: string;
 }
 
 interface SocketAttachment {
@@ -71,10 +68,7 @@ export class RaceRoom {
       this.core = new RaceCore({
         sessionName: env.SESSION_NAME,
         maximumParticipants: Number.parseInt(env.MAXIMUM_PARTICIPANTS, 10),
-        totalRaceLaps: Number.parseInt(env.TOTAL_RACE_LAPS, 10),
-        trackId: env.TRACK_ID,
-        trackRevision: env.TRACK_REVISION,
-        trackPackageHash: env.TRACK_PACKAGE_HASH
+        totalRaceLaps: Number.parseInt(env.TOTAL_RACE_LAPS, 10)
       }, stored);
       await this.scheduleAlarm();
     });

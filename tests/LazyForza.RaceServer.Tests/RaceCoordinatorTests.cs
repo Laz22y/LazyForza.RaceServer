@@ -363,6 +363,105 @@ public sealed class RaceCoordinatorTests
         Assert.AreEqual("#AA55CC", coordinator.Snapshot().Participants.Single().ThemeColor);
     }
 
+    [TestMethod]
+    public void RacePreparationRunsOutLapFormationLapAndFiveLightSequence()
+    {
+        var coordinator = CreateCoordinator();
+        _ = Join(coordinator, 1).Accepted!;
+        Assert.IsTrue(coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.OutLap, "出场圈", 5, null, null)).IsAccepted);
+        Assert.AreEqual(RaceSessionPhase.OutLap, coordinator.Snapshot().Phase);
+        Assert.IsTrue(coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.FormationLap, "暖胎圈", 5, null, null)).IsAccepted);
+
+        Assert.IsTrue(coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Countdown, "起跑程序", 5, 0, null)).IsAccepted);
+        var snapshot = coordinator.Snapshot();
+        var issuedAt = snapshot.StartSequenceAt!.Value;
+        Assert.AreEqual(RaceSessionPhase.Countdown, snapshot.Phase);
+        Assert.AreEqual(issuedAt, snapshot.StartSequenceAt);
+        Assert.IsNotNull(snapshot.StartsAt);
+        var sequenceDuration = snapshot.StartsAt!.Value - snapshot.StartSequenceAt!.Value;
+        Assert.IsTrue(sequenceDuration >= TimeSpan.FromSeconds(5));
+        Assert.IsTrue(sequenceDuration <= TimeSpan.FromSeconds(8));
+
+        coordinator.Tick(issuedAt);
+        Assert.AreEqual(1, coordinator.Snapshot().IlluminatedStartLights);
+        coordinator.Tick(issuedAt.AddSeconds(1.1));
+        Assert.AreEqual(2, coordinator.Snapshot().IlluminatedStartLights);
+        coordinator.Tick(issuedAt.AddSeconds(4.1));
+        Assert.AreEqual(5, coordinator.Snapshot().IlluminatedStartLights);
+        coordinator.Tick(snapshot.StartsAt.Value.AddMilliseconds(1));
+        snapshot = coordinator.Snapshot();
+        Assert.AreEqual(RaceSessionPhase.Race, snapshot.Phase);
+        Assert.IsTrue(snapshot.StartLightsOut);
+        Assert.AreEqual(0, snapshot.IlluminatedStartLights);
+    }
+
+    [TestMethod]
+    public void MovingAfterFirstRedLightIsAutomaticallyPenalizedAsFalseStart()
+    {
+        var coordinator = CreateCoordinator();
+        var participant = Join(coordinator, 1).Accepted!;
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Countdown, null, 5, 0, null));
+        var issuedAt = coordinator.Snapshot().StartSequenceAt!.Value;
+        coordinator.Tick(issuedAt);
+
+        coordinator.UpdateTelemetry(participant.ParticipantId,
+            Telemetry(0, .30) with { SpeedKph = 18 }, issuedAt.AddMilliseconds(50));
+        var snapshot = coordinator.Snapshot();
+        var penalty = snapshot.Participants.Single().Penalties.Single();
+        Assert.AreEqual(RacePenaltyKind.Time, penalty.Kind);
+        Assert.AreEqual(5, penalty.ValueSeconds);
+        StringAssert.Contains(penalty.Reason, "抢跑");
+
+        coordinator.UpdateTelemetry(participant.ParticipantId,
+            Telemetry(0, .35) with { SpeedKph = 30 }, issuedAt.AddMilliseconds(500));
+        Assert.AreEqual(1, coordinator.Snapshot().Participants.Single().Penalties.Count);
+    }
+
+    [TestMethod]
+    public void QualifyingTimeoutLetsAnAlreadyStartedFlyingLapFinish()
+    {
+        var coordinator = CreateCoordinator();
+        var participant = Join(coordinator, 1).Accepted!;
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Qualifying, null, null, null, 1));
+        var issuedAt = coordinator.Snapshot().QualifyingEndsAt!.Value.AddMinutes(-1);
+        coordinator.UpdateTelemetry(participant.ParticipantId,
+            Telemetry(0, .42) with { CurrentLapSeconds = 31 }, issuedAt.AddSeconds(59));
+
+        coordinator.Tick(issuedAt.AddMinutes(1).AddMilliseconds(1));
+        var snapshot = coordinator.Snapshot();
+        Assert.AreEqual(RaceSessionPhase.Qualifying, snapshot.Phase);
+        Assert.IsTrue(snapshot.QualifyingTimeExpired);
+        Assert.IsTrue(snapshot.Participants.Single().QualifyingFinalLapPending);
+
+        CompleteLap(coordinator, participant.ParticipantId, 1, 71.250);
+        snapshot = coordinator.Snapshot();
+        Assert.AreEqual(RaceSessionPhase.Grid, snapshot.Phase);
+        Assert.AreEqual(71.250, snapshot.Participants.Single().BestLapSeconds!.Value, .0001);
+    }
+
+    [TestMethod]
+    public void LapEventsAreIgnoredOutsideQualifyingAndRace()
+    {
+        var coordinator = CreateCoordinator();
+        var participant = Join(coordinator, 1).Accepted!;
+        var lobbyLap = coordinator.CompleteLap(participant.ParticipantId, new RaceLapCompleted(
+            Guid.NewGuid(), 1, 61, [20, 20, 21], true, null, 50_000));
+        Assert.IsFalse(lobbyLap.IsAccepted);
+        Assert.AreEqual(0, coordinator.Snapshot().Participants.Single().CompletedLaps);
+
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Countdown, null, 5, 0, null));
+        var countdownLap = coordinator.CompleteLap(participant.ParticipantId, new RaceLapCompleted(
+            Guid.NewGuid(), 2, 60, [20, 20, 20], true, null, 50_000));
+        Assert.IsFalse(countdownLap.IsAccepted);
+        Assert.AreEqual(0, coordinator.Snapshot().Participants.Single().CompletedLaps);
+    }
+
     private static RaceCoordinator CreateCoordinator(int maximumParticipants = RaceProtocol.MaximumParticipants) =>
         new(new RaceServerOptions
         {
