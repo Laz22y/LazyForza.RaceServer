@@ -7,4 +7,8 @@
     <ProjectReference Include="..\LazyForza.RaceServer.Protocol\LazyForza.RaceServer.Protocol.csproj" />
     <ProjectReference Include="..\LazyForza.RaceServer.Core\LazyForza.RaceServer.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Remove="data\**\*" />
+    <None Remove="data\**\*" />
+  </ItemGroup>
 </Project>

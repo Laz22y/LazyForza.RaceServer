@@ -16,6 +16,15 @@ public sealed record RaceServerOptions
     public double SlowDurationSeconds { get; init; } = 3;
     public double SevereLateralOffsetMeters { get; init; } = 25;
     public double RecoveryDurationSeconds { get; init; } = 3;
+    public TrackLimitEnforcementMode TrackLimitMode { get; init; } = TrackLimitEnforcementMode.WarningsOnly;
+    public bool AllowTeams { get; init; } = true;
+    public int TeamCount { get; init; } = 2;
+    public int DriversPerTeam { get; init; } = 6;
+    public IReadOnlyList<RaceTeamDefinition> Teams { get; init; } =
+    [
+        new("team-1", "车队 1", "#42D7E8"),
+        new("team-2", "车队 2", "#FF4057")
+    ];
     public string? TrackId { get; init; }
     public string? TrackName { get; init; }
     public string? TrackRevision { get; init; }
@@ -35,6 +44,8 @@ public sealed record RaceServerOptions
         SlowDurationSeconds = Math.Clamp(SlowDurationSeconds, 1, 15),
         SevereLateralOffsetMeters = Math.Clamp(SevereLateralOffsetMeters, 5, 200),
         RecoveryDurationSeconds = Math.Clamp(RecoveryDurationSeconds, 1, 15),
+        TeamCount = Math.Clamp(TeamCount, 1, RaceProtocol.MaximumParticipants),
+        DriversPerTeam = Math.Clamp(DriversPerTeam, 1, RaceProtocol.MaximumParticipants),
         TrackId = NormalizeOptional(TrackId, 128),
         TrackName = NormalizeOptional(TrackName, 128),
         TrackRevision = NormalizeOptional(TrackRevision, 64),

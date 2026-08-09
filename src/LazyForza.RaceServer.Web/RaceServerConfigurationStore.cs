@@ -45,7 +45,11 @@ public sealed class RaceServerConfigurationStore
                     options.TrackName,
                     options.TrackId,
                     options.TrackRevision,
-                    options.TrackPackageHash));
+                    options.TrackPackageHash,
+                    options.TeamCount,
+                    options.DriversPerTeam,
+                    options.Teams,
+                    options.TrackLimitMode));
     }
 
     public bool IsConfigured
@@ -71,7 +75,11 @@ public sealed class RaceServerConfigurationStore
                     fallback.TrackName,
                     fallback.TrackId,
                     fallback.TrackRevision,
-                    fallback.TrackPackageHash);
+                    fallback.TrackPackageHash,
+                    fallback.TeamCount,
+                    fallback.DriversPerTeam,
+                    fallback.Teams,
+                    fallback.TrackLimitMode);
         }
     }
 
@@ -108,7 +116,11 @@ public sealed class RaceServerConfigurationStore
                 fallback.TrackName,
                 fallback.TrackId,
                 fallback.TrackRevision,
-                fallback.TrackPackageHash);
+                fallback.TrackPackageHash,
+                fallback.TeamCount,
+                fallback.DriversPerTeam,
+                fallback.Teams,
+                fallback.TrackLimitMode);
             stored = CreateConfiguration(request.PlayerPassword, request.AdminPassword, room);
             Save(stored);
             return (true, null, room);

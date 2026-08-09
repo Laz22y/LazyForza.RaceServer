@@ -24,6 +24,11 @@ serverOptions = serverOptions with
     SlowDurationSeconds = initialRoom.SlowDurationSeconds,
     SevereLateralOffsetMeters = initialRoom.SevereLateralOffsetMeters,
     RecoveryDurationSeconds = initialRoom.RecoveryDurationSeconds,
+    TrackLimitMode = initialRoom.TrackLimitMode,
+    AllowTeams = initialRoom.AllowTeams,
+    TeamCount = initialRoom.TeamCount,
+    DriversPerTeam = initialRoom.DriversPerTeam,
+    Teams = initialRoom.Teams ?? [],
     TrackName = initialRoom.TrackName,
     TrackId = initialRoom.TrackId,
     TrackRevision = initialRoom.TrackRevision,
@@ -81,7 +86,9 @@ app.MapGet("/.well-known/lazyforza-race.json", (RaceCoordinator coordinator) =>
         snapshot.TrackName,
         snapshot.TrackPackageHash,
         snapshot.AllowTeams,
-        snapshot.SectorCount));
+        snapshot.SectorCount,
+        snapshot.DriversPerTeam,
+        snapshot.Teams));
 });
 
 app.Map("/ws", (HttpContext context, RaceWebSocketHandler handler) => handler.HandleAsync(context));
@@ -113,7 +120,11 @@ app.MapPost("/api/setup", (
         room.TrackName,
         room.TrackId,
         room.TrackRevision,
-        room.TrackPackageHash));
+        room.TrackPackageHash,
+        room.TeamCount,
+        room.DriversPerTeam,
+        room.Teams,
+        room.TrackLimitMode));
     return applied.IsAccepted ? Results.Ok(new { ok = true }) : Results.BadRequest(new { error = applied.Error });
 });
 
@@ -145,6 +156,11 @@ app.MapGet("/api/admin/state", (HttpContext context, AdminSessionStore sessions,
 
 app.MapGet("/api/admin/settings", (HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
     Authorized(context, sessions) ? Results.Ok(coordinator.RoomSettings()) : Results.Unauthorized());
+
+app.MapGet("/api/admin/events", (HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator, int? limit) =>
+    Authorized(context, sessions)
+        ? Results.Ok(coordinator.Events(Math.Clamp(limit ?? 200, 20, 500)))
+        : Results.Unauthorized());
 
 app.MapPost("/api/admin/settings", (
     RaceAdminRoomSettingsCommand command,

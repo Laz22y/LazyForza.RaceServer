@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LazyForza 地产赛事总控</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/teams.css?v=20260809-2">
+  <link rel="stylesheet" href="/events.css?v=20260809-1">
 </head>
 <body>
   <main class="shell">
@@ -69,14 +71,26 @@
             <label>赛道标识<input id="trackId" maxlength="128" placeholder="导出时显示的 UUID"></label>
             <label>赛道数据 SHA-256<input id="trackPackageHash" maxlength="128" placeholder="导出时显示的 64 位摘要"></label>
           </div>
+          <section id="teamSettings" class="team-settings hidden">
+            <div class="team-settings-head">
+              <div><strong>车队设置</strong><p class="muted compact">开启车队后，车手只能从这里配置的名单中选择。总人数仍受房间 12 人上限限制。</p></div>
+              <div class="team-count-fields">
+                <label>车队数<input id="teamCount" type="number" min="1" max="12" value="2"></label>
+                <label>每队人数<input id="driversPerTeam" type="number" min="1" max="12" value="6"></label>
+              </div>
+            </div>
+            <div id="teamRows" class="team-rows"></div>
+          </section>
           <details>
-            <summary>自动黄旗判定</summary>
+            <summary>自动黄旗与赛道边界判定</summary>
             <div class="field-grid hazard-fields">
+              <label>赛道边界处理<select id="trackLimitMode"><option value="warningsOnly">仅记录警告，交总控核查</option><option value="automatic">自动警告与罚时</option><option value="disabled">关闭判定</option></select></label>
               <label>极低速阈值 km/h<input id="slowSpeedKph" type="number" min="3" max="50" step="1"></label>
               <label>低速持续秒数<input id="slowDurationSeconds" type="number" min="1" max="15" step="0.5"></label>
-              <label>严重偏离距离 m<input id="severeLateralOffsetMeters" type="number" min="5" max="200" step="1"></label>
+              <label>严重偏离/严重切弯距离 m<input id="severeLateralOffsetMeters" type="number" min="5" max="200" step="1"></label>
               <label>恢复确认秒数<input id="recoveryDurationSeconds" type="number" min="1" max="15" step="0.5"></label>
             </div>
+            <p class="muted compact">排位赛和正赛都会记录赛道边界事件。系统会结合路线进度、车速和驶离期间的实际路程估算是否获得距离优势；单纯压草、冲入砂石或合法驶入维修区不会因为横向距离过大就自动罚时。“仅记录警告”会保留次数和证据，交由总控人工核查；“自动警告与罚时”才会在三次轻微警告后罚时，明确的严重获利会直接罚时。</p>
           </details>
           <button id="saveSettings" class="primary align-start">保存房间设置</button>
           <p class="muted compact">赛事名称与规则不会再被实时刷新覆盖。发车后需要先返回大厅，才能修改圈数、分段和自动黄旗参数。</p>
@@ -90,7 +104,7 @@
           </div>
           <div class="button-grid"><button data-session="lobby">返回大厅</button><button data-session="qualifying" class="accent">开始排位</button><button data-session="grid">冻结排位</button><button data-session="outLap">下发出场圈</button><button data-session="formationLap">下发暖胎圈</button><button data-session="countdown" class="primary">启动发车程序</button></div>
           <p class="muted compact">倒计时结束后首盏红灯亮起，五盏红灯每秒依次点亮；全部亮起后会在 1–4 秒内随机熄灭并开始正赛。</p>
-          <p class="muted compact">方格旗不需要人工操作：领跑者完成预定圈数时自动亮起，其他车手在随后第一次过线时完成比赛。</p>
+          <p class="muted compact">方格旗不需要人工操作：领跑者进入最后一圈末段时先显示方格旗提示，完成预定圈数后正式亮旗；其他车手在随后第一次过线时完成比赛。</p>
         </article>
       </section>
 
@@ -107,11 +121,16 @@
 
       <section class="panel timing-panel">
         <div class="section-heading"><div><p class="eyebrow">LIVE TIMING</p><h2>实时排名与赛事管理</h2></div><button id="logoutButton" class="quiet">退出总控</button></div>
-        <div class="table-wrap"><table><thead><tr><th>排名</th><th>车手</th><th>状态</th><th>圈数</th><th>当前圈</th><th>最快圈</th><th>差距</th><th>管理</th></tr></thead><tbody id="timingRows"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>排名</th><th>车手</th><th>状态</th><th>圈数</th><th>当前圈</th><th>最快圈</th><th>正赛总时间</th><th>Delta</th><th>管理</th></tr></thead><tbody id="timingRows"></tbody></table></div>
         <p id="actionError" class="form-error" aria-live="polite"></p>
+      </section>
+
+      <section class="panel event-panel">
+        <div class="section-heading"><div><p class="eyebrow">RACE LOG</p><h2>赛事事件</h2></div><span class="auto-note">最近 500 条，最新事件在最上方</span></div>
+        <div class="event-list" id="eventRows"><div class="event-empty">尚无赛事事件</div></div>
       </section>
     </div>
   </main>
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=20260809-4" defer></script>
 </body>
 </html>

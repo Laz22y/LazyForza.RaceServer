@@ -66,6 +66,13 @@ public enum RacePenaltyKind
     Disqualification
 }
 
+public enum TrackLimitEnforcementMode
+{
+    WarningsOnly,
+    Automatic,
+    Disabled
+}
+
 public enum RaceBannerKind
 {
     Information,
@@ -112,7 +119,14 @@ public sealed record RaceServerDescriptor(
     string? ActiveTrackName = null,
     string? ActiveTrackPackageHash = null,
     bool AllowTeams = true,
-    int SectorCount = 0);
+    int SectorCount = 0,
+    int DriversPerTeam = 6,
+    IReadOnlyList<RaceTeamDefinition>? Teams = null);
+
+public sealed record RaceTeamDefinition(
+    string Id,
+    string Name,
+    string ThemeColor);
 
 public sealed record RaceLoginRequest(
     string Password,
@@ -124,7 +138,8 @@ public sealed record RaceLoginRequest(
     string? TrackId,
     string? TrackRevision,
     string? TrackPackageHash,
-    int? SectorCount = null);
+    int? SectorCount = null,
+    string? TeamId = null);
 
 public sealed record RaceLoginAccepted(
     Guid ParticipantId,
@@ -159,7 +174,12 @@ public sealed record RaceTelemetryUpdate(
     RaceGripCondition GripCondition,
     double PitServiceElapsedSeconds,
     bool PitServiceRequirementMet,
-    int CompletedPitServices);
+    int CompletedPitServices,
+    double TrackToleranceMeters = 18,
+    double TrackLengthMeters = 0,
+    double PitSpeedLimitKph = 0,
+    double PitLaneElapsedSeconds = 0,
+    bool IsApproachingPit = false);
 
 public sealed record RaceLapCompleted(
     Guid EventId,
@@ -168,7 +188,8 @@ public sealed record RaceLapCompleted(
     IReadOnlyList<double> SectorSeconds,
     bool IsValid,
     string? InvalidReason,
-    long ClientMonotonicMilliseconds);
+    long ClientMonotonicMilliseconds,
+    bool IsBestLapEligible = true);
 
 public sealed record RacePenaltySnapshot(
     Guid Id,
@@ -179,7 +200,8 @@ public sealed record RacePenaltySnapshot(
     string Reason,
     DateTimeOffset IssuedAt,
     bool IsServed,
-    bool IsRevoked);
+    bool IsRevoked,
+    bool IsPostRaceAdjustment = false);
 
 public sealed record RaceParticipantSnapshot(
     Guid Id,
@@ -210,7 +232,31 @@ public sealed record RaceParticipantSnapshot(
     IReadOnlyList<double?> BestSectorSeconds,
     IReadOnlyList<RacePenaltySnapshot> Penalties,
     DateTimeOffset LastSeenAt,
-    bool QualifyingFinalLapPending = false);
+    bool QualifyingFinalLapPending = false,
+    double? RaceTotalSeconds = null,
+    double? AdjustedRaceTotalSeconds = null,
+    double TimePenaltySeconds = 0,
+    int TrackLimitWarnings = 0,
+    string? TeamId = null,
+    string? TeamColor = null,
+    double PitLaneElapsedSeconds = 0,
+    double PendingTimePenaltySeconds = 0,
+    bool IsServingTimePenalty = false,
+    double PenaltyServiceElapsedSeconds = 0,
+    double PenaltyServiceRequiredSeconds = 0,
+    bool HasPendingDriveThrough = false,
+    bool PenaltyServiceCompleted = false,
+    int? DriveThroughLapsRemaining = null,
+    DateTimeOffset? DriveThroughReminderAt = null,
+    bool DriveThroughOverdue = false,
+    bool IsServingDriveThrough = false);
+
+public sealed record RaceEventSnapshot(
+    long Sequence,
+    DateTimeOffset At,
+    string Type,
+    string Message,
+    Guid? ParticipantId = null);
 
 public sealed record RaceBannerSnapshot(
     Guid Id,
@@ -259,7 +305,13 @@ public sealed record RaceSessionSnapshot(
     DateTimeOffset? StartSequenceAt = null,
     int IlluminatedStartLights = 0,
     bool StartLightsOut = false,
-    bool QualifyingTimeExpired = false);
+    bool QualifyingTimeExpired = false,
+    double? RaceElapsedSeconds = null,
+    RaceSessionPhase? SuspendedFromPhase = null,
+    int DriversPerTeam = 6,
+    IReadOnlyList<RaceTeamDefinition>? Teams = null,
+    bool ChequeredImminent = false,
+    IReadOnlyList<double?>? FastestLapSectorSeconds = null);
 
 public sealed record RaceAdminLoginRequest(string Password);
 
@@ -288,7 +340,11 @@ public sealed record RaceAdminRoomSettingsCommand(
     string? TrackName = null,
     string? TrackId = null,
     string? TrackRevision = null,
-    string? TrackPackageHash = null);
+    string? TrackPackageHash = null,
+    int TeamCount = 2,
+    int DriversPerTeam = 6,
+    IReadOnlyList<RaceTeamDefinition>? Teams = null,
+    TrackLimitEnforcementMode TrackLimitMode = TrackLimitEnforcementMode.WarningsOnly);
 
 public sealed record RaceRoomSettingsSnapshot(
     string SessionName,
@@ -303,7 +359,11 @@ public sealed record RaceRoomSettingsSnapshot(
     string? TrackName = null,
     string? TrackId = null,
     string? TrackRevision = null,
-    string? TrackPackageHash = null);
+    string? TrackPackageHash = null,
+    int TeamCount = 2,
+    int DriversPerTeam = 6,
+    IReadOnlyList<RaceTeamDefinition>? Teams = null,
+    TrackLimitEnforcementMode TrackLimitMode = TrackLimitEnforcementMode.WarningsOnly);
 
 public sealed record RaceAdminPenaltyCommand(
     Guid ParticipantId,
@@ -355,7 +415,17 @@ public static partial class RaceProtocolValidation
         CurrentSector = Math.Clamp(value.CurrentSector, 0, 99),
         CurrentLapSeconds = FiniteClamp(value.CurrentLapSeconds, 0, 86_400),
         PitServiceElapsedSeconds = FiniteClamp(value.PitServiceElapsedSeconds, 0, 60),
-        CompletedPitServices = Math.Clamp(value.CompletedPitServices, 0, 999)
+        CompletedPitServices = Math.Clamp(value.CompletedPitServices, 0, 999),
+        TrackToleranceMeters = value.TrackToleranceMeters > 0
+            ? FiniteClamp(value.TrackToleranceMeters, 4, 50)
+            : 18,
+        TrackLengthMeters = value.TrackLengthMeters > 0
+            ? FiniteClamp(value.TrackLengthMeters, 50, 100_000)
+            : 0,
+        PitSpeedLimitKph = value.PitSpeedLimitKph > 0
+            ? FiniteClamp(value.PitSpeedLimitKph, 10, 300)
+            : 0,
+        PitLaneElapsedSeconds = FiniteClamp(value.PitLaneElapsedSeconds, 0, 86_400)
     };
 
     private static string NormalizeSingleLine(string? value, int maximumLength)

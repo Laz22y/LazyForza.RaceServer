@@ -12,6 +12,15 @@ LazyForza 地产赛事的自托管服务端。单个赛事房间支持 1–12 �
 
 服务端不读取游戏，也不判断轮胎是否真的更换。车手位置、圈速、维修区状态和抓地趋势由各自的 LazyForza 客户端通过官方 FH6 UDP 推导并上传。
 
+## 版本与客户端兼容性
+
+当前正式服务端版本为 `v0.1.0`，适用于：
+
+- LazyForza `1.4.3`：完整支持当前车队选择、赛事 HUD、维修区和判罚状态；
+- LazyForza `1.4.2`：协议和比赛流程兼容。旧客户端没有服务端车队下拉框；填写的车队名与服务端配置一致时按名称加入，否则服务端会自动分配到仍有空位且当前人数较少的车队。
+
+LazyForza `1.4.1` 及更早版本没有当前地产赛事客户端，不列入支持范围。服务端采用独立版本号；服务端代码发生变化时同步发布新版本。若后续 LazyForza 客户端仍兼容同一服务端版本，应更新该服务端 GitHub Release 的适用版本列表，不为单纯的说明更新另起服务端版本。
+
 ## 本地运行
 
 需要 .NET 9 SDK：
@@ -44,6 +53,14 @@ chmod +x ./LazyForza.RaceServer.Web
 ```
 
 脚本默认生成 `win-x64`、`linux-x64`、`linux-arm64`、`osx-x64`、`osx-arm64` 五种独立运行包，并写入 `artifacts/development`。可用 `-Runtime win-x64` 只生成一个平台。
+
+正式发布使用独立的服务端版本号，并在说明中列出全部已确认兼容的 LazyForza 客户端版本：
+
+```powershell
+./scripts/Publish-Release.ps1 -Version 0.1.0 -ReleaseNotesPath ./release-notes.md
+```
+
+正式脚本会复跑原生与 Cloudflare 验证，生成五个平台的自包含包与 Cloudflare 源码包，推送注释标签并创建 GitHub Release。
 
 ## Cloudflare Durable Objects
 

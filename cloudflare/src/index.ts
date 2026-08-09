@@ -13,6 +13,11 @@ import {
   type SessionCommand,
   type TelemetryUpdate
 } from "./protocol";
+import {
+  createStoredCredentials,
+  type StoredCredentials,
+  verifyPassword
+} from "./passwords";
 
 interface Env {
   RACE_ROOM: DurableObjectNamespace;
@@ -28,9 +33,6 @@ interface Env {
 interface SocketAttachment {
   participantId?: string;
 }
-
-interface PasswordDigest { salt: string; hash: string; iterations: number; }
-interface StoredCredentials { player: PasswordDigest; admin: PasswordDigest; }
 
 const adminCookieName = "lfz_race_admin";
 const storedStateKey = "race-state-v1";
@@ -60,6 +62,7 @@ export class RaceRoom {
   private lastBroadcastAt = 0;
   private lastTelemetryPersistedAt = 0;
   private credentials: StoredCredentials | null = null;
+  private setupInProgress = false;
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
     this.initialized = this.state.blockConcurrencyWhile(async () => {
@@ -107,6 +110,8 @@ export class RaceRoom {
         activeTrackPackageHash: snapshot.trackPackageHash,
         allowTeams: snapshot.allowTeams,
         sectorCount: snapshot.sectorCount,
+        driversPerTeam: snapshot.driversPerTeam,
+        teams: snapshot.teams,
         phase: snapshot.phase,
         serverTime: snapshot.serverTime
       });
@@ -115,6 +120,8 @@ export class RaceRoom {
       return json({ error: "总控登录已过期。" }, 401);
     if (url.pathname === "/api/admin/state" && request.method === "GET")
       return json(this.core.snapshot());
+    if (url.pathname === "/api/admin/events" && request.method === "GET")
+      return json(this.core.events(Number.parseInt(url.searchParams.get("limit") ?? "250", 10)));
     if (url.pathname === "/api/admin/settings" && request.method === "GET")
       return json(this.core.roomSettings());
     if (url.pathname === "/api/admin/settings" && request.method === "POST")
@@ -227,6 +234,10 @@ export class RaceRoom {
 
   private async initialSetup(request: Request): Promise<Response> {
     if (this.isConfigured()) return json({ error: "服务端已经完成首次设置。" }, 400);
+    if (this.setupInProgress)
+      return json({ error: "首次设置正在保存，请不要重复提交。", code: "setupInProgress" }, 409);
+    this.setupInProgress = true;
+    const previousRoom = this.core.roomSettings();
     try {
       const body = await readJson(request) as {
         playerPassword?: string; adminPassword?: string; sessionName?: string;
@@ -244,12 +255,23 @@ export class RaceRoom {
         sectorCount: Number(body.sectorCount) || 3
       });
       if (!result.ok) return json({ error: result.error }, 400);
-      this.credentials = { player: await passwordDigest(player), admin: await passwordDigest(admin) };
-      await this.state.storage.put(storedCredentialsKey, this.credentials);
-      await this.persist();
+      const credentials = await createStoredCredentials(player, admin);
+      await this.state.storage.put({
+        [storedCredentialsKey]: credentials,
+        [storedStateKey]: this.core.serialize()
+      });
+      this.credentials = credentials;
+      this.lastTelemetryPersistedAt = Date.now();
       return json({ ok: true });
     } catch (error) {
-      return json({ error: error instanceof Error ? error.message : "首次设置请求无效。" }, 400);
+      this.core.applyRoomSettings(previousRoom);
+      console.error("Cloudflare initial setup failed", error);
+      return json({
+        error: "首次设置未能写入 Durable Object，请稍后重试；若仍失败，请查看 Worker 日志中的请求错误。",
+        code: "setupFailed"
+      }, 503);
+    } finally {
+      this.setupInProgress = false;
     }
   }
 
@@ -423,40 +445,6 @@ async function secureEquals(left: string, right: string): Promise<boolean> {
   let difference = 0;
   for (let index = 0; index < a.length; index++) difference |= a[index] ^ b[index];
   return difference === 0;
-}
-
-async function passwordDigest(password: string): Promise<PasswordDigest> {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const iterations = 120_000;
-  const key = await crypto.subtle.importKey(
-    "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
-  const hash = new Uint8Array(await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: "SHA-256", salt, iterations }, key, 256));
-  return { salt: base64Url(salt), hash: base64Url(hash), iterations };
-}
-
-async function verifyPassword(password: string, digest: PasswordDigest): Promise<boolean> {
-  try {
-    const salt = fromBase64Url(digest.salt);
-    const expected = fromBase64Url(digest.hash);
-    const key = await crypto.subtle.importKey(
-      "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
-    const actual = new Uint8Array(await crypto.subtle.deriveBits(
-      { name: "PBKDF2", hash: "SHA-256", salt, iterations: Math.min(1_000_000, Math.max(100_000, digest.iterations)) },
-      key, expected.byteLength * 8));
-    if (actual.length !== expected.length) return false;
-    let difference = 0;
-    for (let index = 0; index < actual.length; index++) difference |= actual[index] ^ expected[index];
-    return difference === 0;
-  } catch { return false; }
-}
-
-function fromBase64Url(value: string): Uint8Array<ArrayBuffer> {
-  const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
-  const binary = atob(normalized + "=".repeat((4 - normalized.length % 4) % 4));
-  const bytes = new Uint8Array(new ArrayBuffer(binary.length));
-  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-  return bytes;
 }
 
 function cleanSetupText(value: unknown, maximum: number): string | null {
