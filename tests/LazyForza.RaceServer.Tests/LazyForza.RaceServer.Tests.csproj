@@ -12,5 +12,6 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\LazyForza.RaceServer.Protocol\LazyForza.RaceServer.Protocol.csproj" />
     <ProjectReference Include="..\..\src\LazyForza.RaceServer.Core\LazyForza.RaceServer.Core.csproj" />
+    <ProjectReference Include="..\..\src\LazyForza.RaceServer.Web\LazyForza.RaceServer.Web.csproj" />
   </ItemGroup>
 </Project>

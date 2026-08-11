@@ -380,7 +380,10 @@ public sealed class RaceCoordinator
                     participant.Id,
                     pitSpeedPenalty));
             var automaticYellowBefore = participant.AutomaticYellowActive;
-            EvaluateAutomaticYellow(participant, now);
+            EvaluateAutomaticYellow(
+                participant,
+                now,
+                normalized.IsOnPitRoute || normalized.IsApproachingPit);
             if (!automaticYellowBefore && participant.AutomaticYellowActive)
                 audits.Add(new RaceAuditEntry(
                     now,
@@ -1383,6 +1386,7 @@ public sealed class RaceCoordinator
             var plausibleDistance = Math.Max(60, reportedSpeed * elapsedSeconds * 3 + 30);
             var eligible = phase is RaceSessionPhase.Race or RaceSessionPhase.Qualifying &&
                            !telemetry.IsInPitLane && !telemetry.IsInServiceZone && !telemetry.IsApproachingPit &&
+                           !telemetry.IsOnPitRoute &&
                            participant.Status is not (RaceParticipantStatus.Finished or
                                RaceParticipantStatus.DidNotFinish or RaceParticipantStatus.Disqualified or
                                RaceParticipantStatus.Disconnected);
@@ -1390,7 +1394,6 @@ public sealed class RaceCoordinator
                 routeDistance > plausibleDistance && !participant.ShortcutPenaltyIssued)
             {
                 participant.ShortcutPenaltyIssued = true;
-                participant.LapHasTrackLimitIncident = true;
                 participant.TrackLimitSeverePenaltyIssued = true;
                 penalty = RegisterTrackLimitIncident(
                     participant,
@@ -1447,6 +1450,7 @@ public sealed class RaceCoordinator
     {
         if (phase is not (RaceSessionPhase.Race or RaceSessionPhase.Qualifying) ||
             telemetry.IsInPitLane || telemetry.IsInServiceZone || telemetry.IsApproachingPit ||
+            telemetry.IsOnPitRoute ||
             participant.Status is RaceParticipantStatus.Finished or RaceParticipantStatus.DidNotFinish or
                 RaceParticipantStatus.Disqualified or RaceParticipantStatus.Disconnected)
         {
@@ -1459,7 +1463,8 @@ public sealed class RaceCoordinator
         var absoluteOffset = Math.Abs(participant.LateralOffsetMeters);
         if (absoluteOffset >= minorOffsetMeters)
         {
-            participant.LapHasTrackLimitIncident = true;
+            if (trackLimitMode != TrackLimitEnforcementMode.Disabled)
+                participant.LapHasTrackLimitIncident = true;
             participant.TrackLimitRejoinStartedAt = null;
             if (participant.TrackLimitExcursionStartedAt is null)
             {
@@ -1530,6 +1535,7 @@ public sealed class RaceCoordinator
     {
         if (trackLimitMode == TrackLimitEnforcementMode.Disabled) return null;
 
+        participant.LapHasTrackLimitIncident = true;
         participant.TrackLimitWarnings++;
         if (trackLimitMode == TrackLimitEnforcementMode.WarningsOnly)
             return AddAutomaticTrackLimitPenalty(
@@ -1627,10 +1633,13 @@ public sealed class RaceCoordinator
             participant.Status = RaceParticipantStatus.Ready;
     }
 
-    private void EvaluateAutomaticYellow(ParticipantState participant, DateTimeOffset now)
+    private void EvaluateAutomaticYellow(
+        ParticipantState participant,
+        DateTimeOffset now,
+        bool isOnPitRoute = false)
     {
         if (!automaticYellowEnabled || phase is not (RaceSessionPhase.Race or RaceSessionPhase.Qualifying) ||
-            participant.IsInPitLane || participant.IsInServiceZone ||
+            participant.IsInPitLane || participant.IsInServiceZone || isOnPitRoute ||
             participant.Status is RaceParticipantStatus.Finished or RaceParticipantStatus.DidNotFinish or
                 RaceParticipantStatus.Disqualified or RaceParticipantStatus.Disconnected)
         {

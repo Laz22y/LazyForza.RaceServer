@@ -9,6 +9,30 @@ namespace LazyForza.RaceServer.Tests;
 public sealed class RaceCoordinatorTests
 {
     [TestMethod]
+    public void TwelveDriverSnapshotFitsQuarterSecondBroadcastBudget()
+    {
+        var coordinator = CreateCoordinator();
+        var participants = Enumerable.Range(1, RaceProtocol.MaximumParticipants)
+            .Select(index => Join(coordinator, index).Accepted!)
+            .ToArray();
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Race, null, 10, null, null));
+        for (var index = 0; index < participants.Length; index++)
+            coordinator.UpdateTelemetry(participants[index].ParticipantId,
+                Telemetry(2, index / (double)participants.Length));
+
+        var message = RaceProtocolJson.Serialize(RaceMessageTypes.Snapshot, 1, coordinator.Snapshot());
+        var bytes = Encoding.UTF8.GetByteCount(message);
+        var egressBytesPerSecond = bytes * RaceProtocol.MaximumParticipants * 4L;
+        Console.WriteLine(
+            $"12-driver snapshot={bytes} bytes; 4Hz room egress={egressBytesPerSecond} bytes/s");
+
+        Assert.IsTrue(bytes < 64 * 1024, "单个 12 人快照必须保持在协议消息上限内。");
+        Assert.IsTrue(egressBytesPerSecond < 3 * 1024 * 1024,
+            "每秒四次向 12 个客户端广播不应产生不可接受的单房间带宽。");
+    }
+
+    [TestMethod]
     public void SupportsEveryRoomSizeFromTwoThroughTwelveAndRejectsThirteenthDriver()
     {
         for (var expected = 2; expected <= RaceProtocol.MaximumParticipants; expected++)
@@ -475,6 +499,59 @@ public sealed class RaceCoordinatorTests
         snapshot = coordinator.Snapshot();
         Assert.AreEqual(RaceSessionPhase.Grid, snapshot.Phase);
         Assert.AreEqual(71.250, snapshot.Participants.Single().BestLapSeconds!.Value, .0001);
+    }
+
+    [TestMethod]
+    public void RecordedPitBranchDoesNotTriggerYellowOrTrackLimitWarning()
+    {
+        var coordinator = CreateCoordinator();
+        var participant = Join(coordinator, 1).Accepted!;
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Qualifying, null, null, null, 10));
+        var started = DateTimeOffset.Parse("2026-08-10T10:00:00Z");
+        var pitBranch = Telemetry(0, .8) with
+        {
+            LateralOffsetMeters = 80,
+            SpeedKph = 4,
+            TrackLengthMeters = 2_000,
+            IsOnPitRoute = true
+        };
+
+        coordinator.UpdateTelemetry(participant.ParticipantId, pitBranch, started);
+        coordinator.UpdateTelemetry(participant.ParticipantId,
+            pitBranch with { ClientMonotonicMilliseconds = 14_000 }, started.AddSeconds(4));
+
+        var snapshot = coordinator.Snapshot(started.AddSeconds(4));
+        Assert.AreEqual(RaceControlFlag.Green, snapshot.Flag);
+        Assert.AreEqual(0, snapshot.Participants.Single().TrackLimitWarnings);
+        Assert.HasCount(0, snapshot.Participants.Single().Penalties);
+    }
+
+    [TestMethod]
+    public void PitApproachBeforeEntryLineDoesNotTriggerYellowOrTrackLimitWarning()
+    {
+        var coordinator = CreateCoordinator();
+        var participant = Join(coordinator, 1).Accepted!;
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Qualifying, null, null, null, 10));
+        var started = DateTimeOffset.Parse("2026-08-10T10:00:00Z");
+        var pitApproach = Telemetry(0, .8) with
+        {
+            LateralOffsetMeters = 80,
+            SpeedKph = 4,
+            TrackLengthMeters = 2_000,
+            IsApproachingPit = true,
+            IsOnPitRoute = false
+        };
+
+        coordinator.UpdateTelemetry(participant.ParticipantId, pitApproach, started);
+        coordinator.UpdateTelemetry(participant.ParticipantId,
+            pitApproach with { ClientMonotonicMilliseconds = 14_000 }, started.AddSeconds(4));
+
+        var snapshot = coordinator.Snapshot(started.AddSeconds(4));
+        Assert.AreEqual(RaceControlFlag.Green, snapshot.Flag);
+        Assert.AreEqual(0, snapshot.Participants.Single().TrackLimitWarnings);
+        Assert.HasCount(0, snapshot.Participants.Single().Penalties);
     }
 
     [TestMethod]
@@ -1041,6 +1118,7 @@ public sealed class RaceCoordinatorTests
         Assert.AreEqual(18, telemetry.TrackToleranceMeters, 0.0001);
         Assert.AreEqual(0, telemetry.TrackLengthMeters, 0.0001);
         Assert.IsFalse(telemetry.IsApproachingPit);
+        Assert.IsFalse(telemetry.IsOnPitRoute);
 
         var lapEnvelope = RaceProtocolJson.DeserializeEnvelope(Encoding.UTF8.GetBytes(
             """{"protocolVersion":2,"type":"lapCompleted","sequence":3,"payload":{"eventId":"11111111-1111-1111-1111-111111111111","lapNumber":1,"lapSeconds":60,"sectorSeconds":[20,20,20],"isValid":true,"invalidReason":null,"clientMonotonicMilliseconds":60000}}"""));

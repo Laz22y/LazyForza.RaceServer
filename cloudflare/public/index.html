@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/teams.css?v=20260809-2">
   <link rel="stylesheet" href="/events.css?v=20260809-1">
+  <link rel="stylesheet" href="/results.css?v=20260811-2">
 </head>
 <body>
   <main class="shell">
@@ -59,17 +60,12 @@
       <section class="control-grid">
         <article class="panel controls room-settings">
           <div class="section-heading"><div><p class="eyebrow">ROOM SETTINGS</p><h2>房间设置</h2></div><span id="settingsSaved" class="save-state"></span></div>
-          <div class="field-grid room-fields">
+          <div class="field-grid room-fields room-fields-primary">
             <label>赛事名称<input id="sessionName" maxlength="64"></label>
             <label>正赛圈数<input id="raceLaps" type="number" min="1" max="999"></label>
             <label>赛道分段数<input id="sectorCount" type="number" min="1" max="20"></label>
             <label class="toggle"><input id="automaticYellow" type="checkbox"><span>启用自动黄旗</span></label>
-          </div>
-          <div class="field-grid room-fields">
             <label class="toggle"><input id="allowTeams" type="checkbox"><span>允许车队</span></label>
-            <label>赛道名称<input id="trackName" maxlength="128" placeholder="例如：英国塔俱乐部环道"></label>
-            <label>赛道标识<input id="trackId" maxlength="128" placeholder="导出时显示的 UUID"></label>
-            <label>赛道数据 SHA-256<input id="trackPackageHash" maxlength="128" placeholder="导出时显示的 64 位摘要"></label>
           </div>
           <section id="teamSettings" class="team-settings hidden">
             <div class="team-settings-head">
@@ -81,8 +77,34 @@
             </div>
             <div id="teamRows" class="team-rows"></div>
           </section>
-          <details>
-            <summary>自动黄旗与赛道边界判定</summary>
+          <details class="room-submenu">
+            <summary><span>赛道与客户端同步</span><small>标识、摘要与赛道文件托管</small></summary>
+            <div class="room-submenu-body">
+              <div class="field-grid room-fields">
+                <label>赛道名称<input id="trackName" maxlength="128" placeholder="例如：英国塔俱乐部环道"></label>
+                <label>赛道标识<input id="trackId" maxlength="128" placeholder="导出时显示的 UUID"></label>
+                <label>赛道数据 SHA-256<input id="trackPackageHash" maxlength="128" placeholder="导出时显示的 64 位摘要"></label>
+              </div>
+              <section class="track-package-panel">
+                <div><strong>托管赛道文件</strong><p class="muted compact">上传 .lfzestate 后，缺少赛道的车手可在进入房间前自行确认下载；已有相同标识和 SHA-256 的客户端不会请求文件。自托管与 Cloudflare 均限制为 1.5 MiB。</p></div>
+                <div class="track-package-actions"><input id="trackPackageFile" type="file" accept=".lfzestate,application/zip"><button id="uploadTrackPackage" type="button">上传并托管</button><button id="deleteTrackPackage" type="button" class="quiet">移除托管文件</button></div>
+                <p id="trackPackageStatus" class="track-package-status">尚未读取托管状态</p>
+              </section>
+            </div>
+          </details>
+          <details class="room-submenu">
+            <summary><span>排行榜赛事 Logo</span><small>客户端顶栏品牌图</small></summary>
+            <div class="room-submenu-body">
+              <section class="organizer-logo-panel">
+                <div><strong>排行榜赛事 Logo</strong><p class="muted compact">显示在客户端排行榜顶栏左侧。建议上传透明背景 PNG，并在图片四周留少量空白；JPG 不支持透明背景。未上传时使用 LazyForza 的 LF Logo。</p></div>
+                <div class="organizer-logo-actions"><span class="organizer-logo-preview"><img id="organizerLogoPreview" alt="赛事 Logo 预览"></span><input id="organizerLogoFile" type="file" accept="image/png,image/jpeg"><button id="uploadOrganizerLogo" type="button">上传 Logo</button><button id="deleteOrganizerLogo" type="button" class="quiet">恢复默认</button></div>
+                <p id="organizerLogoStatus" class="track-package-status">尚未读取 Logo 状态</p>
+              </section>
+            </div>
+          </details>
+          <details class="room-submenu">
+            <summary><span>判定与自动化</span><small>黄旗、边界与恢复阈值</small></summary>
+            <div class="room-submenu-body">
             <div class="field-grid hazard-fields">
               <label>赛道边界处理<select id="trackLimitMode"><option value="warningsOnly">仅记录警告，交总控核查</option><option value="automatic">自动警告与罚时</option><option value="disabled">关闭判定</option></select></label>
               <label>极低速阈值 km/h<input id="slowSpeedKph" type="number" min="3" max="50" step="1"></label>
@@ -91,6 +113,7 @@
               <label>恢复确认秒数<input id="recoveryDurationSeconds" type="number" min="1" max="15" step="0.5"></label>
             </div>
             <p class="muted compact">排位赛和正赛都会记录赛道边界事件。系统会结合路线进度、车速和驶离期间的实际路程估算是否获得距离优势；单纯压草、冲入砂石或合法驶入维修区不会因为横向距离过大就自动罚时。“仅记录警告”会保留次数和证据，交由总控人工核查；“自动警告与罚时”才会在三次轻微警告后罚时，明确的严重获利会直接罚时。</p>
+            </div>
           </details>
           <button id="saveSettings" class="primary align-start">保存房间设置</button>
           <p class="muted compact">赛事名称与规则不会再被实时刷新覆盖。发车后需要先返回大厅，才能修改圈数、分段和自动黄旗参数。</p>
@@ -120,7 +143,7 @@
       </section>
 
       <section class="panel timing-panel">
-        <div class="section-heading"><div><p class="eyebrow">LIVE TIMING</p><h2>实时排名与赛事管理</h2></div><button id="logoutButton" class="quiet">退出总控</button></div>
+        <div class="section-heading"><div><p class="eyebrow">LIVE TIMING</p><h2>实时排名与赛事管理</h2></div><div class="timing-heading-actions"><div id="resultExportPanel" class="result-export hidden"><button id="exportResultsPng" type="button">导出完整成绩 PNG</button><button id="exportResultsCsv" type="button">导出表格 CSV</button></div><button id="logoutButton" class="quiet">退出总控</button></div></div>
         <div class="table-wrap"><table><thead><tr><th>排名</th><th>车手</th><th>状态</th><th>圈数</th><th>当前圈</th><th>最快圈</th><th>正赛总时间</th><th>Delta</th><th>管理</th></tr></thead><tbody id="timingRows"></tbody></table></div>
         <p id="actionError" class="form-error" aria-live="polite"></p>
       </section>
@@ -131,6 +154,6 @@
       </section>
     </div>
   </main>
-  <script src="/app.js?v=20260809-4" defer></script>
+  <script src="/app.js?v=20260811-1" defer></script>
 </body>
 </html>

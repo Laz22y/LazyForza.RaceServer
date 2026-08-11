@@ -454,7 +454,10 @@ export class RaceCore {
     this.evaluateTrackLimits(participant, update, now);
     this.evaluatePitSpeeding(participant, update, now);
     const yellowBefore = participant.automaticYellowActive ?? false;
-    this.evaluateAutomaticYellow(participant, now);
+    this.evaluateAutomaticYellow(
+      participant,
+      now,
+      Boolean(update.isOnPitRoute || update.isApproachingPit));
     if (!yellowBefore && participant.automaticYellowActive)
       this.recordEvent("automaticYellow", `${participant.displayName} 触发第 ${(participant.automaticYellowSector ?? 0) + 1} 分段自动黄旗：${participant.automaticYellowReason ?? "异常车辆"}。`, participant.id, now);
     else if (yellowBefore && !participant.automaticYellowActive)
@@ -1149,9 +1152,9 @@ export class RaceCore {
 
   private touch(): void { this.state.revision++; }
 
-  private evaluateAutomaticYellow(participant: ParticipantState, now: Date): void {
+  private evaluateAutomaticYellow(participant: ParticipantState, now: Date, isOnPitRoute = false): void {
     if (!this.state.automaticYellowEnabled || (this.state.phase !== "race" && this.state.phase !== "qualifying") || participant.isInPitLane ||
-        participant.isInServiceZone || terminal(participant.status) || participant.status === "disconnected") {
+        participant.isInServiceZone || isOnPitRoute || terminal(participant.status) || participant.status === "disconnected") {
       participant.automaticYellowActive = false;
       participant.hazardCandidateStartedAt = null;
       participant.hazardRecoveryStartedAt = null;
@@ -1276,7 +1279,7 @@ export class RaceCore {
     const serviceBlocked = this.pendingTimePenaltySeconds(participant.id) > 0 ||
       Boolean(participant.penaltyServiceActive);
     participant.pitServiceElapsedSeconds = participant.isInServiceZone && !serviceBlocked
-      ? clamp(update.pitServiceElapsedSeconds, 0, 60)
+      ? clamp(update.pitServiceElapsedSeconds, 0, 86_400)
       : 0;
     participant.pitLaneElapsedSeconds = clamp(update.pitLaneElapsedSeconds ?? 0, 0, 86_400);
     participant.pitServiceRequirementMet = participant.isInServiceZone && !serviceBlocked &&
@@ -1384,12 +1387,11 @@ export class RaceCore {
       const reportedSpeed = Math.max(participant.speedKph, clamp(update.speedKph, 0, 800)) / 3.6;
       const plausibleDistance = Math.max(60, reportedSpeed * elapsedSeconds * 3 + 30);
       if ((this.state.phase === "race" || this.state.phase === "qualifying") &&
-          !participant.isInPitLane && !participant.isInServiceZone && !update.isApproachingPit &&
+          !participant.isInPitLane && !participant.isInServiceZone && !update.isApproachingPit && !update.isOnPitRoute &&
           !terminal(participant.status) && participant.status !== "disconnected" &&
           elapsedSeconds > 0 && elapsedSeconds <= 2 && progressDelta > 0 && progressDelta < .75 &&
           routeDistance > plausibleDistance && !participant.shortcutPenaltyIssued) {
         participant.shortcutPenaltyIssued = true;
-        participant.lapHasTrackLimitIncident = true;
         participant.trackLimitSeverePenaltyIssued = true;
         this.registerTrackLimitIncident(
           participant, true,
@@ -1425,7 +1427,7 @@ export class RaceCore {
 
   private evaluateTrackLimits(participant: ParticipantState, update: TelemetryUpdate, now: Date): void {
     if ((this.state.phase !== "race" && this.state.phase !== "qualifying") ||
-        participant.isInPitLane || participant.isInServiceZone || update.isApproachingPit ||
+        participant.isInPitLane || participant.isInServiceZone || update.isApproachingPit || update.isOnPitRoute ||
         terminal(participant.status) || participant.status === "disconnected") {
       this.resetTrackLimitExcursion(participant);
       return;
@@ -1434,7 +1436,7 @@ export class RaceCore {
     const severeOffsetMeters = Math.max(minorOffsetMeters + 6, this.state.severeLateralOffsetMeters);
     const absoluteOffset = Math.abs(participant.lateralOffsetMeters);
     if (absoluteOffset >= minorOffsetMeters) {
-      participant.lapHasTrackLimitIncident = true;
+      if (this.state.trackLimitMode !== "disabled") participant.lapHasTrackLimitIncident = true;
       participant.trackLimitRejoinStartedAt = null;
       if (!participant.trackLimitExcursionStartedAt) {
         participant.trackLimitExcursionStartedAt = now.toISOString();
@@ -1487,6 +1489,7 @@ export class RaceCore {
     evidence: string,
     now: Date): void {
     if (this.state.trackLimitMode === "disabled") return;
+    participant.lapHasTrackLimitIncident = true;
     participant.trackLimitWarnings = (participant.trackLimitWarnings ?? 0) + 1;
     if (this.state.trackLimitMode === "warningsOnly") {
       this.addAutomaticTrackLimitPenalty(participant, "warning", null,

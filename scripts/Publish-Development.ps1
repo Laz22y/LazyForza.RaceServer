@@ -24,8 +24,9 @@ $runtimes = if ($Runtime -eq 'all') {
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
 
 foreach ($targetRuntime in $runtimes) {
-    $packageBaseName = if ($PackageVersion) {
-        "LazyForza.RaceServer-$PackageVersion-$targetRuntime"
+    $packageLabel = if ($PackageVersion) { $PackageVersion } elseif ($CloudflareLabel) { $CloudflareLabel } else { $null }
+    $packageBaseName = if ($packageLabel) {
+        "LazyForza.RaceServer-$packageLabel-$targetRuntime"
     } else {
         "LazyForza.RaceServer-$targetRuntime"
     }
@@ -119,7 +120,7 @@ if ($CloudflareLabel -or $PackageVersion) {
         New-Item -ItemType Directory -Force -Path (Join-Path $cloudflareStage $directory) | Out-Null
     }
     foreach ($relative in @(
-            'public/app.js', 'public/events.css', 'public/index.html', 'public/styles.css', 'public/teams.css',
+            'public/app.js', 'public/events.css', 'public/index.html', 'public/results.css', 'public/styles.css', 'public/teams.css',
             'src/index.ts', 'src/passwords.ts', 'src/protocol.ts', 'src/race-core.ts',
             'tests/passwords.test.ts', 'tests/race-core.test.ts',
             'package-lock.json', 'package.json', 'README.md', 'tsconfig.json', 'wrangler.jsonc')) {

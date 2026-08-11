@@ -57,6 +57,7 @@ export interface TelemetryUpdate {
   pitSpeedLimitKph?: number;
   pitLaneElapsedSeconds?: number;
   isApproachingPit?: boolean;
+  isOnPitRoute?: boolean;
 }
 
 export interface LapCompleted {
@@ -175,6 +176,9 @@ export interface SessionSnapshot {
   driversPerTeam: number;
   teams: TeamDefinition[];
   chequeredImminent: boolean;
+  organizerLogoHash?: string | null;
+  organizerLogoMimeType?: string | null;
+  organizerLogoDownloadPath?: string | null;
 }
 
 export interface YellowZoneSnapshot {

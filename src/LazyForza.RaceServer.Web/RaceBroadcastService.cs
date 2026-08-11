@@ -6,8 +6,10 @@ namespace LazyForza.RaceServer.Web;
 
 public sealed class RaceBroadcastService : BackgroundService
 {
+    internal static readonly TimeSpan MinimumBroadcastInterval = TimeSpan.FromMilliseconds(100);
     private readonly RaceCoordinator coordinator;
     private readonly RaceWebSocketRegistry registry;
+    private readonly HostedOrganizerLogoStore organizerLogo;
     private readonly Channel<RaceSessionSnapshot> snapshots = Channel.CreateBounded<RaceSessionSnapshot>(
         new BoundedChannelOptions(1)
         {
@@ -17,10 +19,14 @@ public sealed class RaceBroadcastService : BackgroundService
         });
     private long sequence;
 
-    public RaceBroadcastService(RaceCoordinator coordinator, RaceWebSocketRegistry registry)
+    public RaceBroadcastService(
+        RaceCoordinator coordinator,
+        RaceWebSocketRegistry registry,
+        HostedOrganizerLogoStore organizerLogo)
     {
         this.coordinator = coordinator;
         this.registry = registry;
+        this.organizerLogo = organizerLogo;
         coordinator.SnapshotChanged += Queue;
     }
 
@@ -28,15 +34,39 @@ public sealed class RaceBroadcastService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        var lastBroadcastAt = DateTimeOffset.MinValue;
         try
         {
-            await foreach (var snapshot in snapshots.Reader.ReadAllAsync(stoppingToken))
+            while (await snapshots.Reader.WaitToReadAsync(stoppingToken))
             {
-                var message = RaceProtocolJson.Serialize(RaceMessageTypes.Snapshot, Interlocked.Increment(ref sequence), snapshot);
+                if (!snapshots.Reader.TryRead(out var snapshot)) continue;
+                while (snapshots.Reader.TryRead(out var newer)) snapshot = newer;
+
+                var remaining = MinimumBroadcastInterval - (DateTimeOffset.UtcNow - lastBroadcastAt);
+                if (remaining > TimeSpan.Zero)
+                    await Task.Delay(remaining, stoppingToken);
+                while (snapshots.Reader.TryRead(out var newer)) snapshot = newer;
+
+                var message = RaceProtocolJson.Serialize(
+                    RaceMessageTypes.Snapshot,
+                    Interlocked.Increment(ref sequence),
+                    WithOrganizerLogo(snapshot));
                 await registry.BroadcastAsync(message, stoppingToken);
+                lastBroadcastAt = DateTimeOffset.UtcNow;
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+    }
+
+    public RaceSessionSnapshot WithOrganizerLogo(RaceSessionSnapshot snapshot)
+    {
+        var logo = organizerLogo.Current;
+        return snapshot with
+        {
+            OrganizerLogoHash = logo?.Sha256,
+            OrganizerLogoMimeType = logo?.MimeType,
+            OrganizerLogoDownloadPath = logo is null ? null : "/api/organizer-logo"
+        };
     }
 
     public override void Dispose()

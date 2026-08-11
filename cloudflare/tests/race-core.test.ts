@@ -62,7 +62,7 @@ describe("RaceCore", () => {
       completedPitServices: 1
     });
     let participant = core.snapshot().participants.find(candidate => candidate.id === first)!;
-    expect(participant.pitServiceElapsedSeconds).toBe(60);
+    expect(participant.pitServiceElapsedSeconds).toBe(999);
     expect(participant.completedPitServices).toBe(1);
 
     core.updateTelemetry(first, {
@@ -217,6 +217,57 @@ describe("RaceCore", () => {
     core.updateTelemetry(approaching, slow, new Date(start.getTime() + 3_100));
     expect(core.snapshot().flag).toBe("yellow");
     expect(core.snapshot().banner?.kind).not.toBe("yellowFlag");
+  });
+
+  it("treats the recorded pit branch as a legal route for yellow and track limits", () => {
+    const core = createCore();
+    const participantId = connect(core, "维修区车手");
+    const started = new Date("2026-08-10T10:00:00Z");
+    core.applySession({ phase: "qualifying", qualifyingMinutes: 10 }, started);
+    const pitBranch = {
+      ...telemetry(),
+      lateralOffsetMeters: 80,
+      speedKph: 4,
+      trackLengthMeters: 2_000,
+      isOnPitRoute: true
+    };
+
+    core.updateTelemetry(participantId, pitBranch, started);
+    core.updateTelemetry(participantId, {
+      ...pitBranch,
+      clientMonotonicMilliseconds: 4_001
+    }, new Date(started.getTime() + 4_000));
+
+    const snapshot = core.snapshot(new Date(started.getTime() + 4_000));
+    expect(snapshot.flag).toBe("green");
+    expect(snapshot.participants[0].trackLimitWarnings).toBe(0);
+    expect(snapshot.participants[0].penalties).toHaveLength(0);
+  });
+
+  it("treats the recorded approach before the pit entry line as a legal route", () => {
+    const core = createCore();
+    const participantId = connect(core, "维修区入口车手");
+    const started = new Date("2026-08-10T10:00:00Z");
+    core.applySession({ phase: "qualifying", qualifyingMinutes: 10 }, started);
+    const pitApproach = {
+      ...telemetry(),
+      lateralOffsetMeters: 80,
+      speedKph: 4,
+      trackLengthMeters: 2_000,
+      isApproachingPit: true,
+      isOnPitRoute: false
+    };
+
+    core.updateTelemetry(participantId, pitApproach, started);
+    core.updateTelemetry(participantId, {
+      ...pitApproach,
+      clientMonotonicMilliseconds: 4_001
+    }, new Date(started.getTime() + 4_000));
+
+    const snapshot = core.snapshot(new Date(started.getTime() + 4_000));
+    expect(snapshot.flag).toBe("green");
+    expect(snapshot.participants[0].trackLimitWarnings).toBe(0);
+    expect(snapshot.participants[0].penalties).toHaveLength(0);
   });
 
   it("runs out lap, formation lap and the five-light start sequence", () => {

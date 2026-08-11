@@ -51,7 +51,9 @@ public sealed class RaceWebSocketHandler(
 
             participantId = result.Accepted!.ParticipantId;
             await registry.RegisterAsync(participantId.Value, socket, context.RequestAborted);
-            await SendAsync(socket, RaceMessageTypes.LoginAccepted, result.Accepted, context.RequestAborted);
+            await SendAsync(socket, RaceMessageTypes.LoginAccepted,
+                result.Accepted with { Snapshot = broadcasts.WithOrganizerLogo(result.Accepted.Snapshot) },
+                context.RequestAborted);
             broadcasts.Queue(result.Accepted.Snapshot);
 
             while (socket.State == WebSocketState.Open && !context.RequestAborted.IsCancellationRequested)

@@ -121,7 +121,14 @@ public sealed record RaceServerDescriptor(
     bool AllowTeams = true,
     int SectorCount = 0,
     int DriversPerTeam = 6,
-    IReadOnlyList<RaceTeamDefinition>? Teams = null);
+    IReadOnlyList<RaceTeamDefinition>? Teams = null,
+    bool TrackPackageAvailable = false,
+    long? TrackPackageSizeBytes = null,
+    string? TrackPackageDownloadPath = null,
+    string? TrackPackageFileSha256 = null,
+    string? OrganizerLogoHash = null,
+    string? OrganizerLogoMimeType = null,
+    string? OrganizerLogoDownloadPath = null);
 
 public sealed record RaceTeamDefinition(
     string Id,
@@ -179,7 +186,8 @@ public sealed record RaceTelemetryUpdate(
     double TrackLengthMeters = 0,
     double PitSpeedLimitKph = 0,
     double PitLaneElapsedSeconds = 0,
-    bool IsApproachingPit = false);
+    bool IsApproachingPit = false,
+    bool IsOnPitRoute = false);
 
 public sealed record RaceLapCompleted(
     Guid EventId,
@@ -311,7 +319,10 @@ public sealed record RaceSessionSnapshot(
     int DriversPerTeam = 6,
     IReadOnlyList<RaceTeamDefinition>? Teams = null,
     bool ChequeredImminent = false,
-    IReadOnlyList<double?>? FastestLapSectorSeconds = null);
+    IReadOnlyList<double?>? FastestLapSectorSeconds = null,
+    string? OrganizerLogoHash = null,
+    string? OrganizerLogoMimeType = null,
+    string? OrganizerLogoDownloadPath = null);
 
 public sealed record RaceAdminLoginRequest(string Password);
 

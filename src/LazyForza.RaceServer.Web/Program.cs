@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using LazyForza.RaceServer.Core;
 using LazyForza.RaceServer.Protocol;
@@ -42,6 +43,8 @@ builder.Services.AddSingleton(serviceProvider => new RaceCoordinator(
     serviceProvider.GetRequiredService<IRaceStatePersistence>(),
     configurationStore.PlayerPasswordMatches));
 builder.Services.AddSingleton<RaceWebSocketRegistry>();
+builder.Services.AddSingleton<HostedTrackPackageStore>();
+builder.Services.AddSingleton<HostedOrganizerLogoStore>();
 builder.Services.AddSingleton<RaceBroadcastService>();
 builder.Services.AddSingleton<RaceWebSocketHandler>();
 builder.Services.AddSingleton(new AdminSessionStore(configurationStore.AdminPasswordMatches));
@@ -69,9 +72,14 @@ app.MapGet("/health", (RaceCoordinator coordinator, RaceWebSocketRegistry socket
     connectedSockets = sockets.Count
 }));
 
-app.MapGet("/.well-known/lazyforza-race.json", (RaceCoordinator coordinator) =>
+app.MapGet("/.well-known/lazyforza-race.json", (
+    RaceCoordinator coordinator,
+    HostedTrackPackageStore trackPackages,
+    HostedOrganizerLogoStore organizerLogos) =>
 {
     var snapshot = coordinator.Snapshot();
+    var hosted = trackPackages.Matching(snapshot.TrackId, snapshot.TrackRevision, snapshot.TrackPackageHash);
+    var logo = organizerLogos.Current;
     return Results.Ok(new RaceServerDescriptor(
         serverOptions.ServerName,
         RaceProtocol.CurrentVersion,
@@ -88,7 +96,43 @@ app.MapGet("/.well-known/lazyforza-race.json", (RaceCoordinator coordinator) =>
         snapshot.AllowTeams,
         snapshot.SectorCount,
         snapshot.DriversPerTeam,
-        snapshot.Teams));
+        snapshot.Teams,
+        hosted is not null,
+        hosted?.SizeBytes,
+        hosted is null ? null : "/api/track-package",
+        hosted?.FileSha256,
+        logo?.Sha256,
+        logo?.MimeType,
+        logo is null ? null : "/api/organizer-logo"));
+});
+
+app.MapGet("/api/organizer-logo", async (
+    HostedOrganizerLogoStore organizerLogos,
+    CancellationToken cancellationToken) =>
+{
+    var logo = organizerLogos.Current;
+    if (logo is null) return Results.NotFound();
+    var bytes = await organizerLogos.ReadAsync(cancellationToken);
+    return bytes is null
+        ? Results.NotFound()
+        : Results.File(bytes, logo.MimeType, enableRangeProcessing: false,
+            lastModified: logo.UploadedAt,
+            entityTag: new Microsoft.Net.Http.Headers.EntityTagHeaderValue($"\"{logo.Sha256}\""));
+});
+
+app.MapGet("/api/track-package", async (
+    RaceCoordinator coordinator,
+    HostedTrackPackageStore trackPackages,
+    CancellationToken cancellationToken) =>
+{
+    var snapshot = coordinator.Snapshot();
+    var hosted = trackPackages.Matching(snapshot.TrackId, snapshot.TrackRevision, snapshot.TrackPackageHash);
+    if (hosted is null) return Results.NotFound(new { error = "当前房间没有可下载的匹配赛道文件。" });
+    var bytes = await trackPackages.ReadAsync(snapshot.TrackId, snapshot.TrackRevision, snapshot.TrackPackageHash, cancellationToken);
+    return bytes is null
+        ? Results.NotFound(new { error = "托管的赛道文件不存在。" })
+        : Results.File(bytes, "application/vnd.lazyforza.estate-track", hosted.FileName, enableRangeProcessing: false,
+            lastModified: hosted.UploadedAt, entityTag: new Microsoft.Net.Http.Headers.EntityTagHeaderValue($"\"{hosted.FileSha256}\""));
 });
 
 app.Map("/ws", (HttpContext context, RaceWebSocketHandler handler) => handler.HandleAsync(context));
@@ -161,6 +205,93 @@ app.MapGet("/api/admin/events", (HttpContext context, AdminSessionStore sessions
     Authorized(context, sessions)
         ? Results.Ok(coordinator.Events(Math.Clamp(limit ?? 200, 20, 500)))
         : Results.Unauthorized());
+
+app.MapGet("/api/admin/track-package", (HttpContext context, AdminSessionStore sessions, HostedTrackPackageStore trackPackages) =>
+    Authorized(context, sessions) ? Results.Ok(new { package = trackPackages.Current, maximumBytes = HostedTrackPackageStore.MaximumPackageBytes }) : Results.Unauthorized());
+
+app.MapGet("/api/admin/organizer-logo", (
+    HttpContext context,
+    AdminSessionStore sessions,
+    HostedOrganizerLogoStore organizerLogos) =>
+    Authorized(context, sessions)
+        ? Results.Ok(new { logo = organizerLogos.Current, maximumBytes = HostedOrganizerLogoStore.MaximumLogoBytes })
+        : Results.Unauthorized());
+
+app.MapPost("/api/admin/organizer-logo", async (
+    HttpContext context,
+    AdminSessionStore sessions,
+    HostedOrganizerLogoStore organizerLogos,
+    RaceCoordinator coordinator,
+    RaceBroadcastService broadcasts,
+    CancellationToken cancellationToken) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    if (!context.Request.HasFormContentType) return Results.BadRequest(new { error = "请使用表单上传赛事 Logo。" });
+    try
+    {
+        var form = await context.Request.ReadFormAsync(cancellationToken);
+        var file = form.Files.GetFile("file");
+        if (file is null) return Results.BadRequest(new { error = "请选择 PNG 或 JPEG 图片。" });
+        await using var stream = file.OpenReadStream();
+        var metadata = await organizerLogos.SaveAsync(stream, file.FileName, file.ContentType, cancellationToken);
+        broadcasts.Queue(coordinator.Snapshot());
+        return Results.Ok(new { logo = metadata });
+    }
+    catch (Exception exception) when (exception is InvalidDataException or IOException)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapDelete("/api/admin/organizer-logo", async (
+    HttpContext context,
+    AdminSessionStore sessions,
+    HostedOrganizerLogoStore organizerLogos,
+    RaceCoordinator coordinator,
+    RaceBroadcastService broadcasts,
+    CancellationToken cancellationToken) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    await organizerLogos.DeleteAsync(cancellationToken);
+    broadcasts.Queue(coordinator.Snapshot());
+    return Results.Ok();
+});
+
+app.MapPost("/api/admin/track-package", async (
+    HttpContext context,
+    AdminSessionStore sessions,
+    HostedTrackPackageStore trackPackages,
+    CancellationToken cancellationToken) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    if (!context.Request.HasFormContentType) return Results.BadRequest(new { error = "请使用表单上传 .lfzestate 文件。" });
+    try
+    {
+        var form = await context.Request.ReadFormAsync(cancellationToken);
+        var file = form.Files.GetFile("file");
+        if (file is null) return Results.BadRequest(new { error = "请选择要托管的 .lfzestate 文件。" });
+        await using var stream = file.OpenReadStream();
+        var metadata = await trackPackages.SaveAsync(
+            stream, file.FileName, form["trackId"].ToString(), form["trackName"].ToString(),
+            form["trackRevision"].ToString(), form["trackPackageHash"].ToString(), cancellationToken);
+        return Results.Ok(new { package = metadata });
+    }
+    catch (Exception exception) when (exception is InvalidDataException or IOException or JsonException)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapDelete("/api/admin/track-package", async (
+    HttpContext context,
+    AdminSessionStore sessions,
+    HostedTrackPackageStore trackPackages,
+    CancellationToken cancellationToken) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    await trackPackages.DeleteAsync(cancellationToken);
+    return Results.Ok();
+});
 
 app.MapPost("/api/admin/settings", (
     RaceAdminRoomSettingsCommand command,

@@ -37,7 +37,32 @@ interface SocketAttachment {
 const adminCookieName = "lfz_race_admin";
 const storedStateKey = "race-state-v1";
 const storedCredentialsKey = "race-credentials-v1";
+const hostedTrackPackageKey = "hosted-track-package-v1";
+const hostedTrackPackageMetadataKey = "hosted-track-package-metadata-v1";
+const maximumHostedTrackPackageBytes = 1_572_864;
+const organizerLogoKey = "organizer-logo-v1";
+const organizerLogoMetadataKey = "organizer-logo-metadata-v1";
+const maximumOrganizerLogoBytes = 262_144;
 const roomName = "main";
+
+interface HostedTrackPackageMetadata {
+  trackId: string;
+  trackName: string;
+  trackRevision: string | null;
+  trackPackageHash: string;
+  fileSha256: string;
+  sizeBytes: number;
+  uploadedAt: string;
+  fileName: string;
+}
+
+interface OrganizerLogoMetadata {
+  sha256: string;
+  mimeType: "image/png" | "image/jpeg";
+  sizeBytes: number;
+  uploadedAt: string;
+  fileName: string;
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -48,7 +73,8 @@ export default {
     if (url.pathname === "/health" || url.pathname === "/.well-known/lazyforza-race.json")
       return withSecurityHeaders(await room.fetch(request));
 
-    if (url.pathname.startsWith("/api/setup") || url.pathname.startsWith("/api/admin/"))
+    if (url.pathname.startsWith("/api/setup") || url.pathname.startsWith("/api/admin/") ||
+        url.pathname === "/api/track-package" || url.pathname === "/api/organizer-logo")
       return withSecurityHeaders(await room.fetch(request));
 
     return withSecurityHeaders(await env.ASSETS.fetch(request));
@@ -62,12 +88,16 @@ export class RaceRoom {
   private lastBroadcastAt = 0;
   private lastTelemetryPersistedAt = 0;
   private credentials: StoredCredentials | null = null;
+  private hostedTrackPackage: HostedTrackPackageMetadata | null = null;
+  private organizerLogo: OrganizerLogoMetadata | null = null;
   private setupInProgress = false;
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
     this.initialized = this.state.blockConcurrencyWhile(async () => {
       const stored = await this.state.storage.get<StoredRaceState>(storedStateKey);
       this.credentials = await this.state.storage.get<StoredCredentials>(storedCredentialsKey) ?? null;
+      this.hostedTrackPackage = await this.state.storage.get<HostedTrackPackageMetadata>(hostedTrackPackageMetadataKey) ?? null;
+      this.organizerLogo = await this.state.storage.get<OrganizerLogoMetadata>(organizerLogoMetadataKey) ?? null;
       this.core = new RaceCore({
         sessionName: env.SESSION_NAME,
         maximumParticipants: Number.parseInt(env.MAXIMUM_PARTICIPANTS, 10),
@@ -97,6 +127,7 @@ export class RaceRoom {
     });
     if (url.pathname === "/.well-known/lazyforza-race.json") {
       const snapshot = this.core.snapshot();
+      const hosted = this.matchingHostedTrackPackage(snapshot.trackId, snapshot.trackRevision, snapshot.trackPackageHash);
       return json({
         serverName: this.env.SERVER_NAME,
         protocolVersion,
@@ -112,16 +143,39 @@ export class RaceRoom {
         sectorCount: snapshot.sectorCount,
         driversPerTeam: snapshot.driversPerTeam,
         teams: snapshot.teams,
+        trackPackageAvailable: hosted !== null,
+        trackPackageSizeBytes: hosted?.sizeBytes ?? null,
+        trackPackageDownloadPath: hosted ? "/api/track-package" : null,
+        trackPackageFileSha256: hosted?.fileSha256 ?? null,
+        organizerLogoHash: this.organizerLogo?.sha256 ?? null,
+        organizerLogoMimeType: this.organizerLogo?.mimeType ?? null,
+        organizerLogoDownloadPath: this.organizerLogo ? "/api/organizer-logo" : null,
         phase: snapshot.phase,
         serverTime: snapshot.serverTime
       });
     }
+    if (url.pathname === "/api/track-package" && request.method === "GET")
+      return this.downloadTrackPackage();
+    if (url.pathname === "/api/organizer-logo" && request.method === "GET")
+      return this.downloadOrganizerLogo();
     if (url.pathname.startsWith("/api/admin/") && !await this.isAdminAuthorized(request))
       return json({ error: "总控登录已过期。" }, 401);
     if (url.pathname === "/api/admin/state" && request.method === "GET")
       return json(this.core.snapshot());
     if (url.pathname === "/api/admin/events" && request.method === "GET")
       return json(this.core.events(Number.parseInt(url.searchParams.get("limit") ?? "250", 10)));
+    if (url.pathname === "/api/admin/track-package" && request.method === "GET")
+      return json({ package: this.hostedTrackPackage, maximumBytes: maximumHostedTrackPackageBytes });
+    if (url.pathname === "/api/admin/track-package" && request.method === "POST")
+      return this.uploadTrackPackage(request);
+    if (url.pathname === "/api/admin/track-package" && request.method === "DELETE")
+      return this.deleteTrackPackage();
+    if (url.pathname === "/api/admin/organizer-logo" && request.method === "GET")
+      return json({ logo: this.organizerLogo, maximumBytes: maximumOrganizerLogoBytes });
+    if (url.pathname === "/api/admin/organizer-logo" && request.method === "POST")
+      return this.uploadOrganizerLogo(request);
+    if (url.pathname === "/api/admin/organizer-logo" && request.method === "DELETE")
+      return this.deleteOrganizerLogo();
     if (url.pathname === "/api/admin/settings" && request.method === "GET")
       return json(this.core.roomSettings());
     if (url.pathname === "/api/admin/settings" && request.method === "POST")
@@ -170,7 +224,10 @@ export class RaceRoom {
       }
 
       let result: CommandResult;
-      let important = false;
+      // Durable Object alarms may be delivered late. Any active client message
+      // also advances the race clock so qualifying expiry and its final-lap
+      // classification cannot remain stale while drivers are still online.
+      let important = this.core.tick(new Date());
       if (envelope.type === "ready") {
         result = this.core.setReady(attachment.participantId, envelope.payload as ReadyUpdate);
         important = true;
@@ -349,7 +406,7 @@ export class RaceRoom {
       }
     }
     await this.persist();
-    const snapshot = this.core.snapshot();
+    const snapshot = this.snapshotWithOrganizerLogo();
     this.send(webSocket, "loginAccepted", {
       participantId: result.participantId,
       resumeToken: result.resumeToken,
@@ -375,6 +432,130 @@ export class RaceRoom {
     }
   }
 
+  private matchingHostedTrackPackage(
+    trackId: string | null | undefined,
+    trackRevision: string | null | undefined,
+    trackPackageHash: string | null | undefined): HostedTrackPackageMetadata | null {
+    const hosted = this.hostedTrackPackage;
+    if (!hosted || !trackId || !trackPackageHash) return null;
+    if (hosted.trackId.toLowerCase() !== trackId.toLowerCase() ||
+        hosted.trackPackageHash.toLowerCase() !== trackPackageHash.toLowerCase()) return null;
+    if (trackRevision && hosted.trackRevision && hosted.trackRevision !== trackRevision) return null;
+    return hosted;
+  }
+
+  private async uploadTrackPackage(request: Request): Promise<Response> {
+    try {
+      const form = await request.formData();
+      const file = form.get("file");
+      const trackId = cleanSetupText(form.get("trackId"), 128);
+      const trackName = cleanSetupText(form.get("trackName"), 128);
+      const trackRevision = cleanSetupText(form.get("trackRevision"), 64);
+      const trackPackageHash = cleanSetupText(form.get("trackPackageHash"), 64)?.toUpperCase() ?? null;
+      if (!(file instanceof File)) return json({ error: "请选择要托管的 .lfzestate 文件。" }, 400);
+      if (!trackId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(trackId))
+        return json({ error: "赛道标识不是有效 UUID。" }, 400);
+      if (!trackName || !trackPackageHash || !/^[0-9a-f]{64}$/i.test(trackPackageHash))
+        return json({ error: "请先填写赛道名称和 64 位赛道数据 SHA-256。" }, 400);
+      if (file.size <= 0 || file.size > maximumHostedTrackPackageBytes)
+        return json({ error: "赛道文件为空或超过 1.5 MiB 托管上限。" }, 400);
+      const bytes = await file.arrayBuffer();
+      const signature = new Uint8Array(bytes, 0, Math.min(4, bytes.byteLength));
+      if (signature.length < 4 || signature[0] !== 0x50 || signature[1] !== 0x4b)
+        return json({ error: "这不是有效的 .lfzestate ZIP 文件。" }, 400);
+      const metadata: HostedTrackPackageMetadata = {
+        trackId,
+        trackName,
+        trackRevision,
+        trackPackageHash,
+        fileSha256: await sha256Hex(bytes),
+        sizeBytes: bytes.byteLength,
+        uploadedAt: new Date().toISOString(),
+        fileName: safeTrackFileName(file.name, trackName)
+      };
+      await this.state.storage.put({
+        [hostedTrackPackageKey]: bytes,
+        [hostedTrackPackageMetadataKey]: metadata
+      });
+      this.hostedTrackPackage = metadata;
+      return json({ package: metadata });
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : "赛道文件上传失败。" }, 400);
+    }
+  }
+
+  private async deleteTrackPackage(): Promise<Response> {
+    await this.state.storage.delete([hostedTrackPackageKey, hostedTrackPackageMetadataKey]);
+    this.hostedTrackPackage = null;
+    return json({ ok: true });
+  }
+
+  private async uploadOrganizerLogo(request: Request): Promise<Response> {
+    try {
+      const form = await request.formData();
+      const file = form.get("file");
+      if (!(file instanceof File)) return json({ error: "请选择 PNG 或 JPEG 图片。" }, 400);
+      if (file.size <= 0 || file.size > maximumOrganizerLogoBytes)
+        return json({ error: "赛事 Logo 为空或超过 256 KiB 上限。" }, 400);
+      const bytes = await file.arrayBuffer();
+      const signature = new Uint8Array(bytes, 0, Math.min(8, bytes.byteLength));
+      const png = signature.length >= 8 &&
+        [0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a].every((value, index) => signature[index] === value);
+      const jpeg = signature.length >= 3 && signature[0] === 0xff && signature[1] === 0xd8 && signature[2] === 0xff;
+      if (!png && !jpeg) return json({ error: "赛事 Logo 只支持 PNG 或 JPEG 图片。" }, 400);
+      const mimeType: "image/png" | "image/jpeg" = png ? "image/png" : "image/jpeg";
+      const metadata: OrganizerLogoMetadata = {
+        sha256: await sha256Hex(bytes), mimeType, sizeBytes: bytes.byteLength,
+        uploadedAt: new Date().toISOString(),
+        fileName: safeLogoFileName(file.name, mimeType)
+      };
+      await this.state.storage.put({ [organizerLogoKey]: bytes, [organizerLogoMetadataKey]: metadata });
+      this.organizerLogo = metadata;
+      this.broadcastSnapshot(true);
+      return json({ logo: metadata });
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : "赛事 Logo 上传失败。" }, 400);
+    }
+  }
+
+  private async deleteOrganizerLogo(): Promise<Response> {
+    await this.state.storage.delete([organizerLogoKey, organizerLogoMetadataKey]);
+    this.organizerLogo = null;
+    this.broadcastSnapshot(true);
+    return json({ ok: true });
+  }
+
+  private async downloadOrganizerLogo(): Promise<Response> {
+    const logo = this.organizerLogo;
+    if (!logo) return json({ error: "当前房间使用默认 LF Logo。" }, 404);
+    const bytes = await this.state.storage.get<ArrayBuffer>(organizerLogoKey);
+    if (!bytes || bytes.byteLength !== logo.sizeBytes) return json({ error: "赛事 Logo 不存在或长度不一致。" }, 404);
+    return new Response(bytes, { headers: {
+      "Content-Type": logo.mimeType, "Content-Length": String(bytes.byteLength),
+      "ETag": `"${logo.sha256}"`, "Cache-Control": "public, max-age=86400, immutable",
+      "X-Content-Type-Options": "nosniff"
+    }});
+  }
+
+  private async downloadTrackPackage(): Promise<Response> {
+    const snapshot = this.core.snapshot();
+    const hosted = this.matchingHostedTrackPackage(snapshot.trackId, snapshot.trackRevision, snapshot.trackPackageHash);
+    if (!hosted) return json({ error: "当前房间没有可下载的匹配赛道文件。" }, 404);
+    const bytes = await this.state.storage.get<ArrayBuffer>(hostedTrackPackageKey);
+    if (!bytes || bytes.byteLength !== hosted.sizeBytes)
+      return json({ error: "托管的赛道文件不存在或长度不一致。" }, 404);
+    return new Response(bytes, {
+      headers: {
+        "Content-Type": "application/vnd.lazyforza.estate-track",
+        "Content-Length": String(bytes.byteLength),
+        "Content-Disposition": `attachment; filename="${hosted.fileName.replaceAll('"', '')}"`,
+        "ETag": `"${hosted.fileSha256}"`,
+        "Cache-Control": "private, max-age=60",
+        "X-Content-Type-Options": "nosniff"
+      }
+    });
+  }
+
   private send(webSocket: WebSocket, type: string, payload: unknown): void {
     if (webSocket.readyState !== WebSocket.OPEN) return;
     webSocket.send(JSON.stringify({
@@ -393,11 +574,20 @@ export class RaceRoom {
       protocolVersion,
       type: "snapshot",
       sequence: ++this.serverSequence,
-      payload: this.core.snapshot(new Date(now))
+      payload: this.snapshotWithOrganizerLogo(new Date(now))
     } satisfies RaceEnvelope);
     for (const webSocket of this.authenticatedSockets()) {
       try { webSocket.send(message); } catch { /* close callback handles state */ }
     }
+  }
+
+  private snapshotWithOrganizerLogo(now = new Date()) {
+    return {
+      ...this.core.snapshot(now),
+      organizerLogoHash: this.organizerLogo?.sha256 ?? null,
+      organizerLogoMimeType: this.organizerLogo?.mimeType ?? null,
+      organizerLogoDownloadPath: this.organizerLogo ? "/api/organizer-logo" : null
+    };
   }
 
   private authenticatedSockets(): WebSocket[] {
@@ -451,6 +641,22 @@ function cleanSetupText(value: unknown, maximum: number): string | null {
   if (typeof value !== "string") return null;
   const cleaned = [...value.trim()].filter(character => character >= " " && character !== "\u007f").join("");
   return cleaned.length ? cleaned.slice(0, maximum) : null;
+}
+
+async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return [...digest].map(value => value.toString(16).padStart(2, "0")).join("").toUpperCase();
+}
+
+function safeTrackFileName(fileName: string, trackName: string): string {
+  const source = (fileName || `${trackName}.lfzestate`).replace(/[\\/:*?"<>|\u0000-\u001f]/g, "-");
+  return source.toLowerCase().endsWith(".lfzestate") ? source : `${source}.lfzestate`;
+}
+
+function safeLogoFileName(fileName: string, mimeType: "image/png" | "image/jpeg"): string {
+  const extension = mimeType === "image/png" ? ".png" : ".jpg";
+  const base = (fileName || `organizer-logo${extension}`).replace(/[\\/:*?"<>|\u0000-\u001f]/g, "-");
+  return `${base.replace(/\.[^.]+$/, "")}${extension}`;
 }
 
 async function hmac(value: string, secret: string): Promise<string> {
