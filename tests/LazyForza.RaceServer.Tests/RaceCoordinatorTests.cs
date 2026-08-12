@@ -52,6 +52,47 @@ public sealed class RaceCoordinatorTests
     }
 
     [TestMethod]
+    public void ObserverJoinsDuringRaceWithoutTakingDriverSlotAndIsRemovedOnDisconnect()
+    {
+        var coordinator = CreateCoordinator();
+        for (var index = 1; index <= RaceProtocol.MaximumParticipants; index++)
+            Assert.IsTrue(Join(coordinator, index).IsAccepted);
+        Assert.IsTrue(coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Race, null, 5, null, null)).IsAccepted);
+
+        var observer = coordinator.TryJoin(Login(99) with
+        {
+            DisplayName = "转播席 A",
+            TeamName = null,
+            TeamId = null,
+            IsObserver = true
+        });
+
+        Assert.IsTrue(observer.IsAccepted);
+        Assert.IsTrue(observer.Accepted!.IsObserver);
+        var snapshot = coordinator.Snapshot();
+        Assert.HasCount(RaceProtocol.MaximumParticipants, snapshot.Participants);
+        Assert.HasCount(1, snapshot.Observers!);
+        Assert.AreEqual("转播席 A", snapshot.Observers![0].DisplayName);
+        Assert.IsFalse(coordinator.SetReady(observer.Accepted.ParticipantId, true).IsAccepted);
+
+        var resumed = coordinator.TryJoin(Login(100) with
+        {
+            DisplayName = "转播席 A",
+            TeamName = null,
+            TeamId = null,
+            ResumeToken = observer.Accepted.ResumeToken,
+            IsObserver = true
+        });
+        Assert.IsTrue(resumed.IsAccepted);
+        Assert.HasCount(1, coordinator.Snapshot().Observers!);
+
+        coordinator.Disconnect(observer.Accepted.ParticipantId);
+        Assert.IsEmpty(coordinator.Snapshot().Observers!);
+        Assert.IsTrue(coordinator.Events().Any(item => item.Type == "observerDisconnected"));
+    }
+
+    [TestMethod]
     public void PasswordProfileDuplicateNameAndVisualTeamAreValidated()
     {
         var coordinator = CreateCoordinator();
@@ -159,6 +200,202 @@ public sealed class RaceCoordinatorTests
         Assert.AreEqual(3, snapshot.Participants[0].BestSectorSeconds.Count);
         Assert.IsNotNull(snapshot.Participants[1].GapToLeaderSeconds);
         Assert.AreEqual(0.450, snapshot.Participants[1].GapToLeaderSeconds.GetValueOrDefault(), 0.0001);
+    }
+
+    [TestMethod]
+    public void ThreeSessionQualifyingUsesDefaultEliminationsAndBuildsCompleteGrid()
+    {
+        var coordinator = CreateCoordinator(6);
+        var drivers = Enumerable.Range(1, 6)
+            .Select(index => Join(coordinator, index).Accepted!)
+            .ToArray();
+        var started = DateTimeOffset.Parse("2026-08-12T10:00:00Z");
+        var qualifyingCommand = new RaceAdminSessionCommand(
+            RaceSessionPhase.Qualifying, "三节排位", null, null, 10,
+            3, [1, 2, 3], [null, null]);
+        Assert.IsTrue(coordinator.ApplySessionCommand(qualifyingCommand, started).IsAccepted);
+
+        var q1 = coordinator.Snapshot(started);
+        Assert.AreEqual(1, q1.QualifyingSessionNumber);
+        Assert.AreEqual(3, q1.QualifyingSessionCount);
+        CollectionAssert.AreEqual(new[] { 2, 1 }, q1.QualifyingEliminationCounts!.ToArray());
+        for (var index = 0; index < drivers.Length; index++)
+            CompleteLap(coordinator, drivers[index].ParticipantId, 1, 66 - index, started.AddSeconds(20 + index));
+        coordinator.Tick(q1.QualifyingEndsAt!.Value.AddMilliseconds(1));
+
+        var q1Complete = coordinator.Snapshot(q1.QualifyingEndsAt!.Value.AddMilliseconds(1));
+        Assert.AreEqual(RaceSessionPhase.Qualifying, q1Complete.Phase);
+        Assert.AreEqual(1, q1Complete.QualifyingSessionNumber);
+        Assert.IsTrue(q1Complete.QualifyingTimeExpired);
+        Assert.IsNull(q1Complete.QualifyingEndsAt);
+        Assert.AreEqual(4, q1Complete.Participants.Count(item => item.QualifyingEligible));
+        Assert.AreEqual(2, q1Complete.Participants.Count(item => item.QualifyingEliminatedInSession == 1));
+
+        var q2StartedAt = q1.QualifyingEndsAt.Value.AddSeconds(5);
+        Assert.IsTrue(coordinator.ApplySessionCommand(qualifyingCommand, q2StartedAt).IsAccepted);
+        var q2 = coordinator.Snapshot(q2StartedAt);
+        Assert.AreEqual(2, q2.QualifyingSessionNumber);
+        Assert.IsFalse(q2.QualifyingTimeExpired);
+        Assert.IsTrue(q2.Participants.Where(item => item.QualifyingEligible).All(item => item.BestLapSeconds is null));
+
+        var q2Drivers = drivers.Skip(2).ToArray();
+        var q2EndsAt = q2.QualifyingEndsAt.GetValueOrDefault();
+        for (var index = 0; index < q2Drivers.Length; index++)
+            CompleteLap(coordinator, q2Drivers[index].ParticipantId, 1, 70 - index,
+                q2EndsAt.AddMinutes(-1));
+        coordinator.Tick(q2EndsAt.AddMilliseconds(1));
+
+        var q2Complete = coordinator.Snapshot(q2EndsAt.AddMilliseconds(1));
+        Assert.AreEqual(2, q2Complete.QualifyingSessionNumber);
+        Assert.IsTrue(q2Complete.QualifyingTimeExpired);
+        Assert.IsNull(q2Complete.QualifyingEndsAt);
+        Assert.AreEqual(3, q2Complete.Participants.Count(item => item.QualifyingEligible));
+        Assert.AreEqual(drivers[2].ParticipantId,
+            q2Complete.Participants.Single(item => item.QualifyingEliminatedInSession == 2).Id);
+
+        var q3StartedAt = q2EndsAt.AddSeconds(5);
+        Assert.IsTrue(coordinator.ApplySessionCommand(qualifyingCommand, q3StartedAt).IsAccepted);
+        var q3 = coordinator.Snapshot(q3StartedAt);
+        Assert.AreEqual(3, q3.QualifyingSessionNumber);
+
+        var q3Drivers = drivers.Skip(3).ToArray();
+        var q3EndsAt = q3.QualifyingEndsAt.GetValueOrDefault();
+        for (var index = 0; index < q3Drivers.Length; index++)
+            CompleteLap(coordinator, q3Drivers[index].ParticipantId, 1, 64 - index,
+                q3EndsAt.AddMinutes(-1));
+        coordinator.Tick(q3EndsAt.AddMilliseconds(1));
+
+        var grid = coordinator.Snapshot(q3EndsAt.AddMilliseconds(1));
+        Assert.AreEqual(RaceSessionPhase.Grid, grid.Phase);
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                drivers[5].ParticipantId, drivers[4].ParticipantId, drivers[3].ParticipantId,
+                drivers[2].ParticipantId, drivers[1].ParticipantId, drivers[0].ParticipantId
+            },
+            grid.Participants.Select(item => item.Id).ToArray());
+        CollectionAssert.AreEqual(new double?[] { 61, 67, 62 },
+            grid.Participants[0].QualifyingSessionBestLapSeconds!.ToArray());
+    }
+
+    [DataTestMethod]
+    [DataRow(2, 0, 0)]
+    [DataRow(3, 1, 0)]
+    [DataRow(4, 1, 1)]
+    [DataRow(5, 1, 1)]
+    [DataRow(6, 2, 1)]
+    [DataRow(7, 2, 1)]
+    [DataRow(8, 2, 2)]
+    [DataRow(9, 2, 2)]
+    [DataRow(10, 3, 2)]
+    [DataRow(11, 3, 2)]
+    [DataRow(12, 3, 3)]
+    public void DefaultThreeSessionEliminationRuleCoversEverySupportedFieldSize(
+        int participants, int q1Eliminated, int q2Eliminated)
+    {
+        CollectionAssert.AreEqual(
+            new[] { q1Eliminated, q2Eliminated },
+            RaceCoordinator.DefaultQualifyingEliminations(participants, 3).ToArray());
+    }
+
+    [TestMethod]
+    public void SingleSessionQualifyingRetainsLegacyTenMinuteFlow()
+    {
+        var coordinator = CreateCoordinator();
+        Join(coordinator, 1);
+        var started = DateTimeOffset.Parse("2026-08-12T11:00:00Z");
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Qualifying, null, null, null, 10), started);
+        var snapshot = coordinator.Snapshot(started);
+        Assert.AreEqual(1, snapshot.QualifyingSessionCount);
+        Assert.AreEqual(1, snapshot.QualifyingSessionNumber);
+        Assert.AreEqual(started.AddMinutes(10), snapshot.QualifyingEndsAt);
+        Assert.IsEmpty(snapshot.QualifyingEliminationCounts!);
+        coordinator.Tick(snapshot.QualifyingEndsAt!.Value.AddMilliseconds(1));
+        Assert.AreEqual(RaceSessionPhase.Grid, coordinator.Snapshot().Phase);
+    }
+
+    [TestMethod]
+    public void PracticeDefaultsEveryConfiguredSessionToSixtyMinutes()
+    {
+        var coordinator = CreateCoordinator();
+        Join(coordinator, 1);
+        var started = DateTimeOffset.Parse("2026-08-12T12:00:00Z");
+
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Practice, null, null, null, null), started);
+
+        var snapshot = coordinator.Snapshot(started);
+        Assert.AreEqual(RaceSessionPhase.Practice, snapshot.Phase);
+        Assert.AreEqual(1, snapshot.PracticeSessionNumber);
+        Assert.AreEqual(1, snapshot.PracticeSessionCount);
+        CollectionAssert.AreEqual(new[] { 60 }, snapshot.PracticeSessionMinutes!.ToArray());
+        Assert.AreEqual(started.AddMinutes(60), snapshot.PracticeEndsAt);
+
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Practice, null, null, null, null,
+            PracticeSessionCount: 3), started);
+        snapshot = coordinator.Snapshot(started);
+        CollectionAssert.AreEqual(new[] { 60, 60, 60 }, snapshot.PracticeSessionMinutes!.ToArray());
+    }
+
+    [TestMethod]
+    public void ThreeSessionPracticeUsesCustomDurationsWithoutEliminatingDrivers()
+    {
+        var coordinator = CreateCoordinator();
+        var first = Join(coordinator, 1).Accepted!;
+        var second = Join(coordinator, 2).Accepted!;
+        var started = DateTimeOffset.Parse("2026-08-12T13:00:00Z");
+        var practiceCommand = new RaceAdminSessionCommand(
+            RaceSessionPhase.Practice, "三节练习赛", null, null, null,
+            PracticeSessionCount: 3,
+            PracticeSessionMinutes: [1, 2, 3]);
+        coordinator.ApplySessionCommand(practiceCommand, started);
+
+        var fp1 = coordinator.Snapshot(started);
+        CollectionAssert.AreEqual(new[] { 1, 2, 3 }, fp1.PracticeSessionMinutes!.ToArray());
+        CompleteLap(coordinator, first.ParticipantId, 1, 70, started.AddSeconds(20));
+        CompleteLap(coordinator, second.ParticipantId, 1, 71, started.AddSeconds(21));
+        coordinator.Tick(fp1.PracticeEndsAt!.Value.AddMilliseconds(1));
+
+        var fp1Complete = coordinator.Snapshot(fp1.PracticeEndsAt.Value.AddMilliseconds(1));
+        Assert.AreEqual(1, fp1Complete.PracticeSessionNumber);
+        Assert.IsTrue(fp1Complete.PracticeTimeExpired);
+        Assert.IsNull(fp1Complete.PracticeEndsAt);
+        Assert.AreEqual(70d, fp1Complete.Participants.Single(item => item.Id == first.ParticipantId)
+            .PracticeSessionBestLapSeconds![0].GetValueOrDefault(), 0.0001);
+
+        var fp2StartedAt = fp1.PracticeEndsAt.Value.AddSeconds(5);
+        Assert.IsTrue(coordinator.ApplySessionCommand(practiceCommand, fp2StartedAt).IsAccepted);
+        var fp2 = coordinator.Snapshot(fp2StartedAt);
+        Assert.AreEqual(2, fp2.PracticeSessionNumber);
+        Assert.AreEqual(2, fp2.Participants.Count);
+        Assert.IsTrue(fp2.Participants.All(item => item.BestLapSeconds is null));
+        CompleteLap(coordinator, first.ParticipantId, 1, 69, fp2.PracticeEndsAt!.Value.AddMinutes(-1));
+        CompleteLap(coordinator, second.ParticipantId, 1, 68, fp2.PracticeEndsAt.Value.AddMinutes(-1));
+        coordinator.Tick(fp2.PracticeEndsAt.Value.AddMilliseconds(1));
+
+        var fp2Complete = coordinator.Snapshot(fp2.PracticeEndsAt.Value.AddMilliseconds(1));
+        Assert.AreEqual(2, fp2Complete.PracticeSessionNumber);
+        Assert.IsTrue(fp2Complete.PracticeTimeExpired);
+        Assert.IsNull(fp2Complete.PracticeEndsAt);
+
+        var fp3StartedAt = fp2.PracticeEndsAt.Value.AddSeconds(5);
+        Assert.IsTrue(coordinator.ApplySessionCommand(practiceCommand, fp3StartedAt).IsAccepted);
+        var fp3 = coordinator.Snapshot(fp3StartedAt);
+        Assert.AreEqual(3, fp3.PracticeSessionNumber);
+        Assert.IsTrue(fp3.Participants.All(item => item.BestLapSeconds is null));
+        CompleteLap(coordinator, first.ParticipantId, 1, 67, fp3.PracticeEndsAt!.Value.AddMinutes(-1));
+        coordinator.Tick(fp3.PracticeEndsAt.Value.AddMilliseconds(1));
+
+        var completed = coordinator.Snapshot(fp3.PracticeEndsAt.Value.AddMilliseconds(1));
+        Assert.AreEqual(RaceSessionPhase.Practice, completed.Phase);
+        Assert.IsTrue(completed.PracticeTimeExpired);
+        Assert.IsNull(completed.PracticeEndsAt);
+        Assert.IsTrue(completed.Participants.All(item => item.Status == RaceParticipantStatus.Ready));
+        CollectionAssert.AreEqual(new double?[] { 70, 69, 67 },
+            completed.Participants.Single(item => item.Id == first.ParticipantId)
+                .PracticeSessionBestLapSeconds!.ToArray());
     }
 
     [TestMethod]
@@ -502,6 +739,44 @@ public sealed class RaceCoordinatorTests
     }
 
     [TestMethod]
+    public void PracticeTimeoutLetsAnAlreadyStartedLapFinishBeforeManualNextSessionStart()
+    {
+        var coordinator = CreateCoordinator();
+        var participant = Join(coordinator, 1).Accepted!;
+        var issuedAt = DateTimeOffset.Parse("2026-08-12T14:00:00Z");
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Practice, null, null, null, null,
+            PracticeSessionCount: 2,
+            PracticeSessionMinutes: [1, 1]), issuedAt);
+        coordinator.UpdateTelemetry(participant.ParticipantId,
+            Telemetry(0, .42) with { CurrentLapSeconds = 31 }, issuedAt.AddSeconds(59));
+
+        coordinator.Tick(issuedAt.AddMinutes(1).AddMilliseconds(1));
+        var snapshot = coordinator.Snapshot();
+        Assert.AreEqual(1, snapshot.PracticeSessionNumber);
+        Assert.IsTrue(snapshot.PracticeTimeExpired);
+        Assert.IsTrue(snapshot.Participants.Single().PracticeFinalLapPending);
+
+        CompleteLap(coordinator, participant.ParticipantId, 1, 71.250);
+        snapshot = coordinator.Snapshot();
+        Assert.AreEqual(RaceSessionPhase.Practice, snapshot.Phase);
+        Assert.AreEqual(1, snapshot.PracticeSessionNumber);
+        Assert.IsTrue(snapshot.PracticeTimeExpired);
+        Assert.IsNull(snapshot.PracticeEndsAt);
+        Assert.AreEqual(71.250,
+            snapshot.Participants.Single().PracticeSessionBestLapSeconds![0]!.Value, .0001);
+
+        Assert.IsTrue(coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Practice, null, null, null, null,
+            PracticeSessionCount: 2,
+            PracticeSessionMinutes: [1, 1]), issuedAt.AddMinutes(2)).IsAccepted);
+        snapshot = coordinator.Snapshot();
+        Assert.AreEqual(2, snapshot.PracticeSessionNumber);
+        Assert.IsFalse(snapshot.PracticeTimeExpired);
+        Assert.IsNotNull(snapshot.PracticeEndsAt);
+    }
+
+    [TestMethod]
     public void RecordedPitBranchDoesNotTriggerYellowOrTrackLimitWarning()
     {
         var coordinator = CreateCoordinator();
@@ -607,6 +882,31 @@ public sealed class RaceCoordinatorTests
         Assert.AreEqual(0, classified.Participants[0].GapToLeaderSeconds.GetValueOrDefault(), 0.0001);
         Assert.AreEqual(4, classified.Participants[1].GapToLeaderSeconds.GetValueOrDefault(), 0.0001);
         Assert.AreEqual(121, classified.RaceElapsedSeconds.GetValueOrDefault(), 0.0001);
+    }
+
+    [TestMethod]
+    public void RaceDeltaUpdatesAtCommonTrackProgressWithoutWaitingForALapEvent()
+    {
+        var coordinator = CreateCoordinator();
+        var leader = Join(coordinator, 1).Accepted!;
+        var trailing = Join(coordinator, 2).Accepted!;
+        var started = DateTimeOffset.Parse("2026-08-09T10:30:00Z");
+        Assert.IsTrue(coordinator.ApplySessionCommand(
+            new RaceAdminSessionCommand(RaceSessionPhase.Race, "实时秒差测试", 5, null, null),
+            started).IsAccepted);
+
+        coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(0, .10), started.AddSeconds(10));
+        coordinator.UpdateTelemetry(trailing.ParticipantId, Telemetry(0, .10), started.AddSeconds(11));
+        var firstGap = coordinator.Snapshot(started.AddSeconds(11)).Participants[1];
+        Assert.AreEqual(1, firstGap.GapToLeaderSeconds.GetValueOrDefault(), 0.0001);
+
+        coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(0, .30), started.AddSeconds(20));
+        coordinator.UpdateTelemetry(trailing.ParticipantId, Telemetry(0, .30), started.AddSeconds(23));
+        var refreshedGap = coordinator.Snapshot(started.AddSeconds(23)).Participants[1];
+        Assert.AreEqual(3, refreshedGap.GapToLeaderSeconds.GetValueOrDefault(), 0.0001,
+            "秒差应随共同赛道进度刷新，不能等到下一次冲线。 ");
+        Assert.AreEqual(3, refreshedGap.IntervalSeconds.GetValueOrDefault(), 0.0001);
+        Assert.AreEqual(0, refreshedGap.CompletedLaps);
     }
 
     [TestMethod]
@@ -834,7 +1134,12 @@ public sealed class RaceCoordinatorTests
             started.AddSeconds(5.95));
         var warningOnly = coordinator.Snapshot().Participants.Single();
         Assert.AreEqual(1, warningOnly.TrackLimitWarnings);
-        Assert.AreEqual(RacePenaltyKind.Warning, warningOnly.Penalties.Single().Kind);
+        Assert.HasCount(0, warningOnly.Penalties,
+            "仅调查模式不能先创建一条实际上已经下发的警告处罚。");
+        var pendingInvestigation = coordinator.Snapshot().Investigations?.Single();
+        Assert.IsNotNull(pendingInvestigation);
+        Assert.AreEqual(RaceInvestigationStatus.Pending, pendingInvestigation.Status);
+        Assert.AreEqual(1, pendingInvestigation.LapNumber);
         Assert.AreEqual(0, warningOnly.PendingTimePenaltySeconds, 0.0001);
 
         SetTrackLimitMode(coordinator, TrackLimitEnforcementMode.Disabled);
@@ -854,7 +1159,8 @@ public sealed class RaceCoordinatorTests
         coordinator.UpdateTelemetry(participant.ParticipantId,
             disabled with { ClientMonotonicMilliseconds = 30_950, TrackProgress = .78, LateralOffsetMeters = 0 },
             started.AddSeconds(7.95));
-        Assert.HasCount(1, coordinator.Snapshot().Participants.Single().Penalties);
+        Assert.HasCount(0, coordinator.Snapshot().Participants.Single().Penalties);
+        Assert.HasCount(1, coordinator.Snapshot().Investigations!);
     }
 
     [TestMethod]
@@ -989,6 +1295,98 @@ public sealed class RaceCoordinatorTests
         Assert.IsFalse(lateSnapshot.HasPendingDriveThrough);
         Assert.AreEqual(20, lateSnapshot.TimePenaltySeconds, 0.0001);
         Assert.IsTrue(lateSnapshot.Penalties.Single().IsPostRaceAdjustment);
+    }
+
+    [TestMethod]
+    public void FinishedDriverCannotServeOrReceiveAutomaticPitPenaltiesAndPendingTimeIsAddedToResult()
+    {
+        var coordinator = CreateCoordinator();
+        var participant = Join(coordinator, 1).Accepted!;
+        var started = DateTimeOffset.Parse("2026-08-12T10:00:00Z");
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Race, null, 1, null, null), started);
+        Assert.IsTrue(coordinator.ApplyPenalty(new RaceAdminPenaltyCommand(
+            participant.ParticipantId, RacePenaltyKind.Time, 5, null, "赛中罚时")).IsAccepted);
+
+        CompleteLap(coordinator, participant.ParticipantId, 1, 60, started.AddSeconds(60));
+        var finished = coordinator.Snapshot(started.AddSeconds(60)).Participants.Single();
+        Assert.AreEqual(RaceParticipantStatus.Finished, finished.Status);
+        Assert.AreEqual(0, finished.PendingTimePenaltySeconds, 0.0001);
+        Assert.AreEqual(5, finished.TimePenaltySeconds, 0.0001);
+        Assert.AreEqual(
+            finished.RaceTotalSeconds.GetValueOrDefault() + 5,
+            finished.AdjustedRaceTotalSeconds.GetValueOrDefault(),
+            0.0001);
+        Assert.IsTrue(finished.Penalties.Single().IsPostRaceAdjustment);
+
+        var postRacePit = Telemetry(1, .10) with
+        {
+            IsInPitLane = true,
+            IsInServiceZone = true,
+            IsPausedOrRewinding = true,
+            SpeedKph = 120,
+            PitSpeedLimitKph = 80
+        };
+        coordinator.UpdateTelemetry(participant.ParticipantId, postRacePit, started.AddSeconds(70));
+        coordinator.UpdateTelemetry(participant.ParticipantId,
+            postRacePit with { IsPausedOrRewinding = false }, started.AddSeconds(71));
+        var afterPit = coordinator.Snapshot(started.AddSeconds(71));
+        Assert.AreEqual(RaceSessionPhase.Finished, afterPit.Phase);
+        Assert.AreEqual(1, afterPit.Penalties?.Count);
+        Assert.IsFalse(afterPit.Participants.Single().HasPendingDriveThrough);
+        Assert.IsFalse(afterPit.Participants.Single().IsServingTimePenalty);
+        Assert.IsFalse(afterPit.Penalties!.Any(item => item.Reason.Contains("维修区超速", StringComparison.Ordinal)));
+
+        Assert.IsTrue(coordinator.ApplyPenalty(new RaceAdminPenaltyCommand(
+            participant.ParticipantId, RacePenaltyKind.DriveThrough, null, null, "赛后人工判罚")).IsAccepted);
+        var postRacePenalty = coordinator.Snapshot(started.AddSeconds(72));
+        Assert.AreEqual(25, postRacePenalty.Participants.Single().TimePenaltySeconds, 0.0001);
+        Assert.IsFalse(postRacePenalty.Participants.Single().HasPendingDriveThrough);
+        Assert.IsTrue(postRacePenalty.Penalties!.Last().IsPostRaceAdjustment);
+    }
+
+    [TestMethod]
+    public void InvestigationCanBeResolvedThenItsPenaltyEditedOrCancelled()
+    {
+        var coordinator = CreateCoordinator();
+        var participant = Join(coordinator, 1).Accepted!;
+        var started = DateTimeOffset.Parse("2026-08-12T11:00:00Z");
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Qualifying, null, null, null, 10), started);
+        var outside = Telemetry(0, .60) with
+        {
+            ClientMonotonicMilliseconds = 20_000,
+            LateralOffsetMeters = 20,
+            SpeedKph = 36,
+            TrackLengthMeters = 1_000
+        };
+        coordinator.UpdateTelemetry(participant.ParticipantId, outside, started.AddSeconds(1));
+        coordinator.UpdateTelemetry(participant.ParticipantId,
+            outside with { ClientMonotonicMilliseconds = 20_300, TrackProgress = .62 }, started.AddSeconds(1.3));
+        coordinator.UpdateTelemetry(participant.ParticipantId,
+            outside with { ClientMonotonicMilliseconds = 20_500, TrackProgress = .625, LateralOffsetMeters = 0 }, started.AddSeconds(1.5));
+        coordinator.UpdateTelemetry(participant.ParticipantId,
+            outside with { ClientMonotonicMilliseconds = 20_950, TrackProgress = .63, LateralOffsetMeters = 0 }, started.AddSeconds(1.95));
+
+        var investigation = coordinator.Snapshot().Investigations!.Single();
+        Assert.AreEqual(RaceBannerKind.Information, coordinator.Snapshot().Banner?.Kind);
+        Assert.IsTrue(coordinator.Snapshot().Banner?.IsInvestigation);
+        Assert.IsTrue(coordinator.ResolveInvestigation(new RaceAdminInvestigationCommand(
+            investigation.Id, true, RacePenaltyKind.Time, 4, "总控确认获利")).IsAccepted);
+        var resolved = coordinator.Snapshot();
+        Assert.AreEqual(RaceInvestigationStatus.Penalized, resolved.Investigations!.Single().Status);
+        var penalty = resolved.Penalties!.Single();
+        Assert.AreEqual(investigation.Id, penalty.InvestigationId);
+        Assert.AreEqual(4, penalty.ValueSeconds);
+
+        Assert.IsTrue(coordinator.UpdatePenalty(new RaceAdminPenaltyUpdateCommand(
+            penalty.Id, 2, "复核后改为 2 秒", false)).IsAccepted);
+        Assert.AreEqual(2, coordinator.Snapshot().Penalties!.Single().ValueSeconds);
+        Assert.IsTrue(coordinator.UpdatePenalty(new RaceAdminPenaltyUpdateCommand(
+            penalty.Id, null, null, true)).IsAccepted);
+        var cancelled = coordinator.Snapshot();
+        Assert.IsTrue(cancelled.Penalties!.Single().IsRevoked);
+        Assert.HasCount(0, cancelled.Participants.Single().Penalties);
     }
 
     [TestMethod]
@@ -1147,12 +1545,67 @@ public sealed class RaceCoordinatorTests
         Assert.AreEqual(RaceControlFlag.Chequered, finished.Flag);
     }
 
+    [TestMethod]
+    public void MinimumRequiredPitStopsDisqualifiesOnlyDriversWhoFinishBelowTheConfiguredCount()
+    {
+        var coordinator = CreateCoordinator();
+        var settings = coordinator.RoomSettings();
+        Assert.IsTrue(coordinator.ApplyRoomSettings(new RaceAdminRoomSettingsCommand(
+            settings.SessionName,
+            1,
+            settings.SectorCount,
+            settings.AutomaticYellowEnabled,
+            settings.SlowSpeedKph,
+            settings.SlowDurationSeconds,
+            settings.SevereLateralOffsetMeters,
+            settings.RecoveryDurationSeconds,
+            settings.AllowTeams,
+            settings.TrackName,
+            settings.TrackId,
+            settings.TrackRevision,
+            settings.TrackPackageHash,
+            settings.TeamCount,
+            settings.DriversPerTeam,
+            settings.Teams,
+            settings.TrackLimitMode,
+            1)).IsAccepted);
+        var withoutStop = Join(coordinator, 1).Accepted!;
+        var withStop = Join(coordinator, 2).Accepted!;
+        Assert.IsTrue(coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Race, null, 1, 0, null)).IsAccepted);
+
+        Assert.IsTrue(coordinator.UpdateTelemetry(withStop.ParticipantId,
+            Telemetry(0, 0.5) with
+            {
+                IsInPitLane = true,
+                IsInServiceZone = true,
+                PitServiceRequirementMet = true,
+                CompletedPitServices = 1
+            }).IsAccepted);
+        CompleteLap(coordinator, withoutStop.ParticipantId, 1, 60);
+        CompleteLap(coordinator, withStop.ParticipantId, 1, 61);
+
+        var snapshot = coordinator.Snapshot();
+        Assert.AreEqual(1, snapshot.MinimumRequiredPitStops);
+        Assert.AreEqual(
+            RaceParticipantStatus.Disqualified,
+            snapshot.Participants.Single(item => item.Id == withoutStop.ParticipantId).Status);
+        Assert.AreEqual(
+            RaceParticipantStatus.Finished,
+            snapshot.Participants.Single(item => item.Id == withStop.ParticipantId).Status);
+        Assert.IsTrue(snapshot.Penalties!.Any(item =>
+            item.ParticipantId == withoutStop.ParticipantId &&
+            item.Kind == RacePenaltyKind.Disqualification &&
+            item.IsAutomatic));
+    }
+
     private static RaceCoordinator CreateCoordinator(int maximumParticipants = RaceProtocol.MaximumParticipants) =>
         new(new RaceServerOptions
         {
             PlayerPassword = "player-pass",
             AdminPassword = "admin-pass",
-            MaximumParticipants = maximumParticipants
+            MaximumParticipants = maximumParticipants,
+            MinimumRequiredPitStops = 0
         });
 
     private static void SetTrackLimitMode(RaceCoordinator coordinator, TrackLimitEnforcementMode mode)

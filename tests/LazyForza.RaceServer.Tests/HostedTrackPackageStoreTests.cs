@@ -20,21 +20,24 @@ public sealed class HostedTrackPackageStoreTests
             var trackId = Guid.NewGuid();
             const string trackName = "Test Circuit";
             const string revision = "test-revision";
-            var trackBytes = Encoding.UTF8.GetBytes("{\"track\":\"test\"}");
+            var trackBytes = TrackPayload(trackId, trackName, revision);
             var payloadHash = Convert.ToHexString(SHA256.HashData(trackBytes));
-            var package = Package(trackId, trackName, revision, payloadHash, trackBytes);
+            var fingerprint = Convert.ToHexString(SHA256.HashData("stable-race-geometry"u8));
+            var package = Package(trackId, trackName, revision, payloadHash, trackBytes, fingerprint);
             var store = new HostedTrackPackageStore(new RaceServerOptions { DataDirectory = root });
 
             await using var source = new MemoryStream(package);
-            var saved = await store.SaveAsync(
-                source, "test.lfzestate", trackId.ToString("D"), trackName, revision,
-                payloadHash, CancellationToken.None);
+            var saved = await store.SaveAsync(source, "test.lfzestate", CancellationToken.None);
 
             Assert.AreEqual(package.LongLength, saved.SizeBytes);
-            Assert.IsNotNull(store.Matching(trackId.ToString("D"), revision, payloadHash));
+            Assert.AreEqual(trackId.ToString("D"), saved.TrackId);
+            Assert.AreEqual(trackName, saved.TrackName);
+            Assert.AreEqual(revision, saved.TrackRevision);
+            Assert.AreEqual(fingerprint, saved.TrackPackageHash);
+            Assert.IsNotNull(store.Matching(trackId.ToString("D"), revision, fingerprint));
             CollectionAssert.AreEqual(package, await store.ReadAsync(
-                trackId.ToString("D"), revision, payloadHash, CancellationToken.None));
-            Assert.IsNull(store.Matching(Guid.NewGuid().ToString("D"), revision, payloadHash));
+                trackId.ToString("D"), revision, fingerprint, CancellationToken.None));
+            Assert.IsNull(store.Matching(Guid.NewGuid().ToString("D"), revision, fingerprint));
 
             await store.DeleteAsync(CancellationToken.None);
             Assert.IsNull(store.Current);
@@ -46,21 +49,20 @@ public sealed class HostedTrackPackageStoreTests
     }
 
     [TestMethod]
-    public async Task RejectsPackageWhenManifestDoesNotMatchConfiguredIdentity()
+    public async Task RejectsPackageWhenManifestDoesNotMatchTrackPayload()
     {
         var root = Path.Combine(Path.GetTempPath(), "LazyForza-RaceServer-Test-" + Guid.NewGuid().ToString("N"));
         try
         {
             var trackId = Guid.NewGuid();
-            var trackBytes = Encoding.UTF8.GetBytes("{}");
+            var trackBytes = TrackPayload(trackId, "Different Payload Name", "1");
             var payloadHash = Convert.ToHexString(SHA256.HashData(trackBytes));
             var package = Package(trackId, "Actual Name", "1", payloadHash, trackBytes);
             var store = new HostedTrackPackageStore(new RaceServerOptions { DataDirectory = root });
             await using var source = new MemoryStream(package);
 
-            await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.SaveAsync(
-                source, "bad.lfzestate", trackId.ToString("D"), "Wrong Name", "1",
-                payloadHash, CancellationToken.None));
+            await Assert.ThrowsExactlyAsync<InvalidDataException>(() =>
+                store.SaveAsync(source, "bad.lfzestate", CancellationToken.None));
         }
         finally
         {
@@ -73,7 +75,8 @@ public sealed class HostedTrackPackageStoreTests
         string trackName,
         string revision,
         string payloadHash,
-        byte[] trackBytes)
+        byte[] trackBytes,
+        string? fingerprint = null)
     {
         using var output = new MemoryStream();
         using (var archive = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
@@ -88,7 +91,8 @@ public sealed class HostedTrackPackageStoreTests
                     trackId,
                     trackName,
                     mapRevision = revision,
-                    payloadSha256 = payloadHash
+                    payloadSha256 = payloadHash,
+                    trackFingerprintSha256 = fingerprint
                 });
             }
             var track = archive.CreateEntry("track.json");
@@ -97,4 +101,12 @@ public sealed class HostedTrackPackageStoreTests
         }
         return output.ToArray();
     }
+
+    private static byte[] TrackPayload(Guid trackId, string trackName, string revision) =>
+        JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            track = new { id = trackId, name = trackName },
+            sectors = Array.Empty<object>(),
+            definition = new { trackId, mapRevision = revision }
+        });
 }

@@ -49,7 +49,8 @@ public sealed class RaceServerConfigurationStore
                     options.TeamCount,
                     options.DriversPerTeam,
                     options.Teams,
-                    options.TrackLimitMode));
+                    options.TrackLimitMode,
+                    options.MinimumRequiredPitStops));
     }
 
     public bool IsConfigured
@@ -79,7 +80,8 @@ public sealed class RaceServerConfigurationStore
                     fallback.TeamCount,
                     fallback.DriversPerTeam,
                     fallback.Teams,
-                    fallback.TrackLimitMode);
+                    fallback.TrackLimitMode,
+                    fallback.MinimumRequiredPitStops);
         }
     }
 
@@ -120,7 +122,8 @@ public sealed class RaceServerConfigurationStore
                 fallback.TeamCount,
                 fallback.DriversPerTeam,
                 fallback.Teams,
-                fallback.TrackLimitMode);
+                fallback.TrackLimitMode,
+                fallback.MinimumRequiredPitStops);
             stored = CreateConfiguration(request.PlayerPassword, request.AdminPassword, room);
             Save(stored);
             return (true, null, room);

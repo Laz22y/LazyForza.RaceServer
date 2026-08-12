@@ -11,12 +11,16 @@ import {
   isThemeColor,
   type LapCompleted,
   type LoginRequest,
+  maximumObservers,
   type ParticipantCommand,
   type ParticipantSnapshot,
   type ParticipantStatus,
   type PenaltyCommand,
+  type PenaltyUpdateCommand,
   type PenaltyKind,
   type PenaltySnapshot,
+  type InvestigationCommand,
+  type InvestigationSnapshot,
   type ReadyUpdate,
   type RoomSettings,
   type SessionCommand,
@@ -33,6 +37,7 @@ export interface RaceConfiguration {
   sessionName: string;
   maximumParticipants: number;
   totalRaceLaps: number;
+  minimumRequiredPitStops?: number;
   trackId?: string | null;
   trackRevision?: string | null;
   trackPackageHash?: string | null;
@@ -102,6 +107,11 @@ interface ParticipantState {
   automaticYellowSector?: number;
   automaticYellowReason?: string | null;
   qualifyingFinalLapPending?: boolean;
+  qualifyingEligible?: boolean;
+  qualifyingEliminatedInSession?: number | null;
+  qualifyingSessionBestLapSeconds?: Array<number | null>;
+  practiceFinalLapPending?: boolean;
+  practiceSessionBestLapSeconds?: Array<number | null>;
   falseStartArmedAt?: string | null;
   falseStartReferenceProgress?: number | null;
   falseStartMovementStartedAt?: string | null;
@@ -127,6 +137,18 @@ interface ParticipantState {
   pitVisitPaused?: boolean;
 }
 
+interface ObserverState {
+  id: string;
+  resumeToken: string;
+  displayName: string;
+  connectedAt: string;
+}
+
+interface RaceProgressSample {
+  distanceLaps: number;
+  elapsedSeconds: number;
+}
+
 export interface StoredRaceState {
   revision: number;
   sessionName: string;
@@ -144,9 +166,20 @@ export interface StoredRaceState {
   startLightsOut: boolean;
   qualifyingEndsAt?: string | null;
   qualifyingTimeExpired: boolean;
+  qualifyingSessionNumber?: number;
+  qualifyingSessionCount?: number;
+  qualifyingSessionMinutes?: number[];
+  qualifyingEliminationCounts?: number[];
+  practiceEndsAt?: string | null;
+  practiceTimeExpired?: boolean;
+  practiceSessionNumber?: number;
+  practiceSessionCount?: number;
+  practiceSessionMinutes?: number[];
   banner?: BannerSnapshot | null;
   participants: ParticipantState[];
+  observers: ObserverState[];
   penalties: PenaltySnapshot[];
+  investigations?: InvestigationSnapshot[];
   receivedLapEvents: string[];
   sectorCount: number;
   automaticYellowEnabled: boolean;
@@ -165,13 +198,14 @@ export interface StoredRaceState {
   manualFullCourseYellow?: string | null;
   manualSectorYellows: Record<string, string>;
   trackLimitMode: TrackLimitMode;
+  minimumRequiredPitStops: number;
   events: RaceEventSnapshot[];
   eventSequence: number;
 }
 
 export type CommandResult = { ok: true } | { ok: false; error: string };
 export type LoginResult =
-  | { ok: true; participantId: string; resumeToken: string; resumed: boolean }
+  | { ok: true; participantId: string; resumeToken: string; resumed: boolean; isObserver: boolean }
   | { ok: false; code: string; message: string };
 
 const allowedGrip = new Set<GripCondition>([
@@ -206,8 +240,32 @@ function normalizeTeams(requestedCount: number, configured?: TeamDefinition[] | 
   return result;
 }
 
+export function defaultQualifyingEliminations(participantCount: number, sessionCount: number): number[] {
+  const total = clampInteger(participantCount, 0, 12);
+  const count = clampInteger(sessionCount, 1, 3);
+  if (count === 1 || total <= 1) return Array.from({ length: count - 1 }, () => 0);
+  if (count === 2) return [Math.max(0, total - Math.max(1, Math.ceil(total / 2)))];
+  const finalists = Math.max(2, Math.ceil(total / 2));
+  const eliminated = Math.max(0, total - finalists);
+  const q1 = Math.ceil(eliminated / 2);
+  return [q1, eliminated - q1];
+}
+
+function compareOptionalTimes(left?: number | null, right?: number | null): number {
+  const leftMissing = left === null || left === undefined;
+  const rightMissing = right === null || right === undefined;
+  if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
+  if (leftMissing) return 0;
+  return left! - right!;
+}
+
 export class RaceCore {
+  private static readonly maximumLiveGapSamples = 3_600;
+  private static readonly liveGapHistoryLaps = 1.25;
+  private static readonly liveGapProgressJitter = .002;
+  private static readonly maximumLiveGapDistanceLaps = .95;
   private readonly maximumParticipants: number;
+  private readonly liveProgressSamples = new Map<string, RaceProgressSample[]>();
   private state: StoredRaceState;
 
   constructor(configuration: RaceConfiguration, stored?: StoredRaceState | null) {
@@ -220,6 +278,7 @@ export class RaceCore {
       flag: "green",
       flagMessage: null,
       totalRaceLaps: clampInteger(configuration.totalRaceLaps, 1, 999),
+      minimumRequiredPitStops: clampInteger(configuration.minimumRequiredPitStops ?? 1, 0, 20),
       startsAt: null,
       startSequenceAt: null,
       raceSuspendedAt: null,
@@ -229,9 +288,20 @@ export class RaceCore {
       startLightsOut: false,
       qualifyingEndsAt: null,
       qualifyingTimeExpired: false,
+      qualifyingSessionNumber: 0,
+      qualifyingSessionCount: 1,
+      qualifyingSessionMinutes: [10],
+      qualifyingEliminationCounts: [],
+      practiceEndsAt: null,
+      practiceTimeExpired: false,
+      practiceSessionNumber: 0,
+      practiceSessionCount: 1,
+      practiceSessionMinutes: [60],
       banner: null,
       participants: [],
+      observers: [],
       penalties: [],
+      investigations: [],
       receivedLapEvents: []
       ,sectorCount: clampInteger(configuration.sectorCount ?? 3, 1, 20)
       ,automaticYellowEnabled: configuration.automaticYellowEnabled ?? true
@@ -266,11 +336,15 @@ export class RaceCore {
   login(request: LoginRequest, now = new Date()): LoginResult {
     const displayName = cleanText(request.displayName, 20);
     const resumeToken = cleanText(request.resumeToken, 256);
-    const resumed = resumeToken
+    const isObserver = request.isObserver === true;
+    const resumed = !isObserver && resumeToken
       ? this.state.participants.find(participant => constantTimeTextEquals(participant.resumeToken, resumeToken))
       : undefined;
-    let team = this.state.allowTeams ? this.resolveTeam(request.teamId, request.teamName) : null;
-    if (this.state.allowTeams && !team && isLegacyTeamClient(request.clientVersion))
+    const resumedObserver = isObserver && resumeToken
+      ? this.state.observers.find(observer => constantTimeTextEquals(observer.resumeToken, resumeToken))
+      : undefined;
+    let team = !isObserver && this.state.allowTeams ? this.resolveTeam(request.teamId, request.teamName) : null;
+    if (!isObserver && this.state.allowTeams && !team && isLegacyTeamClient(request.clientVersion))
       team = this.selectLegacyTeam(resumed?.id);
     if (!displayName) return { ok: false, code: "invalidProfile", message: "比赛显示名不能为空。" };
     if (!isThemeColor(request.themeColor))
@@ -284,6 +358,40 @@ export class RaceCore {
         code: "sectorMismatch",
         message: `客户端赛道为 ${request.sectorCount} 个分段，房间设置为 ${this.state.sectorCount} 个分段。`
       };
+    if (isObserver) {
+      if (this.hasDuplicateName(displayName, resumedObserver?.id))
+        return { ok: false, code: "duplicateName", message: "该显示名已被其他车手或 OB 使用。" };
+      if (resumedObserver) {
+        resumedObserver.displayName = displayName;
+        this.recordEvent("observerResumed", `OB ${displayName} 重新连接。`, resumedObserver.id, now);
+        this.touch();
+        return {
+          ok: true,
+          participantId: resumedObserver.id,
+          resumeToken: resumedObserver.resumeToken,
+          resumed: true,
+          isObserver: true
+        };
+      }
+      if (this.state.observers.length >= maximumObservers)
+        return { ok: false, code: "observerFull", message: `OB 席位已达到 ${maximumObservers} 人上限。` };
+      const observer: ObserverState = {
+        id: crypto.randomUUID(),
+        resumeToken: createResumeToken(),
+        displayName,
+        connectedAt: now.toISOString()
+      };
+      this.state.observers.push(observer);
+      this.recordEvent("observerJoined", `OB ${displayName} 加入转播席。`, observer.id, now);
+      this.touch();
+      return {
+        ok: true,
+        participantId: observer.id,
+        resumeToken: observer.resumeToken,
+        resumed: false,
+        isObserver: true
+      };
+    }
     if (this.state.allowTeams && !team)
       return { ok: false, code: "teamRequired", message: "请选择服务端已经配置的车队。" };
 
@@ -301,8 +409,11 @@ export class RaceCore {
       resumed.status = resumed.isReady ? "ready" : "connected";
       resumed.lastSeenAt = now.toISOString();
       this.touch();
-      return { ok: true, participantId: resumed.id, resumeToken: resumed.resumeToken, resumed: true };
+      return { ok: true, participantId: resumed.id, resumeToken: resumed.resumeToken, resumed: true, isObserver: false };
     }
+
+    if (this.state.phase === "qualifying" && (this.state.qualifyingSessionCount ?? 1) > 1)
+      return { ok: false, code: "sessionLocked", message: "多节排位赛已经开始，只允许已参赛车手重新连接。" };
 
     if (this.state.participants.length >= this.maximumParticipants)
       return { ok: false, code: "roomFull", message: `本场已达到 ${this.maximumParticipants} 人上限。` };
@@ -356,6 +467,11 @@ export class RaceCore {
       completedPitServices: 0,
       gripCondition: "unknown",
       qualifyingFinalLapPending: false,
+      qualifyingEligible: true,
+      qualifyingEliminatedInSession: null,
+      qualifyingSessionBestLapSeconds: [null, null, null],
+      practiceFinalLapPending: false,
+      practiceSessionBestLapSeconds: [null, null, null],
       falseStartArmedAt: null,
       falseStartReferenceProgress: null,
       falseStartMovementStartedAt: null,
@@ -377,12 +493,20 @@ export class RaceCore {
     this.state.participants.push(participant);
     this.recordEvent("participantJoined", `${participant.displayName} 进入房间。`, participant.id, now);
     this.touch();
-    return { ok: true, participantId: participant.id, resumeToken: participant.resumeToken, resumed: false };
+    return { ok: true, participantId: participant.id, resumeToken: participant.resumeToken, resumed: false, isObserver: false };
   }
 
   disconnect(participantId: string, now = new Date()): boolean {
     const participant = this.find(participantId);
-    if (!participant || !participant.isConnected) return false;
+    if (!participant) {
+      const observerIndex = this.state.observers.findIndex(observer => observer.id === participantId);
+      if (observerIndex < 0) return false;
+      const [observer] = this.state.observers.splice(observerIndex, 1);
+      this.recordEvent("observerDisconnected", `OB ${observer.displayName} 断开连接。`, observer.id, now);
+      this.touch();
+      return true;
+    }
+    if (!participant.isConnected) return false;
     participant.isConnected = false;
     participant.status = "disconnected";
     participant.automaticYellowActive = false;
@@ -390,8 +514,10 @@ export class RaceCore {
     participant.hazardRecoveryStartedAt = null;
     participant.lastSeenAt = now.toISOString();
     participant.qualifyingFinalLapPending = false;
+    participant.practiceFinalLapPending = false;
     this.recordEvent("participantDisconnected", `${participant.displayName} 离开房间。`, participant.id, now);
     this.completeQualifyingIfReady(now);
+    this.completePracticeIfReady(now);
     this.refreshYellowFlag(now);
     this.touch();
     return true;
@@ -400,7 +526,7 @@ export class RaceCore {
   setReady(participantId: string, update: ReadyUpdate, now = new Date()): CommandResult {
     const participant = this.find(participantId);
     if (!participant) return rejected("车手不存在。");
-    if (this.state.phase !== "lobby" && this.state.phase !== "grid")
+    if (this.state.phase !== "lobby" && this.state.phase !== "practice" && this.state.phase !== "grid")
       return rejected("当前阶段不能修改准备状态。");
     participant.isReady = Boolean(update.isReady);
     participant.status = participant.isReady ? "ready" : "connected";
@@ -418,7 +544,8 @@ export class RaceCore {
     const wasInPitLane = participant.isInPitLane;
     const wasInServiceZone = participant.isInServiceZone;
     const priorServices = participant.completedPitServices;
-    this.updatePenaltyServiceState(participant, update, now);
+    if (this.canExecutePenalties(participant)) this.updatePenaltyServiceState(participant, update, now);
+    else this.resetLivePenaltyServiceState(participant);
     this.updatePitServiceState(participant, update);
     if (!wasInPitLane && participant.isInPitLane)
       this.recordEvent("pitEntered", `${participant.displayName} 进入维修区。`, participant.id, now);
@@ -445,10 +572,13 @@ export class RaceCore {
       ? clamp(update.trackToleranceMeters, 4, 50)
       : 18;
     participant.gripCondition = allowedGrip.has(update.gripCondition) ? update.gripCondition : "unknown";
+    if (this.state.phase === "race") this.recordRaceProgressSample(participant, now);
     if (!terminal(participant.status)) {
       participant.status = participant.isInServiceZone
         ? "inService"
-        : participant.isInPitLane ? "inPitLane" : "onTrack";
+        : participant.isInPitLane ? "inPitLane"
+        : this.state.phase === "qualifying" && participant.qualifyingEligible === false ? "ready"
+        : "onTrack";
     }
     this.evaluateFalseStart(participant, now);
     this.evaluateTrackLimits(participant, update, now);
@@ -472,10 +602,16 @@ export class RaceCore {
   completeLap(participantId: string, completed: LapCompleted, now = new Date()): CommandResult {
     const participant = this.find(participantId);
     if (!participant) return rejected("车手不存在。");
-    if (this.state.phase !== "qualifying" && this.state.phase !== "race")
+    if (terminal(participant.status) || participant.status === "disconnected")
+      return rejected("该车手已经结束比赛，不能继续提交圈速。");
+    if (this.state.phase !== "practice" && this.state.phase !== "qualifying" && this.state.phase !== "race")
       return rejected("当前阶段不接收圈速成绩。");
+    if (this.state.phase === "qualifying" && participant.qualifyingEligible === false)
+      return rejected("该车手已在本次排位赛中被淘汰。");
     if (this.state.phase === "qualifying" && this.state.qualifyingTimeExpired && !participant.qualifyingFinalLapPending)
       return rejected("排位赛计时已结束，该车手没有待完成的最后一圈。");
+    if (this.state.phase === "practice" && this.state.practiceTimeExpired && !participant.practiceFinalLapPending)
+      return rejected("练习赛计时已结束，该车手没有待完成的最后一圈。");
     const eventId = cleanText(completed.eventId, 80);
     if (!eventId) return rejected("圈速事件编号无效。");
     if (this.state.receivedLapEvents.includes(eventId)) return accepted();
@@ -487,7 +623,9 @@ export class RaceCore {
       if (this.state.phase === "race")
         this.updateDriveThroughDeadline(participant, now, false);
       participant.qualifyingFinalLapPending = false;
+      participant.practiceFinalLapPending = false;
       this.completeQualifyingIfReady(now);
+      this.completePracticeIfReady(now);
       this.touch();
       return accepted();
     }
@@ -502,9 +640,21 @@ export class RaceCore {
     participant.completedLaps++;
     participant.lastLapSeconds = completed.lapSeconds;
     participant.lastLapCompletedAt = now.toISOString();
+    if (this.state.phase === "race")
+      this.recordRaceProgressSample(participant, now, participant.completedLaps);
     if (improvesPersonalBest) {
       participant.bestLapSeconds = completed.lapSeconds;
       participant.bestLapSectorSeconds = this.sanitizeLapSectors(completed.sectorSeconds);
+      const sessionNumber = this.state.qualifyingSessionNumber ?? 0;
+      if (this.state.phase === "qualifying" && sessionNumber > 0) {
+        participant.qualifyingSessionBestLapSeconds ??= [null, null, null];
+        participant.qualifyingSessionBestLapSeconds[sessionNumber - 1] = completed.lapSeconds;
+      }
+      const practiceSessionNumber = this.state.practiceSessionNumber ?? 0;
+      if (this.state.phase === "practice" && practiceSessionNumber > 0) {
+        participant.practiceSessionBestLapSeconds ??= [null, null, null];
+        participant.practiceSessionBestLapSeconds[practiceSessionNumber - 1] = completed.lapSeconds;
+      }
     }
     participant.currentLapSeconds = 0;
     participant.currentSector = 0;
@@ -514,6 +664,7 @@ export class RaceCore {
     if (bestLapEligible) this.updateBestSectors(participant, completed.sectorSeconds);
     participant.lapHasTrackLimitIncident = false;
     participant.qualifyingFinalLapPending = false;
+    participant.practiceFinalLapPending = false;
     this.recordEvent(
       bestLapEligible ? "lapCompleted" : "lapCompletedNotFastest",
       `${participant.displayName} 完成第 ${participant.completedLaps} 圈：${formatLap(completed.lapSeconds)}${bestLapEligible ? "" : "（不计最快圈）"}。`,
@@ -527,10 +678,6 @@ export class RaceCore {
         newFastest.participant.id, 8_000, now);
     }
     if (this.state.phase === "race") {
-      this.updateDriveThroughDeadline(
-        participant,
-        now,
-        participant.completedLaps >= this.state.totalRaceLaps || this.state.flag === "chequered");
       if (this.state.flag === "chequered" && !terminal(participant.status)) {
         participant.status = "finished";
         participant.finishedAt = now.toISOString();
@@ -549,6 +696,11 @@ export class RaceCore {
           participant.id, 8_000, now);
         this.recordEvent("chequeredFlag", `${participant.displayName} 率先完成预定圈数，方格旗生效。`, participant.id, now);
       }
+      if (participant.status === "finished") {
+        this.finalizePendingPenaltiesAtFinish(participant, now);
+        this.enforceMinimumPitStopsAtFinish(participant, now);
+      }
+      else this.updateDriveThroughDeadline(participant, now, false);
       const classified = this.state.participants.filter(candidate => candidate.isConnected &&
         candidate.status !== "didNotFinish" && candidate.status !== "disqualified" && candidate.status !== "disconnected");
       if (this.state.flag === "chequered" && classified.every(candidate => candidate.status === "finished")) {
@@ -562,6 +714,7 @@ export class RaceCore {
       }
     }
     this.completeQualifyingIfReady(now);
+    this.completePracticeIfReady(now);
     this.touch();
     return accepted();
   }
@@ -585,6 +738,7 @@ export class RaceCore {
       ,driversPerTeam: this.state.driversPerTeam
       ,teams: this.state.teams.map(team => ({ ...team }))
       ,trackLimitMode: this.state.trackLimitMode
+      ,minimumRequiredPitStops: this.state.minimumRequiredPitStops
     };
   }
 
@@ -619,6 +773,7 @@ export class RaceCore {
     }
     this.state.sessionName = sessionName;
     this.state.totalRaceLaps = clampInteger(command.totalRaceLaps, 1, 999);
+    this.state.minimumRequiredPitStops = clampInteger(command.minimumRequiredPitStops ?? 1, 0, 20);
     this.state.sectorCount = clampInteger(command.sectorCount, 1, 20);
     this.state.automaticYellowEnabled = Boolean(command.automaticYellowEnabled);
     this.state.slowSpeedKph = clamp(command.slowSpeedKph, 3, 50);
@@ -666,20 +821,53 @@ export class RaceCore {
         this.state.flag = "green";
         this.state.flagMessage = null;
         break;
-      case "qualifying":
+      case "practice":
+        if (this.tryStartNextPracticeSession(now)) break;
         this.resetCompetitiveState();
-        this.state.phase = "qualifying";
+        this.configurePractice(command);
+        this.state.phase = "practice";
         this.state.flag = "green";
-        this.state.qualifyingTimeExpired = false;
-        this.state.qualifyingEndsAt = new Date(
-          now.getTime() + clampInteger(command.qualifyingMinutes ?? 10, 1, 180) * 60_000).toISOString();
+        this.state.practiceSessionNumber = 1;
+        this.state.practiceTimeExpired = false;
+        this.state.practiceEndsAt = new Date(
+          now.getTime() + this.state.practiceSessionMinutes![0] * 60_000).toISOString();
         for (const participant of this.state.participants) {
           participant.status = participant.isConnected ? "onTrack" : "disconnected";
           participant.isReady = false;
+          participant.practiceFinalLapPending = false;
+          participant.practiceSessionBestLapSeconds = [null, null, null];
         }
-        this.state.banner = this.newBanner("information", "排位赛开始", this.state.sessionName, null, 5_000, now);
+        this.state.banner = this.newBanner(
+          "information", `${this.practiceSessionLabel()} 开始`,
+          `${this.state.practiceSessionMinutes![0]} 分钟`, null, 5_000, now);
+        break;
+      case "qualifying":
+        if (this.tryStartNextQualifyingSession(now)) break;
+        this.resetCompetitiveState();
+        this.configureQualifying(command);
+        this.state.phase = "qualifying";
+        this.state.flag = "green";
+        this.state.qualifyingSessionNumber = 1;
+        this.state.qualifyingTimeExpired = false;
+        this.state.qualifyingEndsAt = new Date(
+          now.getTime() + this.state.qualifyingSessionMinutes![0] * 60_000).toISOString();
+        for (const participant of this.state.participants) {
+          participant.status = participant.isConnected ? "onTrack" : "disconnected";
+          participant.isReady = false;
+          participant.qualifyingEligible = participant.isConnected;
+          participant.qualifyingEliminatedInSession = null;
+          participant.qualifyingSessionBestLapSeconds = [null, null, null];
+        }
+        this.state.banner = this.newBanner(
+          "information",
+          this.state.qualifyingSessionCount === 1 ? "排位赛开始" : "Q1 开始",
+          this.state.qualifyingSessionCount === 1
+            ? this.state.sessionName
+            : `${this.state.qualifyingSessionMinutes![0]} 分钟 · 本节淘汰 ${this.state.qualifyingEliminationCounts![0]} 人`,
+          null, 5_000, now);
         break;
       case "grid":
+        this.captureCurrentQualifyingResults();
         this.state.phase = "grid";
         this.state.qualifyingEndsAt = null;
         this.state.qualifyingTimeExpired = false;
@@ -799,13 +987,83 @@ export class RaceCore {
         issuedAt: now.toISOString(),
         isServed: false,
         isRevoked: false,
-        isPostRaceAdjustment: false
+        isPostRaceAdjustment: command.kind === "time" && this.requiresPostRaceAdjustment(participant),
+        isAutomatic: false,
+        investigationId: null
       };
     this.state.penalties.push(penalty);
     if (command.kind === "disqualification") participant.status = "disqualified";
     this.state.banner = this.newBanner(
       "penalty", `处罚 · ${participant.displayName}`, penaltyDescription(penalty), participant.id, 10_000, now);
     this.recordEvent("manualPenalty", `${participant.displayName}：${penaltyDescription(penalty)}；${reason}。`, participant.id, now);
+    this.touch();
+    return accepted();
+  }
+
+  updatePenalty(command: PenaltyUpdateCommand, now = new Date()): CommandResult {
+    const penalty = this.state.penalties.find(item => item.id === command.penaltyId);
+    if (!penalty) return rejected("处罚记录不存在。");
+    const participant = this.find(penalty.participantId);
+    if (!participant) return rejected("车手不存在。");
+    if (penalty.kind === "time" && command.valueSeconds !== null && command.valueSeconds !== undefined)
+      penalty.valueSeconds = clampInteger(command.valueSeconds, 1, 60);
+    const reason = cleanText(command.reason, 240);
+    if (reason) penalty.reason = reason;
+    if (command.isRevoked) {
+      penalty.isRevoked = true;
+      if (penalty.kind === "disqualification" && participant.status === "disqualified")
+        participant.status = participant.finishedAt ? "finished" : "onTrack";
+      if (this.pendingTimePenaltySeconds(participant.id) <= 0 && !this.hasPendingDriveThrough(participant.id))
+        this.resetLivePenaltyServiceState(participant);
+    }
+    this.recordEvent(command.isRevoked ? "penaltyRevoked" : "penaltyUpdated",
+      command.isRevoked
+        ? `赛事总控取消了 ${participant.displayName} 的处罚：${penaltyDescription(penalty)}。`
+        : `赛事总控修改了 ${participant.displayName} 的处罚：${penaltyDescription(penalty)}。`,
+      participant.id, now);
+    this.touch();
+    return accepted();
+  }
+
+  resolveInvestigation(command: InvestigationCommand, now = new Date()): CommandResult {
+    const investigation = (this.state.investigations ?? []).find(item => item.id === command.investigationId);
+    if (!investigation) return rejected("调查记录不存在。");
+    if (investigation.status !== "pending") return rejected("该调查已经处理。");
+    const participant = this.find(investigation.participantId);
+    if (!participant) return rejected("车手不存在。");
+    if (!command.applyPenalty) {
+      investigation.status = "dismissed";
+      investigation.resolvedAt = now.toISOString();
+      this.recordEvent("investigationDismissed",
+        `赛事总控结束对 ${participant.displayName} 的调查，不予处罚：${investigation.offense}。`,
+        participant.id, now);
+      this.touch();
+      return accepted();
+    }
+
+    const kind = command.kind ?? "time";
+    if (!allowedPenalties.has(kind) || kind === "gridDrop" || kind === "stopAndGo")
+      return rejected("调查处理不支持该处罚类型。");
+    const reason = cleanText(command.reason, 240) ?? investigation.offense;
+    const penalty: PenaltySnapshot = kind === "driveThrough"
+      ? { ...this.createDriveThroughPenalty(participant, reason, now), investigationId: investigation.id }
+      : {
+        id: crypto.randomUUID(), participantId: participant.id, kind,
+        valueSeconds: kind === "time" ? clampInteger(command.valueSeconds ?? 5, 1, 60) : null,
+        gridPlaces: null, reason, issuedAt: now.toISOString(), isServed: false, isRevoked: false,
+        isPostRaceAdjustment: kind === "time" && this.requiresPostRaceAdjustment(participant),
+        isAutomatic: false, investigationId: investigation.id
+      };
+    this.state.penalties.push(penalty);
+    if (kind === "disqualification") participant.status = "disqualified";
+    investigation.status = "penalized";
+    investigation.penaltyId = penalty.id;
+    investigation.resolvedAt = now.toISOString();
+    this.state.banner = this.newBanner(
+      "penalty", `调查结论 · ${participant.displayName}`, penaltyDescription(penalty), participant.id, 8_000, now);
+    this.recordEvent("investigationPenalized",
+      `赛事总控确认 ${participant.displayName} 的调查事件并下发：${penaltyDescription(penalty)}。`,
+      participant.id, now);
     this.touch();
     return accepted();
   }
@@ -858,11 +1116,28 @@ export class RaceCore {
       for (const participant of this.state.participants)
         participant.qualifyingFinalLapPending = this.eligibleForFinalQualifyingLap(participant);
       const pendingCount = this.state.participants.filter(participant => participant.qualifyingFinalLapPending).length;
+      const sessionLabel = this.qualifyingSessionLabel();
       this.state.banner = this.newBanner(
-        "chequeredFlag", "排位赛计时结束",
+        "chequeredFlag", (this.state.qualifyingSessionCount ?? 1) === 1 ? "排位赛计时结束" : `${sessionLabel} 计时结束`,
         pendingCount > 0 ? `仍有 ${pendingCount} 名车手可完成最后飞驰圈` : "成绩已冻结", null, 8_000, now);
-      this.recordEvent("qualifyingExpired", `排位赛计时结束，${pendingCount} 名车手仍可完成最后飞驰圈。`, null, now);
+      this.recordEvent("qualifyingExpired", `${sessionLabel} 计时结束，${pendingCount} 名车手仍可完成最后飞驰圈。`, null, now);
       this.completeQualifyingIfReady(now);
+      changed = true;
+    }
+    if (this.state.phase === "practice" && !this.state.practiceTimeExpired && this.state.practiceEndsAt &&
+        now.getTime() >= Date.parse(this.state.practiceEndsAt)) {
+      this.state.flag = "chequered";
+      this.state.practiceTimeExpired = true;
+      for (const participant of this.state.participants)
+        participant.practiceFinalLapPending = this.eligibleForFinalPracticeLap(participant);
+      const pendingCount = this.state.participants.filter(participant => participant.practiceFinalLapPending).length;
+      const sessionLabel = this.practiceSessionLabel();
+      this.state.banner = this.newBanner(
+        "chequeredFlag", `${sessionLabel} 计时结束`,
+        pendingCount > 0 ? `仍有 ${pendingCount} 名车手可完成最后一圈` : "本节成绩已冻结",
+        null, 8_000, now);
+      this.recordEvent("practiceExpired", `${sessionLabel} 计时结束，${pendingCount} 名车手仍可完成最后一圈。`, null, now);
+      this.completePracticeIfReady(now);
       changed = true;
     }
     if (this.state.banner?.expiresAt && now.getTime() >= Date.parse(this.state.banner.expiresAt)) {
@@ -877,6 +1152,7 @@ export class RaceCore {
     const values = [
       this.state.phase === "countdown" ? this.state.startsAt : null,
       this.state.phase === "qualifying" && !this.state.qualifyingTimeExpired ? this.state.qualifyingEndsAt : null,
+      this.state.phase === "practice" && !this.state.practiceTimeExpired ? this.state.practiceEndsAt : null,
       this.state.banner?.expiresAt
     ]
       .filter((value): value is string => Boolean(value))
@@ -894,6 +1170,7 @@ export class RaceCore {
     const leader = ordered[0];
     let prior: ParticipantState | undefined;
     const participants: ParticipantSnapshot[] = ordered.map((participant, index) => {
+      const displayedBestLap = this.qualifyingDisplayedBestLap(participant);
       const participantPenalties = this.state.penalties.filter(penalty =>
         penalty.participantId === participant.id && !penalty.isRevoked);
       const timePenaltySeconds = this.timePenaltySeconds(participant.id);
@@ -904,16 +1181,19 @@ export class RaceCore {
         : null;
       const adjustedRaceTotalSeconds = raceTotalSeconds === null ? null : raceTotalSeconds +
         (participant.status === "finished" ? timePenaltySeconds : 0);
-      const qualifying = this.state.phase === "qualifying" || this.state.phase === "grid";
+      const qualifying = this.state.phase === "practice" ||
+        this.state.phase === "qualifying" || this.state.phase === "grid";
+      const leaderBestLap = leader ? this.qualifyingDisplayedBestLap(leader) : null;
+      const priorBestLap = prior ? this.qualifyingDisplayedBestLap(prior) : null;
       const gapToLeaderSeconds = qualifying
-        ? participant.bestLapSeconds !== null && participant.bestLapSeconds !== undefined &&
-          leader?.bestLapSeconds !== null && leader?.bestLapSeconds !== undefined
-          ? participant.bestLapSeconds - leader.bestLapSeconds : null
+        ? displayedBestLap !== null && displayedBestLap !== undefined &&
+          leaderBestLap !== null && leaderBestLap !== undefined
+          ? displayedBestLap - leaderBestLap : null
         : leader ? this.raceDeltaSeconds(leader, participant, now) : null;
       const intervalSeconds = qualifying
-        ? participant.bestLapSeconds !== null && participant.bestLapSeconds !== undefined &&
-          prior?.bestLapSeconds !== null && prior?.bestLapSeconds !== undefined
-          ? participant.bestLapSeconds - prior.bestLapSeconds : null
+        ? displayedBestLap !== null && displayedBestLap !== undefined &&
+          priorBestLap !== null && priorBestLap !== undefined
+          ? displayedBestLap - priorBestLap : null
         : prior ? this.raceDeltaSeconds(prior, participant, now) : null;
       const result: ParticipantSnapshot = {
         id: participant.id,
@@ -932,7 +1212,7 @@ export class RaceCore {
         speedKph: participant.speedKph,
         currentLapSeconds: participant.currentLapSeconds,
         lastLapSeconds: participant.lastLapSeconds,
-        bestLapSeconds: participant.bestLapSeconds,
+        bestLapSeconds: displayedBestLap,
         gapToLeaderSeconds,
         intervalSeconds,
         isInPitLane: participant.isInPitLane,
@@ -963,7 +1243,12 @@ export class RaceCore {
           ? Math.max(0, 2 - (participant.driveThroughLineCrossings ?? 0)) : null,
         driveThroughReminderAt: participant.driveThroughReminderAt ?? null,
         driveThroughOverdue: participant.driveThroughOverdue ?? false,
-        isServingDriveThrough: Boolean(participant.driveThroughVisitActive && participant.isInPitLane)
+        isServingDriveThrough: Boolean(participant.driveThroughVisitActive && participant.isInPitLane),
+        qualifyingEligible: participant.qualifyingEligible !== false,
+        qualifyingEliminatedInSession: participant.qualifyingEliminatedInSession ?? null,
+        qualifyingSessionBestLapSeconds: [...(participant.qualifyingSessionBestLapSeconds ?? [null, null, null])],
+        practiceFinalLapPending: participant.practiceFinalLapPending ?? false,
+        practiceSessionBestLapSeconds: [...(participant.practiceSessionBestLapSeconds ?? [null, null, null])]
       };
       prior = participant;
       return result;
@@ -992,6 +1277,13 @@ export class RaceCore {
       banner: this.state.banner?.expiresAt && Date.parse(this.state.banner.expiresAt) <= now.getTime()
         ? null : this.state.banner,
       participants,
+      observers: [...this.state.observers]
+        .sort((left, right) => Date.parse(left.connectedAt) - Date.parse(right.connectedAt))
+        .map(observer => ({
+          id: observer.id,
+          displayName: observer.displayName,
+          connectedAt: observer.connectedAt
+        })),
       serverTime: now.toISOString(),
       yellowZones: this.yellowZones(),
       sectorCount: this.state.sectorCount,
@@ -1002,7 +1294,19 @@ export class RaceCore {
       suspendedFromPhase: this.state.phase === "suspended" ? this.state.phaseBeforeSuspension : null,
       driversPerTeam: this.state.driversPerTeam,
       teams: this.state.teams.map(team => ({ ...team })),
-      chequeredImminent: this.state.chequeredImminent
+      chequeredImminent: this.state.chequeredImminent,
+      penalties: this.state.penalties.map(item => ({ ...item })),
+      investigations: (this.state.investigations ?? []).map(item => ({ ...item })),
+      qualifyingSessionNumber: this.state.qualifyingSessionNumber ?? 0,
+      qualifyingSessionCount: this.state.qualifyingSessionCount ?? 1,
+      qualifyingSessionMinutes: [...(this.state.qualifyingSessionMinutes ?? [10])],
+      qualifyingEliminationCounts: [...(this.state.qualifyingEliminationCounts ?? [])],
+      practiceEndsAt: this.state.practiceEndsAt ?? null,
+      practiceTimeExpired: this.state.practiceTimeExpired ?? false,
+      practiceSessionNumber: this.state.practiceSessionNumber ?? 0,
+      practiceSessionCount: this.state.practiceSessionCount ?? 1,
+      practiceSessionMinutes: [...(this.state.practiceSessionMinutes ?? [60])]
+      ,minimumRequiredPitStops: this.state.minimumRequiredPitStops
     };
   }
 
@@ -1013,6 +1317,7 @@ export class RaceCore {
       sessionName: cleanText(stored.sessionName, 64) ?? "地产赛事",
       phaseBeforeSuspension: stored.phaseBeforeSuspension ?? "race",
       totalRaceLaps: clampInteger(stored.totalRaceLaps, 1, 999),
+      minimumRequiredPitStops: clampInteger(stored.minimumRequiredPitStops ?? 1, 0, 20),
       startsAt: stored.startsAt ?? null,
       startSequenceAt: stored.startSequenceAt ?? null,
       raceSuspendedAt: stored.raceSuspendedAt ?? null,
@@ -1022,10 +1327,34 @@ export class RaceCore {
       startLightsOut: stored.startLightsOut ?? false,
       qualifyingEndsAt: stored.qualifyingEndsAt ?? null,
       qualifyingTimeExpired: stored.qualifyingTimeExpired ?? false,
+      qualifyingSessionNumber: clampInteger(stored.qualifyingSessionNumber ?? 0, 0, 3),
+      qualifyingSessionCount: clampInteger(stored.qualifyingSessionCount ?? 1, 1, 3),
+      qualifyingSessionMinutes: Array.isArray(stored.qualifyingSessionMinutes)
+        ? stored.qualifyingSessionMinutes.slice(0, 3).map(value => clampInteger(value, 1, 180))
+        : [10],
+      qualifyingEliminationCounts: Array.isArray(stored.qualifyingEliminationCounts)
+        ? stored.qualifyingEliminationCounts.slice(0, 2).map(value => clampInteger(value, 0, 11))
+        : [],
+      practiceEndsAt: stored.practiceEndsAt ?? null,
+      practiceTimeExpired: stored.practiceTimeExpired ?? false,
+      practiceSessionNumber: clampInteger(stored.practiceSessionNumber ?? 0, 0, 3),
+      practiceSessionCount: clampInteger(stored.practiceSessionCount ?? 1, 1, 3),
+      practiceSessionMinutes: Array.isArray(stored.practiceSessionMinutes)
+        ? stored.practiceSessionMinutes.slice(0, 3).map(value => clampInteger(value, 1, 180))
+        : [60],
       banner: stored.banner ?? null,
       participants: Array.isArray(stored.participants) ? stored.participants.slice(0, 12).map(participant => ({
         ...participant,
         qualifyingFinalLapPending: participant.qualifyingFinalLapPending ?? false,
+        qualifyingEligible: participant.qualifyingEligible ?? true,
+        qualifyingEliminatedInSession: participant.qualifyingEliminatedInSession ?? null,
+        qualifyingSessionBestLapSeconds: Array.isArray(participant.qualifyingSessionBestLapSeconds)
+          ? [...participant.qualifyingSessionBestLapSeconds.slice(0, 3), null, null, null].slice(0, 3)
+          : [null, null, null],
+        practiceFinalLapPending: participant.practiceFinalLapPending ?? false,
+        practiceSessionBestLapSeconds: Array.isArray(participant.practiceSessionBestLapSeconds)
+          ? [...participant.practiceSessionBestLapSeconds.slice(0, 3), null, null, null].slice(0, 3)
+          : [null, null, null],
         falseStartArmedAt: participant.falseStartArmedAt ?? null,
         falseStartReferenceProgress: participant.falseStartReferenceProgress ?? null,
         falseStartMovementStartedAt: participant.falseStartMovementStartedAt ?? null,
@@ -1060,10 +1389,32 @@ export class RaceCore {
         teamId: cleanText(participant.teamId, 40),
         teamColor: isThemeColor(participant.teamColor) ? participant.teamColor.toUpperCase() : null
       })) : [],
+      observers: Array.isArray(stored.observers)
+        ? stored.observers.slice(0, maximumObservers).map(observer => ({
+          id: cleanText(observer.id, 80) ?? crypto.randomUUID(),
+          resumeToken: cleanText(observer.resumeToken, 256) ?? createResumeToken(),
+          displayName: cleanText(observer.displayName, 20) ?? "OB",
+          connectedAt: Number.isFinite(Date.parse(observer.connectedAt))
+            ? observer.connectedAt
+            : new Date().toISOString()
+        }))
+        : [],
       penalties: Array.isArray(stored.penalties)
         ? stored.penalties.map(penalty => ({
           ...penalty,
-          isPostRaceAdjustment: penalty.isPostRaceAdjustment ?? false
+          isPostRaceAdjustment: penalty.isPostRaceAdjustment ?? false,
+          isAutomatic: penalty.isAutomatic ?? false,
+          investigationId: penalty.investigationId ?? null
+        }))
+        : [],
+      investigations: Array.isArray(stored.investigations)
+        ? stored.investigations.slice(-500).map(item => ({
+          ...item,
+          offense: cleanText(item.offense, 240) ?? "待总控核查的赛道事件",
+          lapNumber: clampInteger(item.lapNumber, 1, 9999),
+          status: item.status === "penalized" || item.status === "dismissed" ? item.status : "pending",
+          penaltyId: cleanText(item.penaltyId, 80),
+          resolvedAt: item.resolvedAt ?? null
         }))
         : [],
       receivedLapEvents: Array.isArray(stored.receivedLapEvents) ? stored.receivedLapEvents.slice(-10_000) : []
@@ -1099,7 +1450,9 @@ export class RaceCore {
 
   private hasDuplicateName(displayName: string, exceptId?: string): boolean {
     return this.state.participants.some(participant =>
-      participant.id !== exceptId && participant.displayName.localeCompare(displayName, undefined, { sensitivity: "accent" }) === 0);
+      participant.id !== exceptId && participant.displayName.localeCompare(displayName, undefined, { sensitivity: "accent" }) === 0) ||
+      this.state.observers.some(observer =>
+        observer.id !== exceptId && observer.displayName.localeCompare(displayName, undefined, { sensitivity: "accent" }) === 0);
   }
 
   private resolveTeam(requestedId?: string | null, requestedName?: string | null): TeamDefinition | null {
@@ -1153,7 +1506,9 @@ export class RaceCore {
   private touch(): void { this.state.revision++; }
 
   private evaluateAutomaticYellow(participant: ParticipantState, now: Date, isOnPitRoute = false): void {
-    if (!this.state.automaticYellowEnabled || (this.state.phase !== "race" && this.state.phase !== "qualifying") || participant.isInPitLane ||
+    if (!this.state.automaticYellowEnabled ||
+        (this.state.phase !== "race" && this.state.phase !== "practice" && this.state.phase !== "qualifying") ||
+        (this.state.phase === "qualifying" && participant.qualifyingEligible === false) || participant.isInPitLane ||
         participant.isInServiceZone || isOnPitRoute || terminal(participant.status) || participant.status === "disconnected") {
       participant.automaticYellowActive = false;
       participant.hazardCandidateStartedAt = null;
@@ -1265,7 +1620,8 @@ export class RaceCore {
     participant.falseStartPenalized = true;
     const penalty: PenaltySnapshot = {
       id: crypto.randomUUID(), participantId: participant.id, kind: "time", valueSeconds: 5, gridPlaces: null,
-      reason: "抢跑：五盏红灯熄灭前车辆已经移动", issuedAt: now.toISOString(), isServed: false, isRevoked: false
+      reason: "抢跑：五盏红灯熄灭前车辆已经移动", issuedAt: now.toISOString(), isServed: false, isRevoked: false,
+      isAutomatic: true
     };
     this.state.penalties.push(penalty);
     this.state.banner = this.newBanner("penalty", `抢跑 · ${participant.displayName}`, "自动加罚 5 秒", participant.id, 8_000, now);
@@ -1276,8 +1632,8 @@ export class RaceCore {
   private updatePitServiceState(participant: ParticipantState, update: TelemetryUpdate): void {
     participant.isInPitLane = Boolean(update.isInPitLane);
     participant.isInServiceZone = participant.isInPitLane && Boolean(update.isInServiceZone);
-    const serviceBlocked = this.pendingTimePenaltySeconds(participant.id) > 0 ||
-      Boolean(participant.penaltyServiceActive);
+    const serviceBlocked = this.canExecutePenalties(participant) &&
+      (this.pendingTimePenaltySeconds(participant.id) > 0 || Boolean(participant.penaltyServiceActive));
     participant.pitServiceElapsedSeconds = participant.isInServiceZone && !serviceBlocked
       ? clamp(update.pitServiceElapsedSeconds, 0, 86_400)
       : 0;
@@ -1287,6 +1643,30 @@ export class RaceCore {
     const reportedServices = clampInteger(update.completedPitServices, 0, 999);
     if (participant.pitServiceRequirementMet && reportedServices === participant.completedPitServices + 1)
       participant.completedPitServices++;
+  }
+
+  private canExecutePenalties(participant: ParticipantState): boolean {
+    return this.state.phase === "race" && this.state.flag !== "chequered" &&
+      !terminal(participant.status) && participant.status !== "disconnected";
+  }
+
+  private requiresPostRaceAdjustment(participant: ParticipantState): boolean {
+    return this.state.phase === "finished" ||
+      this.state.phase === "race" && this.state.flag === "chequered" ||
+      participant.status === "finished" || participant.status === "didNotFinish" ||
+      participant.status === "disqualified";
+  }
+
+  private resetLivePenaltyServiceState(participant: ParticipantState): void {
+    participant.penaltyServiceActive = false;
+    participant.penaltyServiceAttempted = false;
+    participant.penaltyServiceElapsedSeconds = 0;
+    participant.penaltyServiceRequiredSeconds = 0;
+    participant.penaltyServiceLastUpdatedAt = null;
+    participant.driveThroughVisitActive = false;
+    participant.driveThroughStopCandidateStartedAt = null;
+    participant.pitVisitHadServiceStop = false;
+    participant.pitVisitPaused = false;
   }
 
   private updatePenaltyServiceState(participant: ParticipantState, update: TelemetryUpdate, now: Date): void {
@@ -1386,7 +1766,8 @@ export class RaceCore {
       const routeDistance = progressDelta * trackLength;
       const reportedSpeed = Math.max(participant.speedKph, clamp(update.speedKph, 0, 800)) / 3.6;
       const plausibleDistance = Math.max(60, reportedSpeed * elapsedSeconds * 3 + 30);
-      if ((this.state.phase === "race" || this.state.phase === "qualifying") &&
+      if ((this.state.phase === "race" || this.state.phase === "practice" || this.state.phase === "qualifying") &&
+          (this.state.phase !== "qualifying" || participant.qualifyingEligible !== false) &&
           !participant.isInPitLane && !participant.isInServiceZone && !update.isApproachingPit && !update.isOnPitRoute &&
           !terminal(participant.status) && participant.status !== "disconnected" &&
           elapsedSeconds > 0 && elapsedSeconds <= 2 && progressDelta > 0 && progressDelta < .75 &&
@@ -1426,7 +1807,8 @@ export class RaceCore {
   }
 
   private evaluateTrackLimits(participant: ParticipantState, update: TelemetryUpdate, now: Date): void {
-    if ((this.state.phase !== "race" && this.state.phase !== "qualifying") ||
+    if ((this.state.phase !== "race" && this.state.phase !== "practice" && this.state.phase !== "qualifying") ||
+        (this.state.phase === "qualifying" && participant.qualifyingEligible === false) ||
         participant.isInPitLane || participant.isInServiceZone || update.isApproachingPit || update.isOnPitRoute ||
         terminal(participant.status) || participant.status === "disconnected") {
       this.resetTrackLimitExcursion(participant);
@@ -1492,8 +1874,28 @@ export class RaceCore {
     participant.lapHasTrackLimitIncident = true;
     participant.trackLimitWarnings = (participant.trackLimitWarnings ?? 0) + 1;
     if (this.state.trackLimitMode === "warningsOnly") {
-      this.addAutomaticTrackLimitPenalty(participant, "warning", null,
-        `疑似切弯获利：${evidence}（事件 ${participant.trackLimitWarnings}，待总控核查）`, now);
+      const investigation: InvestigationSnapshot = {
+        id: crypto.randomUUID(),
+        participantId: participant.id,
+        offense: `疑似切弯获利：${evidence}`,
+        detectedAt: now.toISOString(),
+        lapNumber: Math.max(1, participant.completedLaps + 1),
+        status: "pending",
+        penaltyId: null,
+        resolvedAt: null
+      };
+      (this.state.investigations ??= []).push(investigation);
+      this.state.banner = {
+        ...this.newBanner(
+        "information", `正在调查 · ${participant.displayName}`,
+        `${investigation.offense} · 第 ${investigation.lapNumber} 圈 · ${now.toLocaleTimeString("zh-CN", { hour12: false })}`,
+        participant.id, 8_000, now),
+        isInvestigation: true
+      };
+      this.recordEvent("investigationOpened",
+        `${participant.displayName} 正在接受调查：${investigation.offense}（第 ${investigation.lapNumber} 圈）。`,
+        participant.id, now);
+      this.touch();
       return;
     }
     if (severe) {
@@ -1518,7 +1920,8 @@ export class RaceCore {
     now: Date): void {
     const penalty: PenaltySnapshot = {
       id: crypto.randomUUID(), participantId: participant.id, kind, valueSeconds, gridPlaces: null,
-      reason, issuedAt: now.toISOString(), isServed: false, isRevoked: false
+      reason, issuedAt: now.toISOString(), isServed: false, isRevoked: false,
+      isAutomatic: true
     };
     this.state.penalties.push(penalty);
     this.state.banner = this.newBanner(
@@ -1540,22 +1943,234 @@ export class RaceCore {
   }
 
   private eligibleForFinalQualifyingLap(participant: ParticipantState): boolean {
-    return participant.isConnected && !participant.isInPitLane && !participant.isInServiceZone &&
+    return participant.qualifyingEligible !== false && participant.isConnected &&
+      !participant.isInPitLane && !participant.isInServiceZone &&
       participant.currentLapSeconds > .05 && participant.status !== "disqualified" &&
       participant.status !== "didNotFinish" && participant.status !== "disconnected";
   }
 
+  private eligibleForFinalPracticeLap(participant: ParticipantState): boolean {
+    return participant.isConnected && !participant.isInPitLane && !participant.isInServiceZone &&
+      participant.currentLapSeconds > .05 &&
+      participant.status !== "disqualified" && participant.status !== "didNotFinish" &&
+      participant.status !== "disconnected";
+  }
+
+  private completePracticeIfReady(now: Date): void {
+    if (this.state.phase !== "practice" || !this.state.practiceTimeExpired ||
+        !this.state.practiceEndsAt ||
+        this.state.participants.some(participant => participant.practiceFinalLapPending)) return;
+    this.captureCurrentPracticeResults();
+    if ((this.state.practiceSessionNumber ?? 1) < (this.state.practiceSessionCount ?? 1)) {
+      this.state.practiceEndsAt = null;
+      for (const participant of this.state.participants.filter(candidate => candidate.isConnected)) {
+        participant.practiceFinalLapPending = false;
+        participant.status = "ready";
+      }
+      this.state.banner = this.newBanner(
+        "information", `${this.practiceSessionLabel()} 已结束`,
+        `等待总控开启 FP${(this.state.practiceSessionNumber ?? 1) + 1}`, null, 7_000, now);
+      return;
+    }
+    this.state.practiceEndsAt = null;
+    for (const participant of this.state.participants.filter(candidate => candidate.isConnected)) {
+      participant.practiceFinalLapPending = false;
+      participant.status = "ready";
+    }
+    this.state.banner = this.newBanner(
+      "information", `${this.practiceSessionLabel()} 已结束`,
+      "本节成绩已冻结，等待总控下发后续流程", null, 7_000, now);
+  }
+
+  private tryStartNextPracticeSession(now: Date): boolean {
+    if (this.state.phase !== "practice" ||
+        (this.state.practiceSessionCount ?? 1) <= 1 ||
+        (this.state.practiceSessionNumber ?? 1) >= (this.state.practiceSessionCount ?? 1) ||
+        !this.state.practiceTimeExpired ||
+        this.state.practiceEndsAt !== null ||
+        this.state.participants.some(participant => participant.practiceFinalLapPending)) return false;
+
+    this.state.practiceSessionNumber = (this.state.practiceSessionNumber ?? 1) + 1;
+    const sessionIndex = this.state.practiceSessionNumber - 1;
+    this.state.practiceEndsAt = new Date(
+      now.getTime() + (this.state.practiceSessionMinutes?.[sessionIndex] ?? 60) * 60_000).toISOString();
+    this.state.practiceTimeExpired = false;
+    this.state.flag = "green";
+    this.state.flagMessage = null;
+    this.state.receivedLapEvents = [];
+    for (const participant of this.state.participants) this.resetForNextPracticeSession(participant);
+    this.state.banner = this.newBanner(
+      "information", `${this.practiceSessionLabel()} 开始`,
+      `${this.state.practiceSessionMinutes?.[sessionIndex] ?? 60} 分钟`, null, 7_000, now);
+    return true;
+  }
+
+  private configurePractice(command: SessionCommand): void {
+    const sessionCount = clampInteger(command.practiceSessionCount ?? 1, 1, 3);
+    this.state.practiceSessionCount = sessionCount;
+    this.state.practiceSessionMinutes = Array.from({ length: sessionCount }, (_, index) =>
+      clampInteger(command.practiceSessionMinutes?.[index] ?? 60, 1, 180));
+  }
+
+  private captureCurrentPracticeResults(): void {
+    const sessionNumber = this.state.practiceSessionNumber ?? 0;
+    if (sessionNumber < 1 || sessionNumber > 3) return;
+    for (const participant of this.state.participants) {
+      participant.practiceSessionBestLapSeconds ??= [null, null, null];
+      participant.practiceSessionBestLapSeconds[sessionNumber - 1] = participant.bestLapSeconds ?? null;
+    }
+  }
+
+  private resetForNextPracticeSession(participant: ParticipantState): void {
+    this.resetForNextQualifyingSession(participant);
+    participant.practiceFinalLapPending = false;
+  }
+
+  private practiceSessionLabel(): string {
+    return (this.state.practiceSessionCount ?? 1) === 1
+      ? "练习赛"
+      : `FP${clampInteger(this.state.practiceSessionNumber ?? 1, 1, this.state.practiceSessionCount ?? 1)}`;
+  }
+
   private completeQualifyingIfReady(now: Date): void {
     if (this.state.phase !== "qualifying" || !this.state.qualifyingTimeExpired ||
+        !this.state.qualifyingEndsAt ||
         this.state.participants.some(participant => participant.qualifyingFinalLapPending)) return;
+    this.captureCurrentQualifyingResults();
+    if ((this.state.qualifyingSessionNumber ?? 1) < (this.state.qualifyingSessionCount ?? 1)) {
+      this.eliminateFromCurrentQualifyingSession();
+      this.state.qualifyingEndsAt = null;
+      this.state.flag = "green";
+      this.state.flagMessage = null;
+      for (const participant of this.state.participants.filter(candidate => candidate.isConnected)) {
+        participant.qualifyingFinalLapPending = false;
+        participant.status = "ready";
+      }
+      this.state.banner = this.newBanner(
+        "information", `${this.qualifyingSessionLabel()} 已结束`,
+        `本节淘汰 ${this.state.qualifyingEliminationCounts?.[(this.state.qualifyingSessionNumber ?? 1) - 1] ?? 0} 人 · 等待总控开启 Q${(this.state.qualifyingSessionNumber ?? 1) + 1}`,
+        null, 7_000, now);
+      return;
+    }
     this.state.phase = "grid";
     this.state.flag = "green";
     this.state.flagMessage = null;
     this.state.qualifyingEndsAt = null;
     this.state.qualifyingTimeExpired = false;
+    this.state.qualifyingSessionNumber = 0;
     for (const participant of this.state.participants.filter(candidate => candidate.isConnected))
       participant.status = "ready";
     this.state.banner ??= this.newBanner("chequeredFlag", "排位赛结束", "成绩已冻结", null, 8_000, now);
+  }
+
+  private tryStartNextQualifyingSession(now: Date): boolean {
+    if (this.state.phase !== "qualifying" ||
+        (this.state.qualifyingSessionCount ?? 1) <= 1 ||
+        (this.state.qualifyingSessionNumber ?? 1) >= (this.state.qualifyingSessionCount ?? 1) ||
+        !this.state.qualifyingTimeExpired ||
+        this.state.qualifyingEndsAt !== null ||
+        this.state.participants.some(participant => participant.qualifyingFinalLapPending)) return false;
+
+    this.state.qualifyingSessionNumber = (this.state.qualifyingSessionNumber ?? 1) + 1;
+    const sessionIndex = this.state.qualifyingSessionNumber - 1;
+    this.state.qualifyingEndsAt = new Date(
+      now.getTime() + (this.state.qualifyingSessionMinutes?.[sessionIndex] ?? 10) * 60_000).toISOString();
+    this.state.qualifyingTimeExpired = false;
+    this.state.flag = "green";
+    this.state.flagMessage = null;
+    this.state.receivedLapEvents = [];
+    for (const participant of this.state.participants.filter(candidate => candidate.qualifyingEligible !== false))
+      this.resetForNextQualifyingSession(participant);
+    const eliminationText = this.state.qualifyingSessionNumber < (this.state.qualifyingSessionCount ?? 1)
+      ? ` · 本节淘汰 ${this.state.qualifyingEliminationCounts?.[sessionIndex] ?? 0} 人`
+      : "";
+    this.state.banner = this.newBanner(
+      "information", `${this.qualifyingSessionLabel()} 开始`,
+      `${this.state.qualifyingSessionMinutes?.[sessionIndex] ?? 10} 分钟${eliminationText}`,
+      null, 7_000, now);
+    return true;
+  }
+
+  private configureQualifying(command: SessionCommand): void {
+    const sessionCount = clampInteger(command.qualifyingSessionCount ?? 1, 1, 3);
+    this.state.qualifyingSessionCount = sessionCount;
+    if (sessionCount === 1) {
+      this.state.qualifyingSessionMinutes = [clampInteger(command.qualifyingMinutes ?? 10, 1, 180)];
+      this.state.qualifyingEliminationCounts = [];
+      return;
+    }
+    const defaults = sessionCount === 2 ? [15, 12] : [18, 15, 12];
+    this.state.qualifyingSessionMinutes = Array.from({ length: sessionCount }, (_, index) =>
+      clampInteger(command.qualifyingSessionMinutes?.[index] ?? defaults[index], 1, 180));
+    const eligibleCount = this.state.participants.filter(candidate => candidate.isConnected &&
+      candidate.status !== "disqualified").length;
+    const defaultEliminations = defaultQualifyingEliminations(eligibleCount, sessionCount);
+    let remaining = eligibleCount;
+    this.state.qualifyingEliminationCounts = Array.from({ length: sessionCount - 1 }, (_, index) => {
+      const requested = command.qualifyingEliminationCounts?.[index];
+      const value = requested === null || requested === undefined
+        ? defaultEliminations[index]
+        : clampInteger(requested, 0, 12);
+      const resolved = clampInteger(value, 0, Math.max(0, remaining - 1));
+      remaining -= resolved;
+      return resolved;
+    });
+  }
+
+  private captureCurrentQualifyingResults(): void {
+    const sessionNumber = this.state.qualifyingSessionNumber ?? 0;
+    if (sessionNumber < 1 || sessionNumber > 3) return;
+    for (const participant of this.state.participants.filter(candidate => candidate.qualifyingEligible !== false)) {
+      participant.qualifyingSessionBestLapSeconds ??= [null, null, null];
+      participant.qualifyingSessionBestLapSeconds[sessionNumber - 1] = participant.bestLapSeconds ?? null;
+    }
+  }
+
+  private eliminateFromCurrentQualifyingSession(): void {
+    const sessionNumber = this.state.qualifyingSessionNumber ?? 1;
+    const sessionCount = this.state.qualifyingSessionCount ?? 1;
+    if (sessionNumber < 1 || sessionNumber >= sessionCount) return;
+    const eliminate = this.state.qualifyingEliminationCounts?.[sessionNumber - 1] ?? 0;
+    if (eliminate <= 0) return;
+    const candidates = this.state.participants
+      .filter(candidate => candidate.qualifyingEligible !== false)
+      .sort((left, right) => compareOptionalTimes(left.bestLapSeconds, right.bestLapSeconds) ||
+        Date.parse(left.joinedAt) - Date.parse(right.joinedAt));
+    const count = Math.min(eliminate, Math.max(0, candidates.length - 1));
+    for (const participant of candidates.slice(candidates.length - count)) {
+      participant.qualifyingEligible = false;
+      participant.qualifyingEliminatedInSession = sessionNumber;
+      participant.qualifyingFinalLapPending = false;
+      participant.status = participant.isConnected ? "ready" : "disconnected";
+      participant.automaticYellowActive = false;
+      participant.hazardCandidateStartedAt = null;
+      participant.hazardRecoveryStartedAt = null;
+    }
+  }
+
+  private resetForNextQualifyingSession(participant: ParticipantState): void {
+    participant.completedLaps = 0;
+    participant.currentSector = 0;
+    participant.trackProgress = 0;
+    participant.currentLapSeconds = 0;
+    participant.lastLapSeconds = null;
+    participant.bestLapSeconds = null;
+    participant.bestSectorSeconds = [];
+    participant.bestLapSectorSeconds = [];
+    participant.lastLapCompletedAt = null;
+    participant.qualifyingFinalLapPending = false;
+    participant.lapHasTrackLimitIncident = false;
+    participant.progressContinuityReady = false;
+    participant.lastTelemetryMonotonicMilliseconds = 0;
+    participant.lastContinuityProgress = 0;
+    participant.shortcutPenaltyIssued = false;
+    participant.status = participant.isConnected ? "onTrack" : "disconnected";
+  }
+
+  private qualifyingSessionLabel(): string {
+    return (this.state.qualifyingSessionCount ?? 1) === 1
+      ? "排位赛"
+      : `Q${clampInteger(this.state.qualifyingSessionNumber ?? 1, 1, this.state.qualifyingSessionCount ?? 1)}`;
   }
 
   private clearYellowState(): void {
@@ -1580,8 +2195,18 @@ export class RaceCore {
     this.state.startLightsOut = false;
     this.state.qualifyingEndsAt = null;
     this.state.qualifyingTimeExpired = false;
+    this.state.qualifyingSessionNumber = 0;
+    this.state.qualifyingSessionCount = 1;
+    this.state.qualifyingSessionMinutes = [10];
+    this.state.qualifyingEliminationCounts = [];
+    this.state.practiceEndsAt = null;
+    this.state.practiceTimeExpired = false;
+    this.state.practiceSessionNumber = 0;
+    this.state.practiceSessionCount = 1;
+    this.state.practiceSessionMinutes = [60];
     this.state.banner = null;
     this.state.receivedLapEvents = [];
+    this.liveProgressSamples.clear();
     for (const participant of this.state.participants) this.resetParticipant(participant, true);
   }
 
@@ -1589,6 +2214,7 @@ export class RaceCore {
     this.clearYellowState();
     this.state.chequeredImminent = false;
     this.state.penalties = [];
+    this.state.investigations = [];
     this.state.receivedLapEvents = [];
     this.state.startsAt = null;
     this.state.startSequenceAt = null;
@@ -1599,7 +2225,13 @@ export class RaceCore {
     this.state.startLightsOut = false;
     this.state.qualifyingEndsAt = null;
     this.state.qualifyingTimeExpired = false;
+    this.state.practiceEndsAt = null;
+    this.state.practiceTimeExpired = false;
+    this.state.practiceSessionNumber = 0;
+    this.state.practiceSessionCount = 1;
+    this.state.practiceSessionMinutes = [60];
     this.state.banner = null;
+    this.liveProgressSamples.clear();
     for (const participant of this.state.participants) this.resetParticipant(participant, false);
   }
 
@@ -1630,6 +2262,11 @@ export class RaceCore {
     participant.hazardCandidateStartedAt = null;
     participant.hazardRecoveryStartedAt = null;
     participant.qualifyingFinalLapPending = false;
+    participant.qualifyingEligible = true;
+    participant.qualifyingEliminatedInSession = null;
+    participant.qualifyingSessionBestLapSeconds = [null, null, null];
+    participant.practiceFinalLapPending = false;
+    participant.practiceSessionBestLapSeconds = [null, null, null];
     participant.falseStartArmedAt = null;
     participant.falseStartReferenceProgress = null;
     participant.falseStartMovementStartedAt = null;
@@ -1675,6 +2312,7 @@ export class RaceCore {
 
   private fastestLap(): { participant: ParticipantState; time: number } | null {
     const participant = this.state.participants
+      .filter(candidate => this.state.phase !== "qualifying" || candidate.qualifyingEligible !== false)
       .filter(candidate => candidate.bestLapSeconds !== null && candidate.bestLapSeconds !== undefined)
       .sort((left, right) => (left.bestLapSeconds! - right.bestLapSeconds!) ||
         left.joinedAt.localeCompare(right.joinedAt))[0];
@@ -1686,6 +2324,7 @@ export class RaceCore {
       (maximum, participant) => Math.max(maximum, participant.bestSectorSeconds.length), 0);
     return Array.from({ length: count }, (_, index) => {
       const values = this.state.participants
+        .filter(participant => this.state.phase !== "qualifying" || participant.qualifyingEligible !== false)
         .map(participant => participant.bestSectorSeconds[index])
         .filter((value): value is number => typeof value === "number" && value > 0);
       return values.length === 0 ? null : Math.min(...values);
@@ -1732,11 +2371,14 @@ export class RaceCore {
     participant: ParticipantState,
     reason: string,
     now: Date): PenaltySnapshot {
-    if (this.state.phase === "race" && this.state.totalRaceLaps - participant.completedLaps <= 3) {
+    if (this.requiresPostRaceAdjustment(participant) ||
+        this.state.phase === "race" && this.state.totalRaceLaps - participant.completedLaps <= 3) {
       return {
         id: crypto.randomUUID(), participantId: participant.id, kind: "time",
         valueSeconds: 20, gridPlaces: null,
-        reason: `最后三圈下发的通过维修区处罚：${reason}`,
+        reason: this.requiresPostRaceAdjustment(participant)
+          ? `赛后下发的通过维修区处罚，按等效规则改为完赛加时：${reason}`
+          : `最后三圈下发的通过维修区处罚，按等效规则改为完赛加时：${reason}`,
         issuedAt: now.toISOString(), isServed: false, isRevoked: false,
         isPostRaceAdjustment: true
       };
@@ -1751,6 +2393,54 @@ export class RaceCore {
       issuedAt: now.toISOString(), isServed: false, isRevoked: false,
       isPostRaceAdjustment: false
     };
+  }
+
+  private finalizePendingPenaltiesAtFinish(participant: ParticipantState, now: Date): void {
+    this.resetLivePenaltyServiceState(participant);
+    for (const penalty of this.state.penalties) {
+      if (penalty.participantId === participant.id && !penalty.isRevoked && !penalty.isServed &&
+          penalty.kind === "time" && !penalty.isPostRaceAdjustment)
+        penalty.isPostRaceAdjustment = true;
+    }
+    if (this.hasPendingDriveThrough(participant.id))
+      this.convertDriveThroughToTimeAdjustment(
+        participant, now, "车手已经接收方格旗，改按等效完赛加时结算", false);
+    const pendingStopAndGo = this.state.penalties.filter(penalty =>
+      penalty.participantId === participant.id && !penalty.isRevoked && !penalty.isServed &&
+      penalty.kind === "stopAndGo");
+    if (pendingStopAndGo.length === 0) return;
+    this.markPendingPenaltiesServed(participant.id, "stopAndGo");
+    const equivalentSeconds = pendingStopAndGo.reduce((sum, penalty) => sum + (penalty.valueSeconds ?? 0), 20);
+    this.state.penalties.push({
+      id: crypto.randomUUID(), participantId: participant.id, kind: "time",
+      valueSeconds: equivalentSeconds, gridPlaces: null,
+      reason: "未执行的停车并通过维修区处罚，按维修区通行 20 秒加原停车时间计入完赛成绩",
+      issuedAt: now.toISOString(), isServed: false, isRevoked: false,
+      isPostRaceAdjustment: true,
+      isAutomatic: pendingStopAndGo.some(penalty => penalty.isAutomatic)
+    });
+    this.recordEvent("stopAndGoPostRaceAdjustment",
+      `${participant.displayName} 的未执行停车并通过维修区处罚已折算为 +${equivalentSeconds.toFixed(0)} 秒完赛加时。`,
+      participant.id, now);
+  }
+
+  private enforceMinimumPitStopsAtFinish(participant: ParticipantState, now: Date): void {
+    const required = clampInteger(this.state.minimumRequiredPitStops ?? 1, 0, 20);
+    if (required === 0 || participant.completedPitServices >= required) return;
+    const reason =
+      `未完成规定的最少有效维修停留次数（${participant.completedPitServices}/${required}）。`;
+    this.state.penalties.push({
+      id: crypto.randomUUID(), participantId: participant.id, kind: "disqualification",
+      valueSeconds: null, gridPlaces: null, reason,
+      issuedAt: now.toISOString(), isServed: false, isRevoked: false,
+      isPostRaceAdjustment: true, isAutomatic: true
+    });
+    participant.status = "disqualified";
+    this.recordEvent(
+      "minimumPitStopsNotMet",
+      `${participant.displayName} 完赛时只完成 ${participant.completedPitServices}/${required} 次有效维修停留，判定未满足完赛条件。`,
+      participant.id,
+      now);
   }
 
   private updateDriveThroughDeadline(
@@ -1783,23 +2473,28 @@ export class RaceCore {
   private convertDriveThroughToTimeAdjustment(
     participant: ParticipantState,
     now: Date,
-    reason: string): void {
+    reason: string,
+    announce = true): void {
     if (!this.hasPendingDriveThrough(participant.id)) return;
+    const wasAutomatic = this.state.penalties.some(penalty => penalty.participantId === participant.id &&
+      penalty.kind === "driveThrough" && !penalty.isRevoked && !penalty.isServed && penalty.isAutomatic);
     this.markPendingPenaltiesServed(participant.id, "driveThrough");
     this.state.penalties.push({
       id: crypto.randomUUID(), participantId: participant.id, kind: "time",
       valueSeconds: 20, gridPlaces: null,
       reason: `通过维修区处罚未按期执行：${reason}`,
       issuedAt: now.toISOString(), isServed: false, isRevoked: false,
-      isPostRaceAdjustment: true
+      isPostRaceAdjustment: true,
+      isAutomatic: wasAutomatic
     });
     participant.driveThroughOverdue = true;
     participant.driveThroughReminderAt = now.toISOString();
     participant.driveThroughVisitActive = false;
     participant.driveThroughStopCandidateStartedAt = null;
-    this.state.banner = this.newBanner(
-      "penalty", `通过维修区处罚逾期 · ${participant.displayName}`,
-      "原处罚已替换为 20 秒完赛加时", participant.id, 8_000, now);
+    if (announce)
+      this.state.banner = this.newBanner(
+        "penalty", `通过维修区处罚逾期 · ${participant.displayName}`,
+        "原处罚已替换为 20 秒完赛加时", participant.id, 8_000, now);
     this.recordEvent(
       "driveThroughOverdue",
       `${participant.displayName} 未按期执行通过维修区处罚，原处罚已替换为 20 秒完赛加时。`,
@@ -1810,10 +2505,15 @@ export class RaceCore {
   private convertTimePenaltyToDriveThrough(participant: ParticipantState, now: Date, reason: string): void {
     const seconds = this.pendingTimePenaltySeconds(participant.id);
     if (seconds <= 0) return;
+    const wasAutomatic = this.state.penalties.some(penalty => penalty.participantId === participant.id &&
+      penalty.kind === "time" && !penalty.isRevoked && !penalty.isServed && penalty.isAutomatic);
     this.markPendingPenaltiesServed(participant.id, "time");
     let replacement: PenaltySnapshot | null = null;
     if (!this.hasPendingDriveThrough(participant.id)) {
-      replacement = this.createDriveThroughPenalty(participant, `停车罚时执行失败：${reason}`, now);
+      replacement = {
+        ...this.createDriveThroughPenalty(participant, `停车罚时执行失败：${reason}`, now),
+        isAutomatic: wasAutomatic
+      };
       this.state.penalties.push(replacement);
     }
     participant.penaltyServiceActive = false;
@@ -1840,18 +2540,103 @@ export class RaceCore {
 
   private raceDeltaSeconds(reference: ParticipantState, participant: ParticipantState, now: Date): number | null {
     if (reference.id === participant.id) return 0;
-    if (!this.isRaceClassificationPhase() || reference.completedLaps !== participant.completedLaps)
-      return null;
+    if (!this.isRaceClassificationPhase()) return null;
     if (reference.status === "finished" && participant.status === "finished")
       return this.adjustedRaceTotalSeconds(participant, now) - this.adjustedRaceTotalSeconds(reference, now);
+    const liveDelta = this.liveRaceDeltaSeconds(reference, participant);
+    if (liveDelta !== null) return liveDelta;
+    if (reference.completedLaps !== participant.completedLaps) return null;
     if (reference.lastLapCompletedAt && participant.lastLapCompletedAt)
       return (Date.parse(participant.lastLapCompletedAt) - Date.parse(reference.lastLapCompletedAt)) / 1_000;
     return null;
   }
 
+  private recordRaceProgressSample(
+    participant: ParticipantState,
+    now: Date,
+    exactDistanceLaps?: number): void {
+    const distanceLaps = exactDistanceLaps ?? participant.completedLaps + participant.trackProgress;
+    if (!Number.isFinite(distanceLaps) || distanceLaps < 0) return;
+    const elapsedSeconds = this.raceElapsedSeconds(now);
+    const samples = this.liveProgressSamples.get(participant.id) ?? [];
+    const last = samples.at(-1);
+    if (last) {
+      if (distanceLaps < last.distanceLaps - RaceCore.liveGapProgressJitter) return;
+      if (distanceLaps <= last.distanceLaps + RaceCore.liveGapProgressJitter) {
+        samples[samples.length - 1] = {
+          distanceLaps: Math.max(distanceLaps, last.distanceLaps),
+          elapsedSeconds
+        };
+        this.liveProgressSamples.set(participant.id, samples);
+        return;
+      }
+    }
+
+    samples.push({ distanceLaps, elapsedSeconds });
+    const minimumDistance = distanceLaps - RaceCore.liveGapHistoryLaps;
+    let removeCount = 0;
+    while (removeCount < samples.length - 2 && samples[removeCount].distanceLaps < minimumDistance)
+      removeCount++;
+    if (removeCount > 0) samples.splice(0, removeCount);
+    if (samples.length > RaceCore.maximumLiveGapSamples)
+      samples.splice(0, samples.length - RaceCore.maximumLiveGapSamples);
+    this.liveProgressSamples.set(participant.id, samples);
+  }
+
+  private static estimatePassageTime(samples: RaceProgressSample[], distanceLaps: number): number | null {
+    if (samples.length === 0 ||
+        distanceLaps < samples[0].distanceLaps - RaceCore.liveGapProgressJitter ||
+        distanceLaps > samples[samples.length - 1].distanceLaps + RaceCore.liveGapProgressJitter)
+      return null;
+    let lower = 0, upper = samples.length - 1;
+    while (lower < upper) {
+      const middle = lower + Math.floor((upper - lower) / 2);
+      if (samples[middle].distanceLaps < distanceLaps) lower = middle + 1;
+      else upper = middle;
+    }
+    const next = samples[lower];
+    if (Math.abs(next.distanceLaps - distanceLaps) <= RaceCore.liveGapProgressJitter)
+      return next.elapsedSeconds;
+    if (lower === 0) return null;
+    const previous = samples[lower - 1];
+    const span = next.distanceLaps - previous.distanceLaps;
+    if (span <= 0) return previous.elapsedSeconds;
+    const fraction = clamp((distanceLaps - previous.distanceLaps) / span, 0, 1);
+    return previous.elapsedSeconds + (next.elapsedSeconds - previous.elapsedSeconds) * fraction;
+  }
+
+  private liveRaceDeltaSeconds(reference: ParticipantState, participant: ParticipantState): number | null {
+    const referenceSamples = this.liveProgressSamples.get(reference.id);
+    const participantSamples = this.liveProgressSamples.get(participant.id);
+    if (!referenceSamples?.length || !participantSamples?.length) return null;
+    const referenceDistance = referenceSamples[referenceSamples.length - 1].distanceLaps;
+    const participantDistance = participantSamples[participantSamples.length - 1].distanceLaps;
+    if (referenceDistance - participantDistance >= RaceCore.maximumLiveGapDistanceLaps) return null;
+    const commonDistance = Math.min(referenceDistance, participantDistance);
+    if (commonDistance < Math.max(referenceSamples[0].distanceLaps, participantSamples[0].distanceLaps))
+      return null;
+    const referenceTime = RaceCore.estimatePassageTime(referenceSamples, commonDistance);
+    const participantTime = RaceCore.estimatePassageTime(participantSamples, commonDistance);
+    if (referenceTime === null || participantTime === null) return null;
+    return Math.max(0, participantTime - referenceTime);
+  }
+
   private orderParticipants(now: Date): ParticipantState[] {
     const participants = [...this.state.participants];
-    if (this.state.phase === "qualifying" || this.state.phase === "grid") {
+    if ((this.state.phase === "qualifying" || this.state.phase === "grid") &&
+        (this.state.qualifyingSessionCount ?? 1) > 1) {
+      const count = this.state.qualifyingSessionCount ?? 1;
+      return participants.sort((left, right) => {
+        const leftGroup = left.qualifyingEliminatedInSession
+          ? count - left.qualifyingEliminatedInSession : 0;
+        const rightGroup = right.qualifyingEliminatedInSession
+          ? count - right.qualifyingEliminatedInSession : 0;
+        return leftGroup - rightGroup ||
+          compareOptionalTimes(this.qualifyingDisplayedBestLap(left), this.qualifyingDisplayedBestLap(right)) ||
+          left.joinedAt.localeCompare(right.joinedAt);
+      });
+    }
+    if (this.state.phase === "practice" || this.state.phase === "qualifying" || this.state.phase === "grid") {
       return participants.sort((left, right) => {
         if (left.bestLapSeconds === null || left.bestLapSeconds === undefined)
           return right.bestLapSeconds === null || right.bestLapSeconds === undefined
@@ -1872,6 +2657,17 @@ export class RaceCore {
     }
     return participants.sort((left, right) => Number(right.isReady) - Number(left.isReady) ||
       left.joinedAt.localeCompare(right.joinedAt));
+  }
+
+  private qualifyingDisplayedBestLap(participant: ParticipantState): number | null {
+    if ((this.state.qualifyingSessionCount ?? 1) <= 1 ||
+        (this.state.phase !== "qualifying" && this.state.phase !== "grid"))
+      return participant.bestLapSeconds ?? null;
+    const eliminatedIn = participant.qualifyingEliminatedInSession;
+    if (eliminatedIn)
+      return participant.qualifyingSessionBestLapSeconds?.[eliminatedIn - 1] ?? null;
+    const currentIndex = clampInteger((this.state.qualifyingSessionNumber ?? 1) - 1, 0, 2);
+    return participant.bestLapSeconds ?? participant.qualifyingSessionBestLapSeconds?.[currentIndex] ?? null;
   }
 
   private isRaceClassificationPhase(): boolean {

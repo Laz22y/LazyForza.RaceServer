@@ -1,10 +1,12 @@
 [CmdletBinding()]
 param(
     [ValidateSet('all', 'win-x64', 'linux-x64', 'linux-arm64', 'osx-x64', 'osx-arm64')]
-    [string]$Runtime = 'all',
+    [string]$Runtime = 'win-x64',
     [switch]$FrameworkDependent,
     [ValidatePattern('^\d{8}-dev\.\d+$')]
     [string]$CloudflareLabel,
+    [ValidatePattern('^\d{8}-dev\.\d+$')]
+    [string]$DevelopmentLabel,
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string]$PackageVersion,
     [ValidateSet('development', 'release')]
@@ -24,7 +26,15 @@ $runtimes = if ($Runtime -eq 'all') {
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
 
 foreach ($targetRuntime in $runtimes) {
-    $packageLabel = if ($PackageVersion) { $PackageVersion } elseif ($CloudflareLabel) { $CloudflareLabel } else { $null }
+    $packageLabel = if ($PackageVersion) {
+        $PackageVersion
+    } elseif ($DevelopmentLabel) {
+        $DevelopmentLabel
+    } elseif ($CloudflareLabel) {
+        $CloudflareLabel
+    } else {
+        $null
+    }
     $packageBaseName = if ($packageLabel) {
         "LazyForza.RaceServer-$packageLabel-$targetRuntime"
     } else {
@@ -121,8 +131,8 @@ if ($CloudflareLabel -or $PackageVersion) {
     }
     foreach ($relative in @(
             'public/app.js', 'public/events.css', 'public/index.html', 'public/results.css', 'public/styles.css', 'public/teams.css',
-            'src/index.ts', 'src/passwords.ts', 'src/protocol.ts', 'src/race-core.ts',
-            'tests/passwords.test.ts', 'tests/race-core.test.ts',
+            'src/index.ts', 'src/passwords.ts', 'src/protocol.ts', 'src/race-core.ts', 'src/track-package.ts',
+            'tests/passwords.test.ts', 'tests/race-core.test.ts', 'tests/track-package.test.ts',
             'package-lock.json', 'package.json', 'README.md', 'tsconfig.json', 'wrangler.jsonc')) {
         $source = [System.IO.Path]::GetFullPath((Join-Path $cloudflareRoot $relative))
         if (!$source.StartsWith(

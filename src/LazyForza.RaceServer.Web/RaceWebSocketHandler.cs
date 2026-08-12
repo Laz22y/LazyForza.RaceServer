@@ -26,6 +26,7 @@ public sealed class RaceWebSocketHandler(
 
         using var socket = await context.WebSockets.AcceptWebSocketAsync();
         Guid? participantId = null;
+        var isObserver = false;
         try
         {
             using var loginTimeout = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
@@ -50,6 +51,7 @@ public sealed class RaceWebSocketHandler(
             }
 
             participantId = result.Accepted!.ParticipantId;
+            isObserver = result.Accepted.IsObserver;
             await registry.RegisterAsync(participantId.Value, socket, context.RequestAborted);
             await SendAsync(socket, RaceMessageTypes.LoginAccepted,
                 result.Accepted with { Snapshot = broadcasts.WithOrganizerLogo(result.Accepted.Snapshot) },
@@ -73,7 +75,7 @@ public sealed class RaceWebSocketHandler(
                     continue;
                 }
 
-                var command = HandleMessage(participantId.Value, envelope, socket, context.RequestAborted);
+                var command = HandleMessage(participantId.Value, isObserver, envelope, socket, context.RequestAborted);
                 if (command is not null) await command;
             }
         }
@@ -96,14 +98,14 @@ public sealed class RaceWebSocketHandler(
         {
             if (participantId is Guid id)
             {
-                registry.Unregister(id, socket);
-                coordinator.Disconnect(id);
+                if (registry.Unregister(id, socket)) coordinator.Disconnect(id);
             }
         }
     }
 
     private Task? HandleMessage(
         Guid participantId,
+        bool isObserver,
         RaceEnvelope envelope,
         WebSocket socket,
         CancellationToken cancellationToken)
@@ -112,17 +114,23 @@ public sealed class RaceWebSocketHandler(
         {
             case RaceMessageTypes.Ready:
             {
+                if (isObserver)
+                    return SendErrorAsync(socket, "observerReadOnly", "OB 不参与准备与比赛流程。", cancellationToken);
                 var update = RaceProtocolJson.DeserializePayload<RaceReadyUpdate>(envelope);
                 return ReplyToResult(socket, coordinator.SetReady(participantId, update.IsReady), cancellationToken);
             }
             case RaceMessageTypes.Telemetry:
             {
+                if (isObserver)
+                    return SendErrorAsync(socket, "observerReadOnly", "OB 不能上传车辆遥测。", cancellationToken);
                 var update = RaceProtocolJson.DeserializePayload<RaceTelemetryUpdate>(envelope);
                 var result = coordinator.UpdateTelemetry(participantId, update);
                 return result.IsAccepted ? null : ReplyToResult(socket, result, cancellationToken);
             }
             case RaceMessageTypes.LapCompleted:
             {
+                if (isObserver)
+                    return SendErrorAsync(socket, "observerReadOnly", "OB 不能提交圈速。", cancellationToken);
                 var completed = RaceProtocolJson.DeserializePayload<RaceLapCompleted>(envelope);
                 return ReplyToResult(socket, coordinator.CompleteLap(participantId, completed), cancellationToken);
             }

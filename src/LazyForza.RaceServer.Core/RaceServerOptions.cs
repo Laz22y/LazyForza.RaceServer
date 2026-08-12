@@ -10,6 +10,7 @@ public sealed record RaceServerOptions
     public string SessionName { get; init; } = "地产赛事";
     public int MaximumParticipants { get; init; } = RaceProtocol.MaximumParticipants;
     public int TotalRaceLaps { get; init; } = 10;
+    public int MinimumRequiredPitStops { get; init; } = 1;
     public int SectorCount { get; init; } = 3;
     public bool AutomaticYellowEnabled { get; init; } = true;
     public double SlowSpeedKph { get; init; } = 12;
@@ -39,6 +40,7 @@ public sealed record RaceServerOptions
         AdminPassword = NormalizeAdminPassword(AdminPassword),
         MaximumParticipants = Math.Clamp(MaximumParticipants, 2, RaceProtocol.MaximumParticipants),
         TotalRaceLaps = Math.Clamp(TotalRaceLaps, 1, 999),
+        MinimumRequiredPitStops = Math.Clamp(MinimumRequiredPitStops, 0, 20),
         SectorCount = Math.Clamp(SectorCount, 1, 20),
         SlowSpeedKph = Math.Clamp(SlowSpeedKph, 3, 50),
         SlowDurationSeconds = Math.Clamp(SlowDurationSeconds, 1, 15),

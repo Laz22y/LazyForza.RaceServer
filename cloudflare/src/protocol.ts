@@ -1,13 +1,15 @@
 export const protocolVersion = 2;
 export const maximumMessageBytes = 64 * 1024;
+export const maximumObservers = 12;
 
-export type SessionPhase = "lobby" | "qualifying" | "grid" | "outLap" | "formationLap" | "countdown" | "race" | "suspended" | "finished";
+export type SessionPhase = "lobby" | "practice" | "qualifying" | "grid" | "outLap" | "formationLap" | "countdown" | "race" | "suspended" | "finished";
 export type ControlFlag = "green" | "yellow" | "red" | "chequered";
 export type ParticipantStatus = "connected" | "ready" | "onTrack" | "inPitLane" | "inService" | "finished" | "didNotFinish" | "disqualified" | "disconnected";
 export type GripCondition = "unknown" | "slightlyReduced" | "moderatelyReduced" | "severelyReduced" | "atLimit";
 export type PenaltyKind = "warning" | "time" | "driveThrough" | "stopAndGo" | "gridDrop" | "disqualification";
 export type BannerKind = "information" | "fastestLap" | "penalty" | "yellowFlag" | "redFlag" | "blueFlag" | "chequeredFlag" | "winner";
 export type TrackLimitMode = "warningsOnly" | "automatic" | "disabled";
+export type InvestigationStatus = "pending" | "penalized" | "dismissed";
 
 export interface RaceEnvelope<T = unknown> {
   protocolVersion: number;
@@ -28,6 +30,7 @@ export interface LoginRequest {
   trackPackageHash?: string | null;
   sectorCount?: number | null;
   teamId?: string | null;
+  isObserver?: boolean;
 }
 
 export interface TeamDefinition { id: string; name: string; themeColor: string; }
@@ -82,6 +85,19 @@ export interface PenaltySnapshot {
   isServed: boolean;
   isRevoked: boolean;
   isPostRaceAdjustment?: boolean;
+  isAutomatic?: boolean;
+  investigationId?: string | null;
+}
+
+export interface InvestigationSnapshot {
+  id: string;
+  participantId: string;
+  offense: string;
+  detectedAt: string;
+  lapNumber: number;
+  status: InvestigationStatus;
+  penaltyId?: string | null;
+  resolvedAt?: string | null;
 }
 
 export interface ParticipantSnapshot {
@@ -131,6 +147,17 @@ export interface ParticipantSnapshot {
   driveThroughReminderAt?: string | null;
   driveThroughOverdue?: boolean;
   isServingDriveThrough?: boolean;
+  qualifyingEligible?: boolean;
+  qualifyingEliminatedInSession?: number | null;
+  qualifyingSessionBestLapSeconds?: Array<number | null>;
+  practiceFinalLapPending?: boolean;
+  practiceSessionBestLapSeconds?: Array<number | null>;
+}
+
+export interface ObserverSnapshot {
+  id: string;
+  displayName: string;
+  connectedAt: string;
 }
 
 export interface BannerSnapshot {
@@ -141,6 +168,7 @@ export interface BannerSnapshot {
   participantId?: string | null;
   createdAt: string;
   expiresAt?: string | null;
+  isInvestigation?: boolean;
 }
 
 export interface SessionSnapshot {
@@ -179,6 +207,19 @@ export interface SessionSnapshot {
   organizerLogoHash?: string | null;
   organizerLogoMimeType?: string | null;
   organizerLogoDownloadPath?: string | null;
+  penalties?: PenaltySnapshot[];
+  investigations?: InvestigationSnapshot[];
+  qualifyingSessionNumber?: number;
+  qualifyingSessionCount?: number;
+  qualifyingSessionMinutes?: number[];
+  qualifyingEliminationCounts?: number[];
+  practiceEndsAt?: string | null;
+  practiceTimeExpired?: boolean;
+  practiceSessionNumber?: number;
+  practiceSessionCount?: number;
+  practiceSessionMinutes?: number[];
+  observers?: ObserverSnapshot[];
+  minimumRequiredPitStops?: number;
 }
 
 export interface YellowZoneSnapshot {
@@ -196,6 +237,11 @@ export interface SessionCommand {
   totalRaceLaps?: number | null;
   countdownSeconds?: number | null;
   qualifyingMinutes?: number | null;
+  qualifyingSessionCount?: number | null;
+  qualifyingSessionMinutes?: number[] | null;
+  qualifyingEliminationCounts?: Array<number | null> | null;
+  practiceSessionCount?: number | null;
+  practiceSessionMinutes?: number[] | null;
 }
 
 export interface FlagCommand { flag: ControlFlag; message?: string | null; sectorIndex?: number | null; }
@@ -217,6 +263,7 @@ export interface RoomSettings {
   driversPerTeam?: number;
   teams?: TeamDefinition[];
   trackLimitMode?: TrackLimitMode;
+  minimumRequiredPitStops?: number;
 }
 export interface RaceEventSnapshot {
   sequence: number;
@@ -231,6 +278,14 @@ export interface PenaltyCommand {
   valueSeconds?: number | null;
   gridPlaces?: number | null;
   reason: string;
+}
+export interface PenaltyUpdateCommand { penaltyId: string; valueSeconds?: number | null; reason?: string | null; isRevoked: boolean; }
+export interface InvestigationCommand {
+  investigationId: string;
+  applyPenalty: boolean;
+  kind?: PenaltyKind | null;
+  valueSeconds?: number | null;
+  reason?: string | null;
 }
 export interface ParticipantCommand { participantId: string; status: ParticipantStatus; reason: string; }
 

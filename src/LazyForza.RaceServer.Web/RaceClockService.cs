@@ -4,7 +4,8 @@ namespace LazyForza.RaceServer.Web;
 
 public sealed class RaceClockService(
     RaceCoordinator coordinator,
-    RaceBroadcastService broadcasts) : BackgroundService
+    RaceBroadcastService broadcasts,
+    ILogger<RaceClockService> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -14,11 +15,18 @@ public sealed class RaceClockService(
         {
             while (await timer.WaitForNextTickAsync(stoppingToken))
             {
-                var now = DateTimeOffset.UtcNow;
-                coordinator.Tick(now);
-                if (now < nextHeartbeatAt) continue;
-                broadcasts.Queue(coordinator.Snapshot(now));
-                nextHeartbeatAt = now.AddSeconds(1);
+                try
+                {
+                    var now = DateTimeOffset.UtcNow;
+                    coordinator.Tick(now);
+                    if (now < nextHeartbeatAt) continue;
+                    broadcasts.Queue(coordinator.Snapshot(now));
+                    nextHeartbeatAt = now.AddSeconds(1);
+                }
+                catch (Exception exception)
+                {
+                    logger.LogError(exception, "Race clock tick failed; the clock loop will continue.");
+                }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }

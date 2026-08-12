@@ -8,6 +8,7 @@ public static class RaceProtocol
 {
     public const int CurrentVersion = 2;
     public const int MaximumParticipants = 12;
+    public const int MaximumObservers = 12;
     public const int MaximumMessageBytes = 64 * 1024;
     public const int MaximumDisplayNameLength = 20;
     public const int MaximumTeamNameLength = 24;
@@ -16,6 +17,7 @@ public static class RaceProtocol
 public enum RaceSessionPhase
 {
     Lobby,
+    Practice,
     Qualifying,
     Grid,
     OutLap,
@@ -85,6 +87,13 @@ public enum RaceBannerKind
     Winner
 }
 
+public enum RaceInvestigationStatus
+{
+    Pending,
+    Penalized,
+    Dismissed
+}
+
 public static class RaceMessageTypes
 {
     public const string Login = "login";
@@ -128,7 +137,9 @@ public sealed record RaceServerDescriptor(
     string? TrackPackageFileSha256 = null,
     string? OrganizerLogoHash = null,
     string? OrganizerLogoMimeType = null,
-    string? OrganizerLogoDownloadPath = null);
+    string? OrganizerLogoDownloadPath = null,
+    bool SupportsObservers = true,
+    int MaximumObservers = RaceProtocol.MaximumObservers);
 
 public sealed record RaceTeamDefinition(
     string Id,
@@ -146,13 +157,15 @@ public sealed record RaceLoginRequest(
     string? TrackRevision,
     string? TrackPackageHash,
     int? SectorCount = null,
-    string? TeamId = null);
+    string? TeamId = null,
+    bool IsObserver = false);
 
 public sealed record RaceLoginAccepted(
     Guid ParticipantId,
     string ResumeToken,
     RaceSessionSnapshot Snapshot,
-    DateTimeOffset ServerTime);
+    DateTimeOffset ServerTime,
+    bool IsObserver = false);
 
 public sealed record RaceLoginRejected(string Code, string Message);
 
@@ -209,7 +222,19 @@ public sealed record RacePenaltySnapshot(
     DateTimeOffset IssuedAt,
     bool IsServed,
     bool IsRevoked,
-    bool IsPostRaceAdjustment = false);
+    bool IsPostRaceAdjustment = false,
+    bool IsAutomatic = false,
+    Guid? InvestigationId = null);
+
+public sealed record RaceInvestigationSnapshot(
+    Guid Id,
+    Guid ParticipantId,
+    string Offense,
+    DateTimeOffset DetectedAt,
+    int LapNumber,
+    RaceInvestigationStatus Status,
+    Guid? PenaltyId = null,
+    DateTimeOffset? ResolvedAt = null);
 
 public sealed record RaceParticipantSnapshot(
     Guid Id,
@@ -257,7 +282,17 @@ public sealed record RaceParticipantSnapshot(
     int? DriveThroughLapsRemaining = null,
     DateTimeOffset? DriveThroughReminderAt = null,
     bool DriveThroughOverdue = false,
-    bool IsServingDriveThrough = false);
+    bool IsServingDriveThrough = false,
+    bool QualifyingEligible = true,
+    int? QualifyingEliminatedInSession = null,
+    IReadOnlyList<double?>? QualifyingSessionBestLapSeconds = null,
+    bool PracticeFinalLapPending = false,
+    IReadOnlyList<double?>? PracticeSessionBestLapSeconds = null);
+
+public sealed record RaceObserverSnapshot(
+    Guid Id,
+    string DisplayName,
+    DateTimeOffset ConnectedAt);
 
 public sealed record RaceEventSnapshot(
     long Sequence,
@@ -273,7 +308,8 @@ public sealed record RaceBannerSnapshot(
     string? Detail,
     Guid? ParticipantId,
     DateTimeOffset CreatedAt,
-    DateTimeOffset? ExpiresAt);
+    DateTimeOffset? ExpiresAt,
+    bool IsInvestigation = false);
 
 public sealed record RaceYellowZoneSnapshot(
     int? SectorIndex,
@@ -322,7 +358,20 @@ public sealed record RaceSessionSnapshot(
     IReadOnlyList<double?>? FastestLapSectorSeconds = null,
     string? OrganizerLogoHash = null,
     string? OrganizerLogoMimeType = null,
-    string? OrganizerLogoDownloadPath = null);
+    string? OrganizerLogoDownloadPath = null,
+    IReadOnlyList<RacePenaltySnapshot>? Penalties = null,
+    IReadOnlyList<RaceInvestigationSnapshot>? Investigations = null,
+    int QualifyingSessionNumber = 0,
+    int QualifyingSessionCount = 1,
+    IReadOnlyList<int>? QualifyingSessionMinutes = null,
+    IReadOnlyList<int>? QualifyingEliminationCounts = null,
+    DateTimeOffset? PracticeEndsAt = null,
+    bool PracticeTimeExpired = false,
+    int PracticeSessionNumber = 0,
+    int PracticeSessionCount = 1,
+    IReadOnlyList<int>? PracticeSessionMinutes = null,
+    IReadOnlyList<RaceObserverSnapshot>? Observers = null,
+    int MinimumRequiredPitStops = 1);
 
 public sealed record RaceAdminLoginRequest(string Password);
 
@@ -331,7 +380,12 @@ public sealed record RaceAdminSessionCommand(
     string? SessionName,
     int? TotalRaceLaps,
     int? CountdownSeconds,
-    int? QualifyingMinutes);
+    int? QualifyingMinutes,
+    int? QualifyingSessionCount = null,
+    IReadOnlyList<int>? QualifyingSessionMinutes = null,
+    IReadOnlyList<int?>? QualifyingEliminationCounts = null,
+    int? PracticeSessionCount = null,
+    IReadOnlyList<int>? PracticeSessionMinutes = null);
 
 public sealed record RaceAdminFlagCommand(
     RaceControlFlag Flag,
@@ -355,7 +409,8 @@ public sealed record RaceAdminRoomSettingsCommand(
     int TeamCount = 2,
     int DriversPerTeam = 6,
     IReadOnlyList<RaceTeamDefinition>? Teams = null,
-    TrackLimitEnforcementMode TrackLimitMode = TrackLimitEnforcementMode.WarningsOnly);
+    TrackLimitEnforcementMode TrackLimitMode = TrackLimitEnforcementMode.WarningsOnly,
+    int MinimumRequiredPitStops = 1);
 
 public sealed record RaceRoomSettingsSnapshot(
     string SessionName,
@@ -374,7 +429,8 @@ public sealed record RaceRoomSettingsSnapshot(
     int TeamCount = 2,
     int DriversPerTeam = 6,
     IReadOnlyList<RaceTeamDefinition>? Teams = null,
-    TrackLimitEnforcementMode TrackLimitMode = TrackLimitEnforcementMode.WarningsOnly);
+    TrackLimitEnforcementMode TrackLimitMode = TrackLimitEnforcementMode.WarningsOnly,
+    int MinimumRequiredPitStops = 1);
 
 public sealed record RaceAdminPenaltyCommand(
     Guid ParticipantId,
@@ -382,6 +438,19 @@ public sealed record RaceAdminPenaltyCommand(
     double? ValueSeconds,
     int? GridPlaces,
     string Reason);
+
+public sealed record RaceAdminPenaltyUpdateCommand(
+    Guid PenaltyId,
+    double? ValueSeconds,
+    string? Reason,
+    bool IsRevoked);
+
+public sealed record RaceAdminInvestigationCommand(
+    Guid InvestigationId,
+    bool ApplyPenalty,
+    RacePenaltyKind? Kind,
+    double? ValueSeconds,
+    string? Reason);
 
 public sealed record RaceAdminParticipantCommand(
     Guid ParticipantId,

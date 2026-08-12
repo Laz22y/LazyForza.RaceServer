@@ -4,8 +4,11 @@ import {
   type LapCompleted,
   type LoginRequest,
   maximumMessageBytes,
+  maximumObservers,
   type ParticipantCommand,
   type PenaltyCommand,
+  type PenaltyUpdateCommand,
+  type InvestigationCommand,
   protocolVersion,
   type RaceEnvelope,
   type ReadyUpdate,
@@ -18,6 +21,7 @@ import {
   type StoredCredentials,
   verifyPassword
 } from "./passwords";
+import { inspectEstateTrackPackage } from "./track-package";
 
 interface Env {
   RACE_ROOM: DurableObjectNamespace;
@@ -32,6 +36,7 @@ interface Env {
 
 interface SocketAttachment {
   participantId?: string;
+  isObserver?: boolean;
 }
 
 const adminCookieName = "lfz_race_admin";
@@ -150,6 +155,8 @@ export class RaceRoom {
         organizerLogoHash: this.organizerLogo?.sha256 ?? null,
         organizerLogoMimeType: this.organizerLogo?.mimeType ?? null,
         organizerLogoDownloadPath: this.organizerLogo ? "/api/organizer-logo" : null,
+        supportsObservers: true,
+        maximumObservers,
         phase: snapshot.phase,
         serverTime: snapshot.serverTime
       });
@@ -186,6 +193,10 @@ export class RaceRoom {
       return this.applyAdmin(request, body => this.core.applyFlag(body as FlagCommand));
     if (url.pathname === "/api/admin/penalty" && request.method === "POST")
       return this.applyAdmin(request, body => this.core.applyPenalty(body as PenaltyCommand));
+    if (url.pathname === "/api/admin/penalty/update" && request.method === "POST")
+      return this.applyAdmin(request, body => this.core.updatePenalty(body as PenaltyUpdateCommand));
+    if (url.pathname === "/api/admin/investigation" && request.method === "POST")
+      return this.applyAdmin(request, body => this.core.resolveInvestigation(body as InvestigationCommand));
     if (url.pathname === "/api/admin/participant" && request.method === "POST")
       return this.applyAdmin(request, body => this.core.applyParticipant(body as ParticipantCommand));
     return json({ error: "Not found" }, 404);
@@ -222,11 +233,18 @@ export class RaceRoom {
         });
         return;
       }
+      if (attachment.isObserver) {
+        this.send(webSocket, "error", {
+          code: "observerReadOnly",
+          message: "OB 只接收赛事数据，不能上传遥测或参与比赛流程。"
+        });
+        return;
+      }
 
       let result: CommandResult;
       // Durable Object alarms may be delivered late. Any active client message
-      // also advances the race clock so qualifying expiry and its final-lap
-      // classification cannot remain stale while drivers are still online.
+      // also advances the race clock so practice/qualifying expiry and their
+      // final-lap classification cannot remain stale while drivers are online.
       let important = this.core.tick(new Date());
       if (envelope.type === "ready") {
         result = this.core.setReady(attachment.participantId, envelope.payload as ReadyUpdate);
@@ -398,10 +416,16 @@ export class RaceRoom {
       this.send(webSocket, "loginRejected", { code: result.code, message: result.message });
       return;
     }
-    webSocket.serializeAttachment({ participantId: result.participantId } satisfies SocketAttachment);
+    webSocket.serializeAttachment({
+      participantId: result.participantId,
+      isObserver: result.isObserver
+    } satisfies SocketAttachment);
     for (const other of this.authenticatedSockets()) {
       if (other !== webSocket && attachmentOf(other).participantId === result.participantId) {
-        this.send(other, "error", { code: "connectionReplaced", message: "该车手已从新的连接恢复比赛。" });
+        this.send(other, "error", {
+          code: "connectionReplaced",
+          message: result.isObserver ? "该 OB 已从新的连接恢复。" : "该车手已从新的连接恢复比赛。"
+        });
         other.close(1000, "Connection replaced");
       }
     }
@@ -411,7 +435,8 @@ export class RaceRoom {
       participantId: result.participantId,
       resumeToken: result.resumeToken,
       snapshot,
-      serverTime: snapshot.serverTime
+      serverTime: snapshot.serverTime,
+      isObserver: result.isObserver
     });
     this.broadcastSnapshot(true);
   }
@@ -446,39 +471,42 @@ export class RaceRoom {
 
   private async uploadTrackPackage(request: Request): Promise<Response> {
     try {
+      if (!["lobby", "finished"].includes(this.core.snapshot().phase))
+        return json({ error: "排位赛或正赛进行期间不能更换赛事赛道。请先返回大厅。" }, 400);
       const form = await request.formData();
       const file = form.get("file");
-      const trackId = cleanSetupText(form.get("trackId"), 128);
-      const trackName = cleanSetupText(form.get("trackName"), 128);
-      const trackRevision = cleanSetupText(form.get("trackRevision"), 64);
-      const trackPackageHash = cleanSetupText(form.get("trackPackageHash"), 64)?.toUpperCase() ?? null;
       if (!(file instanceof File)) return json({ error: "请选择要托管的 .lfzestate 文件。" }, 400);
-      if (!trackId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(trackId))
-        return json({ error: "赛道标识不是有效 UUID。" }, 400);
-      if (!trackName || !trackPackageHash || !/^[0-9a-f]{64}$/i.test(trackPackageHash))
-        return json({ error: "请先填写赛道名称和 64 位赛道数据 SHA-256。" }, 400);
       if (file.size <= 0 || file.size > maximumHostedTrackPackageBytes)
         return json({ error: "赛道文件为空或超过 1.5 MiB 托管上限。" }, 400);
       const bytes = await file.arrayBuffer();
-      const signature = new Uint8Array(bytes, 0, Math.min(4, bytes.byteLength));
-      if (signature.length < 4 || signature[0] !== 0x50 || signature[1] !== 0x4b)
-        return json({ error: "这不是有效的 .lfzestate ZIP 文件。" }, 400);
+      const identity = await inspectEstateTrackPackage(bytes);
       const metadata: HostedTrackPackageMetadata = {
-        trackId,
-        trackName,
-        trackRevision,
-        trackPackageHash,
+        trackId: identity.trackId,
+        trackName: identity.trackName,
+        trackRevision: identity.trackRevision,
+        trackPackageHash: identity.trackPackageHash,
         fileSha256: await sha256Hex(bytes),
         sizeBytes: bytes.byteLength,
         uploadedAt: new Date().toISOString(),
-        fileName: safeTrackFileName(file.name, trackName)
+        fileName: safeTrackFileName(file.name, identity.trackName)
       };
       await this.state.storage.put({
         [hostedTrackPackageKey]: bytes,
         [hostedTrackPackageMetadataKey]: metadata
       });
       this.hostedTrackPackage = metadata;
-      return json({ package: metadata });
+      const current = this.core.roomSettings();
+      const applied = this.core.applyRoomSettings({
+        ...current,
+        trackName: identity.trackName,
+        trackId: identity.trackId,
+        trackRevision: identity.trackRevision,
+        trackPackageHash: identity.trackPackageHash
+      });
+      if (!applied.ok) return json({ error: applied.error }, 400);
+      await this.persist();
+      this.broadcastSnapshot(true);
+      return json({ package: metadata, room: this.core.roomSettings() });
     } catch (error) {
       return json({ error: error instanceof Error ? error.message : "赛道文件上传失败。" }, 400);
     }
@@ -558,12 +586,16 @@ export class RaceRoom {
 
   private send(webSocket: WebSocket, type: string, payload: unknown): void {
     if (webSocket.readyState !== WebSocket.OPEN) return;
-    webSocket.send(JSON.stringify({
-      protocolVersion,
-      type,
-      sequence: ++this.serverSequence,
-      payload
-    } satisfies RaceEnvelope));
+    try {
+      webSocket.send(JSON.stringify({
+        protocolVersion,
+        type,
+        sequence: ++this.serverSequence,
+        payload
+      } satisfies RaceEnvelope));
+    } catch {
+      // The close callback owns participant state; one stale socket must not abort a request.
+    }
   }
 
   private broadcastSnapshot(important: boolean): void {

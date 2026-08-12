@@ -53,13 +53,8 @@ public sealed class HostedTrackPackageStore
     public async Task<HostedTrackPackageMetadata> SaveAsync(
         Stream source,
         string fileName,
-        string trackId,
-        string trackName,
-        string? trackRevision,
-        string trackPackageHash,
         CancellationToken cancellationToken)
     {
-        ValidateIdentity(trackId, trackName, trackPackageHash);
         await using var buffer = new MemoryStream();
         var chunk = new byte[64 * 1024];
         while (true)
@@ -72,11 +67,11 @@ public sealed class HostedTrackPackageStore
         }
         if (buffer.Length == 0) throw new InvalidDataException("赛道文件为空。");
         var bytes = buffer.ToArray();
-        ValidateArchive(bytes, trackId, trackName, trackRevision, trackPackageHash);
+        var identity = InspectArchive(bytes);
         var created = new HostedTrackPackageMetadata(
-            trackId.Trim(), trackName.Trim(), NullIfWhiteSpace(trackRevision), trackPackageHash.Trim().ToUpperInvariant(),
+            identity.TrackId, identity.TrackName, identity.TrackRevision, identity.TrackPackageHash,
             Convert.ToHexString(SHA256.HashData(bytes)), bytes.LongLength, DateTimeOffset.UtcNow,
-            SafeFileName(fileName, trackName));
+            SafeFileName(fileName, identity.TrackName));
 
         await sync.WaitAsync(cancellationToken);
         try
@@ -129,34 +124,69 @@ public sealed class HostedTrackPackageStore
         catch (IOException) { return null; }
     }
 
-    private static void ValidateArchive(
-        byte[] bytes,
-        string trackId,
-        string trackName,
-        string? trackRevision,
-        string trackPackageHash)
+    private static HostedTrackIdentity InspectArchive(byte[] bytes)
     {
-        using var stream = new MemoryStream(bytes, writable: false);
-        using var archive = new ZipArchive(stream, ZipArchiveMode.Read);
-        var manifestEntry = archive.GetEntry("manifest.json") ?? throw new InvalidDataException("文件缺少 manifest.json。");
-        var trackEntry = archive.GetEntry("track.json") ?? throw new InvalidDataException("文件缺少 track.json。");
-        if (archive.Entries.Count != 2) throw new InvalidDataException("赛道包结构不正确。");
-        using var manifestStream = manifestEntry.Open();
-        using var manifest = JsonDocument.Parse(manifestStream);
-        var root = manifest.RootElement;
-        var manifestTrackId = root.GetProperty("trackId").GetGuid().ToString("D");
-        var manifestTrackName = root.GetProperty("trackName").GetString();
-        var manifestRevision = root.GetProperty("mapRevision").GetString();
-        var manifestHash = root.GetProperty("payloadSha256").GetString();
-        if (!string.Equals(trackId, manifestTrackId, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(trackName.Trim(), manifestTrackName, StringComparison.Ordinal) ||
-            (!string.IsNullOrWhiteSpace(trackRevision) && !string.Equals(trackRevision.Trim(), manifestRevision, StringComparison.Ordinal)) ||
-            !string.Equals(trackPackageHash, manifestHash, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("赛道包清单与网页填写的赛道信息不一致。");
-        using var trackStream = trackEntry.Open();
-        var computed = Convert.ToHexString(SHA256.HashData(trackStream));
-        if (!string.Equals(computed, manifestHash, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("赛道包内部 SHA-256 校验失败。");
+        try
+        {
+            using var stream = new MemoryStream(bytes, writable: false);
+            using var archive = new ZipArchive(stream, ZipArchiveMode.Read);
+            var manifestEntry = archive.GetEntry("manifest.json") ??
+                                throw new InvalidDataException("文件缺少 manifest.json。");
+            var trackEntry = archive.GetEntry("track.json") ??
+                             throw new InvalidDataException("文件缺少 track.json。");
+            if (archive.Entries.Count != 2) throw new InvalidDataException("赛道包结构不正确。");
+            using var manifestStream = manifestEntry.Open();
+            using var manifest = JsonDocument.Parse(manifestStream);
+            var root = manifest.RootElement;
+            if (!string.Equals(RequiredString(root, "format"), "lazyforza-estate-track", StringComparison.Ordinal) ||
+                root.GetProperty("formatVersion").GetInt32() != 1)
+                throw new InvalidDataException("这不是当前服务端支持的 LazyForza 地产环道文件。");
+            var trackId = root.GetProperty("trackId").GetGuid().ToString("D");
+            var trackName = RequiredString(root, "trackName");
+            var trackRevision = RequiredString(root, "mapRevision");
+            var payloadHash = RequiredSha256(root, "payloadSha256");
+            var fingerprint = root.TryGetProperty("trackFingerprintSha256", out var fingerprintElement) &&
+                              fingerprintElement.ValueKind == JsonValueKind.String &&
+                              !string.IsNullOrWhiteSpace(fingerprintElement.GetString())
+                ? RequiredSha256(root, "trackFingerprintSha256")
+                : payloadHash;
+
+            using var trackBuffer = new MemoryStream();
+            using (var trackStream = trackEntry.Open()) trackStream.CopyTo(trackBuffer);
+            var trackBytes = trackBuffer.ToArray();
+            var computed = Convert.ToHexString(SHA256.HashData(trackBytes));
+            if (!string.Equals(computed, payloadHash, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("赛道包内部 SHA-256 校验失败。");
+            using var payload = JsonDocument.Parse(trackBytes);
+            var payloadRoot = payload.RootElement;
+            var payloadTrack = payloadRoot.GetProperty("track");
+            var payloadDefinition = payloadRoot.GetProperty("definition");
+            if (payloadTrack.GetProperty("id").GetGuid().ToString("D") != trackId ||
+                !string.Equals(RequiredString(payloadTrack, "name"), trackName, StringComparison.Ordinal) ||
+                !string.Equals(RequiredString(payloadDefinition, "mapRevision"), trackRevision, StringComparison.Ordinal))
+                throw new InvalidDataException("赛道包清单与 track.json 内容不一致。");
+            ValidateIdentity(trackId, trackName, fingerprint);
+            return new HostedTrackIdentity(trackId, trackName, trackRevision, fingerprint);
+        }
+        catch (InvalidDataException) { throw; }
+        catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException or FormatException)
+        {
+            throw new InvalidDataException("无法读取赛道包中的清单或赛道数据。", exception);
+        }
+    }
+
+    private static string RequiredString(JsonElement value, string propertyName) =>
+        value.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String &&
+        !string.IsNullOrWhiteSpace(property.GetString())
+            ? property.GetString()!
+            : throw new InvalidDataException($"赛道包缺少 {propertyName}。");
+
+    private static string RequiredSha256(JsonElement value, string propertyName)
+    {
+        var hash = RequiredString(value, propertyName).ToUpperInvariant();
+        if (hash.Length != 64 || hash.Any(character => !Uri.IsHexDigit(character)))
+            throw new InvalidDataException($"赛道包中的 {propertyName} 不是有效的 SHA-256。");
+        return hash;
     }
 
     private static void ValidateIdentity(string trackId, string trackName, string trackPackageHash)
@@ -175,6 +205,9 @@ public sealed class HostedTrackPackageStore
         return new string(source.Select(character => Path.GetInvalidFileNameChars().Contains(character) ? '-' : character).ToArray());
     }
 
-    private static string? NullIfWhiteSpace(string? value) =>
-        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    private sealed record HostedTrackIdentity(
+        string TrackId,
+        string TrackName,
+        string TrackRevision,
+        string TrackPackageHash);
 }

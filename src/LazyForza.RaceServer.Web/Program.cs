@@ -19,6 +19,7 @@ serverOptions = serverOptions with
 {
     SessionName = initialRoom.SessionName,
     TotalRaceLaps = initialRoom.TotalRaceLaps,
+    MinimumRequiredPitStops = initialRoom.MinimumRequiredPitStops,
     SectorCount = initialRoom.SectorCount,
     AutomaticYellowEnabled = initialRoom.AutomaticYellowEnabled,
     SlowSpeedKph = initialRoom.SlowSpeedKph,
@@ -168,7 +169,8 @@ app.MapPost("/api/setup", (
         room.TeamCount,
         room.DriversPerTeam,
         room.Teams,
-        room.TrackLimitMode));
+        room.TrackLimitMode,
+        room.MinimumRequiredPitStops));
     return applied.IsAccepted ? Results.Ok(new { ok = true }) : Results.BadRequest(new { error = applied.Error });
 });
 
@@ -261,20 +263,44 @@ app.MapPost("/api/admin/track-package", async (
     HttpContext context,
     AdminSessionStore sessions,
     HostedTrackPackageStore trackPackages,
+    RaceCoordinator coordinator,
+    RaceServerConfigurationStore settings,
     CancellationToken cancellationToken) =>
 {
     if (!Authorized(context, sessions)) return Results.Unauthorized();
     if (!context.Request.HasFormContentType) return Results.BadRequest(new { error = "请使用表单上传 .lfzestate 文件。" });
     try
     {
+        if (coordinator.Snapshot().Phase is not (RaceSessionPhase.Lobby or RaceSessionPhase.Finished))
+            return Results.BadRequest(new { error = "排位赛或正赛进行期间不能更换赛事赛道。请先返回大厅。" });
         var form = await context.Request.ReadFormAsync(cancellationToken);
         var file = form.Files.GetFile("file");
         if (file is null) return Results.BadRequest(new { error = "请选择要托管的 .lfzestate 文件。" });
         await using var stream = file.OpenReadStream();
-        var metadata = await trackPackages.SaveAsync(
-            stream, file.FileName, form["trackId"].ToString(), form["trackName"].ToString(),
-            form["trackRevision"].ToString(), form["trackPackageHash"].ToString(), cancellationToken);
-        return Results.Ok(new { package = metadata });
+        var metadata = await trackPackages.SaveAsync(stream, file.FileName, cancellationToken);
+        var current = coordinator.RoomSettings();
+        var result = coordinator.ApplyRoomSettings(new RaceAdminRoomSettingsCommand(
+            current.SessionName,
+            current.TotalRaceLaps,
+            current.SectorCount,
+            current.AutomaticYellowEnabled,
+            current.SlowSpeedKph,
+            current.SlowDurationSeconds,
+            current.SevereLateralOffsetMeters,
+            current.RecoveryDurationSeconds,
+            current.AllowTeams,
+            metadata.TrackName,
+            metadata.TrackId,
+            metadata.TrackRevision,
+            metadata.TrackPackageHash,
+            current.TeamCount,
+            current.DriversPerTeam,
+            current.Teams,
+            current.TrackLimitMode,
+            current.MinimumRequiredPitStops));
+        if (!result.IsAccepted) return Results.BadRequest(new { error = result.Error });
+        settings.SaveRoomSettings(coordinator.RoomSettings());
+        return Results.Ok(new { package = metadata, room = coordinator.RoomSettings() });
     }
     catch (Exception exception) when (exception is InvalidDataException or IOException or JsonException)
     {
@@ -315,6 +341,12 @@ app.MapPost("/api/admin/flag", (RaceAdminFlagCommand command, HttpContext contex
 
 app.MapPost("/api/admin/penalty", (RaceAdminPenaltyCommand command, HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
     AdminResult(context, sessions, () => coordinator.ApplyPenalty(command)));
+
+app.MapPost("/api/admin/penalty/update", (RaceAdminPenaltyUpdateCommand command, HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
+    AdminResult(context, sessions, () => coordinator.UpdatePenalty(command)));
+
+app.MapPost("/api/admin/investigation", (RaceAdminInvestigationCommand command, HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
+    AdminResult(context, sessions, () => coordinator.ResolveInvestigation(command)));
 
 app.MapPost("/api/admin/participant", (RaceAdminParticipantCommand command, HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
     AdminResult(context, sessions, () => coordinator.ApplyParticipantCommand(command)));

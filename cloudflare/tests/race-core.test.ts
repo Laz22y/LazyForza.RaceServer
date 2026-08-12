@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { RaceCore } from "../src/race-core";
-import type { LapCompleted, LoginRequest, TelemetryUpdate } from "../src/protocol";
+import { defaultQualifyingEliminations, RaceCore } from "../src/race-core";
+import type { LapCompleted, LoginRequest, SessionCommand, TelemetryUpdate } from "../src/protocol";
 
 describe("RaceCore", () => {
   it("supports exactly twelve participants and rejects the thirteenth", () => {
@@ -21,6 +21,43 @@ describe("RaceCore", () => {
     const rejected = core.login(login("第二名车手"));
     expect(rejected.ok).toBe(false);
     if (!rejected.ok) expect(rejected.code).toBe("roomFull");
+  });
+
+  it("allows an observer during a race without taking a driver slot", () => {
+    const core = createCore();
+    for (let index = 1; index <= 12; index++) {
+      const team = index <= 6 ? { teamId: "team-1", teamName: "车队 1" } : { teamId: "team-2", teamName: "车队 2" };
+      expect(core.login({ ...login(`车手${index}`), ...team }).ok).toBe(true);
+    }
+    expect(core.applySession({ phase: "race", totalRaceLaps: 5 }).ok).toBe(true);
+
+    const observer = core.login({
+      ...login("转播席 A"),
+      teamName: null,
+      teamId: null,
+      isObserver: true
+    });
+    expect(observer).toMatchObject({ ok: true, isObserver: true });
+    if (!observer.ok) throw new Error(observer.message);
+    expect(core.snapshot().participants).toHaveLength(12);
+    expect(core.snapshot().observers).toEqual([
+      expect.objectContaining({ id: observer.participantId, displayName: "转播席 A" })
+    ]);
+    expect(core.setReady(observer.participantId, { isReady: true }).ok).toBe(false);
+
+    const resumed = core.login({
+      ...login("转播席 A"),
+      teamName: null,
+      teamId: null,
+      isObserver: true,
+      resumeToken: observer.resumeToken
+    });
+    expect(resumed).toMatchObject({ ok: true, resumed: true, isObserver: true });
+    expect(core.snapshot().observers).toHaveLength(1);
+
+    expect(core.disconnect(observer.participantId)).toBe(true);
+    expect(core.snapshot().observers).toEqual([]);
+    expect(core.events().some(event => event.type === "observerDisconnected")).toBe(true);
   });
 
   it("does not let telemetry advance authoritative race laps", () => {
@@ -119,6 +156,138 @@ describe("RaceCore", () => {
     const resumed = core.login({ ...login("甲"), resumeToken: firstLogin.resumeToken });
     expect(resumed.ok).toBe(true);
     if (resumed.ok) expect(resumed.participantId).toBe(firstLogin.participantId);
+  });
+
+  it("runs Q1 Q2 Q3 with default eliminations and publishes the complete grid", () => {
+    const core = createCore(6);
+    const drivers = Array.from({ length: 6 }, (_, index) => connect(core, `车手${index + 1}`));
+    const started = new Date("2026-08-12T10:00:00Z");
+    const qualifyingCommand: SessionCommand = {
+      phase: "qualifying",
+      qualifyingSessionCount: 3,
+      qualifyingSessionMinutes: [1, 2, 3],
+      qualifyingEliminationCounts: [null, null]
+    };
+    expect(core.applySession(qualifyingCommand, started).ok).toBe(true);
+    let state = core.snapshot(started);
+    expect(state.qualifyingEliminationCounts).toEqual([2, 1]);
+    drivers.forEach((driver, index) => core.completeLap(
+      driver, lap(`q1-${index}`, 66 - index, true, 1), new Date(started.getTime() + 20_000 + index)));
+    core.tick(new Date(Date.parse(state.qualifyingEndsAt!) + 1));
+
+    state = core.snapshot();
+    expect(state.qualifyingSessionNumber).toBe(1);
+    expect(state.qualifyingTimeExpired).toBe(true);
+    expect(state.qualifyingEndsAt).toBeNull();
+    expect(state.participants.filter(item => item.qualifyingEligible).length).toBe(4);
+    expect(state.participants.filter(item => item.qualifyingEliminatedInSession === 1).length).toBe(2);
+    expect(core.applySession(qualifyingCommand, new Date(started.getTime() + 65_000)).ok).toBe(true);
+    state = core.snapshot();
+    expect(state.qualifyingSessionNumber).toBe(2);
+    const q2Drivers = drivers.slice(2);
+    q2Drivers.forEach((driver, index) => core.completeLap(driver, lap(`q2-${index}`, 70 - index, true, 1)));
+    core.tick(new Date(Date.parse(core.snapshot().qualifyingEndsAt!) + 1));
+
+    state = core.snapshot();
+    expect(state.qualifyingSessionNumber).toBe(2);
+    expect(state.qualifyingTimeExpired).toBe(true);
+    expect(state.qualifyingEndsAt).toBeNull();
+    expect(state.participants.filter(item => item.qualifyingEligible).length).toBe(3);
+    expect(core.applySession(qualifyingCommand, new Date(started.getTime() + 190_000)).ok).toBe(true);
+    state = core.snapshot();
+    expect(state.qualifyingSessionNumber).toBe(3);
+    drivers.slice(3).forEach((driver, index) => core.completeLap(driver, lap(`q3-${index}`, 64 - index, true, 1)));
+    core.tick(new Date(Date.parse(core.snapshot().qualifyingEndsAt!) + 1));
+
+    state = core.snapshot();
+    expect(state.phase).toBe("grid");
+    expect(state.participants.map(item => item.id)).toEqual([
+      drivers[5], drivers[4], drivers[3], drivers[2], drivers[1], drivers[0]
+    ]);
+    expect(state.participants[0].qualifyingSessionBestLapSeconds).toEqual([61, 67, 62]);
+  });
+
+  it("keeps the default elimination table aligned for every 2-12 driver field", () => {
+    const expected = [[0, 0], [1, 0], [1, 1], [1, 1], [2, 1], [2, 1],
+      [2, 2], [2, 2], [3, 2], [3, 2], [3, 3]];
+    for (let drivers = 2; drivers <= 12; drivers++)
+      expect(defaultQualifyingEliminations(drivers, 3)).toEqual(expected[drivers - 2]);
+  });
+
+  it("keeps legacy single-session qualifying unchanged", () => {
+    const core = createCore();
+    connect(core, "甲");
+    const started = new Date("2026-08-12T11:00:00Z");
+    core.applySession({ phase: "qualifying", qualifyingMinutes: 10 }, started);
+    const state = core.snapshot(started);
+    expect(state.qualifyingSessionCount).toBe(1);
+    expect(state.qualifyingSessionNumber).toBe(1);
+    expect(state.qualifyingEliminationCounts).toEqual([]);
+    expect(Date.parse(state.qualifyingEndsAt!) - started.getTime()).toBe(10 * 60_000);
+  });
+
+  it("defaults every configured practice session to sixty minutes", () => {
+    const core = createCore();
+    connect(core, "甲");
+    const started = new Date("2026-08-12T12:00:00Z");
+    expect(core.applySession({ phase: "practice" }, started).ok).toBe(true);
+    const state = core.snapshot(started);
+    expect(state.practiceSessionNumber).toBe(1);
+    expect(state.practiceSessionCount).toBe(1);
+    expect(state.practiceSessionMinutes).toEqual([60]);
+    expect(Date.parse(state.practiceEndsAt!) - started.getTime()).toBe(60 * 60_000);
+    expect(core.applySession({ phase: "practice", practiceSessionCount: 3 }, started).ok).toBe(true);
+    expect(core.snapshot(started).practiceSessionMinutes).toEqual([60, 60, 60]);
+  });
+
+  it("runs FP1 FP2 FP3 with custom durations and no eliminations", () => {
+    const core = createCore();
+    const first = connect(core, "甲");
+    const second = connect(core, "乙");
+    const started = new Date("2026-08-12T13:00:00Z");
+    const practiceCommand: SessionCommand = {
+      phase: "practice",
+      practiceSessionCount: 3,
+      practiceSessionMinutes: [1, 2, 3]
+    };
+    expect(core.applySession(practiceCommand, started).ok).toBe(true);
+
+    let state = core.snapshot(started);
+    core.completeLap(first, lap("fp1-a", 70, true, 1));
+    core.completeLap(second, lap("fp1-b", 71, true, 1));
+    core.tick(new Date(Date.parse(state.practiceEndsAt!) + 1));
+
+    state = core.snapshot();
+    expect(state.practiceSessionNumber).toBe(1);
+    expect(state.practiceTimeExpired).toBe(true);
+    expect(state.practiceEndsAt).toBeNull();
+    expect(state.participants.find(item => item.id === first)?.practiceSessionBestLapSeconds?.[0]).toBe(70);
+    expect(core.applySession(practiceCommand, new Date(started.getTime() + 65_000)).ok).toBe(true);
+    state = core.snapshot();
+    expect(state.practiceSessionNumber).toBe(2);
+    expect(state.participants).toHaveLength(2);
+    expect(state.participants.every(item => item.bestLapSeconds == null)).toBe(true);
+    core.completeLap(first, lap("fp2-a", 69, true, 1));
+    core.completeLap(second, lap("fp2-b", 68, true, 1));
+    core.tick(new Date(Date.parse(core.snapshot().practiceEndsAt!) + 1));
+
+    state = core.snapshot();
+    expect(state.practiceSessionNumber).toBe(2);
+    expect(state.practiceTimeExpired).toBe(true);
+    expect(state.practiceEndsAt).toBeNull();
+    expect(core.applySession(practiceCommand, new Date(started.getTime() + 190_000)).ok).toBe(true);
+    state = core.snapshot();
+    expect(state.practiceSessionNumber).toBe(3);
+    core.completeLap(first, lap("fp3-a", 67, true, 1));
+    core.tick(new Date(Date.parse(state.practiceEndsAt!) + 1));
+
+    state = core.snapshot();
+    expect(state.phase).toBe("practice");
+    expect(state.practiceTimeExpired).toBe(true);
+    expect(state.practiceEndsAt).toBeNull();
+    expect(state.participants.every(item => item.status === "ready")).toBe(true);
+    expect(state.participants.find(item => item.id === first)?.practiceSessionBestLapSeconds)
+      .toEqual([70, 69, 67]);
   });
 
   it("allows a solo race and handles red/green flags", () => {
@@ -322,6 +491,32 @@ describe("RaceCore", () => {
     expect(core.snapshot().participants[0].bestLapSeconds).toBe(71.25);
   });
 
+  it("keeps practice open for a final lap before the controller starts FP2", () => {
+    const core = createCore();
+    const participantId = connect(core, "甲");
+    const now = new Date("2026-08-12T14:00:00Z");
+    core.applySession({
+      phase: "practice",
+      practiceSessionCount: 2,
+      practiceSessionMinutes: [1, 1]
+    }, now);
+    core.updateTelemetry(participantId, { ...telemetry(), currentLapSeconds: 31 },
+      new Date(now.getTime() + 59_000));
+    core.tick(new Date(now.getTime() + 60_001));
+    expect(core.snapshot().practiceTimeExpired).toBe(true);
+    expect(core.snapshot().participants[0].practiceFinalLapPending).toBe(true);
+
+    expect(core.completeLap(participantId, lap("practice-final-lap", 71.25, true, 1)).ok).toBe(true);
+    expect(core.snapshot().practiceSessionNumber).toBe(1);
+    expect(core.snapshot().practiceTimeExpired).toBe(true);
+    expect(core.snapshot().practiceEndsAt).toBeNull();
+    expect(core.snapshot().participants[0].practiceSessionBestLapSeconds?.[0]).toBe(71.25);
+    expect(core.applySession({ phase: "practice", practiceSessionCount: 2,
+      practiceSessionMinutes: [1, 1] }, new Date(now.getTime() + 120_000)).ok).toBe(true);
+    expect(core.snapshot().practiceSessionNumber).toBe(2);
+    expect(core.snapshot().practiceTimeExpired).toBe(false);
+  });
+
   it("publishes race total time and ranks finished drivers by adjusted time", () => {
     const core = createCore();
     const first = connect(core, "甲"), second = connect(core, "乙");
@@ -342,6 +537,28 @@ describe("RaceCore", () => {
     expect(result.participants[0].gapToLeaderSeconds).toBe(0);
     expect(result.participants[1].gapToLeaderSeconds).toBe(4);
     expect(result.raceElapsedSeconds).toBe(121);
+  });
+
+  it("updates race deltas at common track progress without waiting for a lap event", () => {
+    const core = createCore();
+    const leader = connect(core, "甲"), trailing = connect(core, "乙");
+    const started = new Date("2026-08-09T10:30:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 5 }, started);
+
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .10 },
+      new Date(started.getTime() + 10_000));
+    core.updateTelemetry(trailing, { ...telemetry(), trackProgress: .10 },
+      new Date(started.getTime() + 11_000));
+    expect(core.snapshot(new Date(started.getTime() + 11_000)).participants[1].gapToLeaderSeconds).toBe(1);
+
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .30 },
+      new Date(started.getTime() + 20_000));
+    core.updateTelemetry(trailing, { ...telemetry(), trackProgress: .30 },
+      new Date(started.getTime() + 23_000));
+    const refreshed = core.snapshot(new Date(started.getTime() + 23_000)).participants[1];
+    expect(refreshed.gapToLeaderSeconds).toBe(3);
+    expect(refreshed.intervalSeconds).toBe(3);
+    expect(refreshed.completedLaps).toBe(0);
   });
 
   it("freezes race elapsed time during a red flag", () => {
@@ -556,8 +773,86 @@ describe("RaceCore", () => {
     expect(qualifying.snapshot().fastestSectorSeconds).toEqual([18, 20, 20]);
   });
 
+  it("settles pending time after the flag and never serves or adds automatic pit penalties post-race", () => {
+    const core = createCore();
+    const participantId = connect(core, "甲");
+    const started = new Date("2026-08-12T10:00:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 1 }, started);
+    expect(core.applyPenalty({ participantId, kind: "time", valueSeconds: 5, reason: "赛中罚时" }, started).ok).toBe(true);
+    core.completeLap(participantId, lap("finish-with-time", 60, true, 1), new Date(started.getTime() + 60_000));
+    let snapshot = core.snapshot(new Date(started.getTime() + 60_000));
+    expect(snapshot.participants[0]).toMatchObject({
+      status: "finished", pendingTimePenaltySeconds: 0, timePenaltySeconds: 5,
+      adjustedRaceTotalSeconds: 65
+    });
+    expect(snapshot.participants[0].penalties[0].isPostRaceAdjustment).toBe(true);
+
+    const postRacePit = {
+      ...telemetry(), isInPitLane: true, isInServiceZone: true,
+      isPausedOrRewinding: true, speedKph: 120, pitSpeedLimitKph: 80
+    };
+    core.updateTelemetry(participantId, postRacePit, new Date(started.getTime() + 70_000));
+    core.updateTelemetry(participantId, { ...postRacePit, isPausedOrRewinding: false },
+      new Date(started.getTime() + 71_000));
+    snapshot = core.snapshot(new Date(started.getTime() + 71_000));
+    expect(snapshot.penalties).toHaveLength(1);
+    expect(snapshot.participants[0].hasPendingDriveThrough).toBe(false);
+    expect(snapshot.participants[0].isServingTimePenalty).toBe(false);
+    expect(snapshot.penalties?.some(item => item.reason.includes("维修区超速"))).toBe(false);
+
+    expect(core.applyPenalty({ participantId, kind: "driveThrough", reason: "赛后人工判罚" }).ok).toBe(true);
+    snapshot = core.snapshot();
+    expect(snapshot.participants[0].timePenaltySeconds).toBe(25);
+    expect(snapshot.participants[0].hasPendingDriveThrough).toBe(false);
+    expect(snapshot.penalties?.at(-1)?.isPostRaceAdjustment).toBe(true);
+  });
+
+  it("opens an investigation in review-only mode and lets race control resolve, edit and cancel it", () => {
+    const core = createCore();
+    const participantId = connect(core, "甲");
+    const started = new Date("2026-08-12T11:00:00Z");
+    core.applySession({ phase: "qualifying", qualifyingMinutes: 10 }, started);
+    const outside = {
+      ...telemetry(), clientMonotonicMilliseconds: 20_000, trackProgress: .60,
+      lateralOffsetMeters: 20, speedKph: 36, trackLengthMeters: 1_000
+    };
+    core.updateTelemetry(participantId, outside, new Date(started.getTime() + 1_000));
+    core.updateTelemetry(participantId,
+      { ...outside, clientMonotonicMilliseconds: 20_300, trackProgress: .62 },
+      new Date(started.getTime() + 1_300));
+    core.updateTelemetry(participantId,
+      { ...outside, clientMonotonicMilliseconds: 20_500, trackProgress: .625, lateralOffsetMeters: 0 },
+      new Date(started.getTime() + 1_500));
+    core.updateTelemetry(participantId,
+      { ...outside, clientMonotonicMilliseconds: 20_950, trackProgress: .63, lateralOffsetMeters: 0 },
+      new Date(started.getTime() + 1_950));
+    let snapshot = core.snapshot();
+    expect(snapshot.participants[0].penalties).toHaveLength(0);
+    expect(snapshot.investigations).toHaveLength(1);
+    expect(snapshot.investigations?.[0]).toMatchObject({ status: "pending", lapNumber: 1 });
+    expect(snapshot.banner).toMatchObject({ kind: "information", isInvestigation: true });
+
+    const investigation = snapshot.investigations![0];
+    expect(core.resolveInvestigation({
+      investigationId: investigation.id, applyPenalty: true, kind: "time", valueSeconds: 4,
+      reason: "总控确认获利"
+    }).ok).toBe(true);
+    snapshot = core.snapshot();
+    expect(snapshot.investigations?.[0].status).toBe("penalized");
+    const penalty = snapshot.penalties![0];
+    expect(penalty).toMatchObject({ valueSeconds: 4, investigationId: investigation.id });
+
+    expect(core.updatePenalty({ penaltyId: penalty.id, valueSeconds: 2, reason: "复核后改为 2 秒", isRevoked: false }).ok).toBe(true);
+    expect(core.snapshot().penalties?.[0].valueSeconds).toBe(2);
+    expect(core.updatePenalty({ penaltyId: penalty.id, isRevoked: true }).ok).toBe(true);
+    snapshot = core.snapshot();
+    expect(snapshot.penalties?.[0].isRevoked).toBe(true);
+    expect(snapshot.participants[0].penalties).toHaveLength(0);
+  });
+
   it("detects a large shortcut and penalizes pit speeding once per visit", () => {
     const core = createCore();
+    expect(core.applyRoomSettings({ ...core.roomSettings(), trackLimitMode: "automatic" }).ok).toBe(true);
     const participantId = connect(core, "甲");
     const started = new Date("2026-08-09T12:30:00Z");
     core.applySession({ phase: "race" }, started);
@@ -639,10 +934,44 @@ describe("RaceCore", () => {
     core.completeLap(leader, lap("lap-2", 61, true, 2));
     expect(core.snapshot()).toMatchObject({ flag: "chequered", chequeredImminent: false });
   });
+
+  it("enforces the configured minimum number of effective pit services at the finish", () => {
+    const core = createCore();
+    expect(core.applyRoomSettings({
+      ...core.roomSettings(),
+      totalRaceLaps: 1,
+      minimumRequiredPitStops: 1
+    }).ok).toBe(true);
+    const withoutStop = connect(core, "未进站");
+    const withStop = connect(core, "已进站");
+    core.applySession({ phase: "race", totalRaceLaps: 1 });
+    core.updateTelemetry(withStop, {
+      ...telemetry(),
+      isInPitLane: true,
+      isInServiceZone: true,
+      pitServiceRequirementMet: true,
+      completedPitServices: 1
+    });
+
+    core.completeLap(withoutStop, lap("minimum-stop-missed", 60, true, 1));
+    core.completeLap(withStop, lap("minimum-stop-complete", 61, true, 1));
+
+    const snapshot = core.snapshot();
+    expect(snapshot.minimumRequiredPitStops).toBe(1);
+    expect(snapshot.participants.find(item => item.id === withoutStop)?.status).toBe("disqualified");
+    expect(snapshot.participants.find(item => item.id === withStop)?.status).toBe("finished");
+    expect(snapshot.penalties?.some(item => item.participantId === withoutStop &&
+      item.kind === "disqualification" && item.isAutomatic)).toBe(true);
+  });
 });
 
 function createCore(maximumParticipants = 12): RaceCore {
-  return new RaceCore({ sessionName: "测试赛事", maximumParticipants, totalRaceLaps: 5 });
+  return new RaceCore({
+    sessionName: "测试赛事",
+    maximumParticipants,
+    totalRaceLaps: 5,
+    minimumRequiredPitStops: 0
+  });
 }
 
 function connect(core: RaceCore, name: string): string {

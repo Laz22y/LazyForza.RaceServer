@@ -10,6 +10,7 @@ public sealed class RaceBroadcastService : BackgroundService
     private readonly RaceCoordinator coordinator;
     private readonly RaceWebSocketRegistry registry;
     private readonly HostedOrganizerLogoStore organizerLogo;
+    private readonly ILogger<RaceBroadcastService> logger;
     private readonly Channel<RaceSessionSnapshot> snapshots = Channel.CreateBounded<RaceSessionSnapshot>(
         new BoundedChannelOptions(1)
         {
@@ -22,11 +23,13 @@ public sealed class RaceBroadcastService : BackgroundService
     public RaceBroadcastService(
         RaceCoordinator coordinator,
         RaceWebSocketRegistry registry,
-        HostedOrganizerLogoStore organizerLogo)
+        HostedOrganizerLogoStore organizerLogo,
+        ILogger<RaceBroadcastService> logger)
     {
         this.coordinator = coordinator;
         this.registry = registry;
         this.organizerLogo = organizerLogo;
+        this.logger = logger;
         coordinator.SnapshotChanged += Queue;
     }
 
@@ -39,20 +42,31 @@ public sealed class RaceBroadcastService : BackgroundService
         {
             while (await snapshots.Reader.WaitToReadAsync(stoppingToken))
             {
-                if (!snapshots.Reader.TryRead(out var snapshot)) continue;
-                while (snapshots.Reader.TryRead(out var newer)) snapshot = newer;
+                try
+                {
+                    if (!snapshots.Reader.TryRead(out var snapshot)) continue;
+                    while (snapshots.Reader.TryRead(out var newer)) snapshot = newer;
 
-                var remaining = MinimumBroadcastInterval - (DateTimeOffset.UtcNow - lastBroadcastAt);
-                if (remaining > TimeSpan.Zero)
-                    await Task.Delay(remaining, stoppingToken);
-                while (snapshots.Reader.TryRead(out var newer)) snapshot = newer;
+                    var remaining = MinimumBroadcastInterval - (DateTimeOffset.UtcNow - lastBroadcastAt);
+                    if (remaining > TimeSpan.Zero)
+                        await Task.Delay(remaining, stoppingToken);
+                    while (snapshots.Reader.TryRead(out var newer)) snapshot = newer;
 
-                var message = RaceProtocolJson.Serialize(
-                    RaceMessageTypes.Snapshot,
-                    Interlocked.Increment(ref sequence),
-                    WithOrganizerLogo(snapshot));
-                await registry.BroadcastAsync(message, stoppingToken);
-                lastBroadcastAt = DateTimeOffset.UtcNow;
+                    var message = RaceProtocolJson.Serialize(
+                        RaceMessageTypes.Snapshot,
+                        Interlocked.Increment(ref sequence),
+                        WithOrganizerLogo(snapshot));
+                    await registry.BroadcastAsync(message, stoppingToken);
+                    lastBroadcastAt = DateTimeOffset.UtcNow;
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    logger.LogError(exception, "Race snapshot broadcast failed; the broadcast loop will continue.");
+                }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
