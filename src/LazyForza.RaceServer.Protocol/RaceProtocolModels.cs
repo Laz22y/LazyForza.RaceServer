@@ -200,7 +200,21 @@ public sealed record RaceTelemetryUpdate(
     double PitSpeedLimitKph = 0,
     double PitLaneElapsedSeconds = 0,
     bool IsApproachingPit = false,
-    bool IsOnPitRoute = false);
+    bool IsOnPitRoute = false,
+    bool HasWorldPosition = false,
+    double WorldX = 0,
+    double WorldY = 0,
+    double WorldZ = 0,
+    double VelocityX = 0,
+    double VelocityY = 0,
+    double VelocityZ = 0,
+    long ImpactSequence = 0,
+    double ImpactMagnitudeMps = 0,
+    double ImpactSpeedLossMps = 0,
+    double ImpactWorldX = 0,
+    double ImpactWorldY = 0,
+    double ImpactWorldZ = 0,
+    int ImpactAgeMilliseconds = 0);
 
 public sealed record RaceLapCompleted(
     Guid EventId,
@@ -234,7 +248,33 @@ public sealed record RaceInvestigationSnapshot(
     int LapNumber,
     RaceInvestigationStatus Status,
     Guid? PenaltyId = null,
-    DateTimeOffset? ResolvedAt = null);
+    DateTimeOffset? ResolvedAt = null,
+    IReadOnlyList<Guid>? RelatedParticipantIds = null,
+    RaceCollisionEvidenceSnapshot? CollisionEvidence = null);
+
+public sealed record RaceCollisionEvidenceSnapshot(
+    DateTimeOffset IncidentAt,
+    Guid ReporterParticipantId,
+    Guid OtherParticipantId,
+    string ReporterName,
+    string OtherName,
+    string ReporterThemeColor,
+    string OtherThemeColor,
+    double ReporterWorldX,
+    double ReporterWorldY,
+    double ReporterWorldZ,
+    double OtherWorldX,
+    double OtherWorldY,
+    double OtherWorldZ,
+    double ReporterVelocityX,
+    double ReporterVelocityZ,
+    double OtherVelocityX,
+    double OtherVelocityZ,
+    double HorizontalDistanceMeters,
+    double VerticalDistanceMeters,
+    double RelativeSpeedKph,
+    double ImpactMagnitudeMps,
+    double ImpactSpeedLossMps);
 
 public sealed record RaceParticipantSnapshot(
     Guid Id,
@@ -410,7 +450,8 @@ public sealed record RaceAdminRoomSettingsCommand(
     int DriversPerTeam = 6,
     IReadOnlyList<RaceTeamDefinition>? Teams = null,
     TrackLimitEnforcementMode TrackLimitMode = TrackLimitEnforcementMode.WarningsOnly,
-    int MinimumRequiredPitStops = 1);
+    int MinimumRequiredPitStops = 1,
+    bool AutomaticCollisionInvestigationsEnabled = false);
 
 public sealed record RaceRoomSettingsSnapshot(
     string SessionName,
@@ -430,7 +471,8 @@ public sealed record RaceRoomSettingsSnapshot(
     int DriversPerTeam = 6,
     IReadOnlyList<RaceTeamDefinition>? Teams = null,
     TrackLimitEnforcementMode TrackLimitMode = TrackLimitEnforcementMode.WarningsOnly,
-    int MinimumRequiredPitStops = 1);
+    int MinimumRequiredPitStops = 1,
+    bool AutomaticCollisionInvestigationsEnabled = false);
 
 public sealed record RaceAdminPenaltyCommand(
     Guid ParticipantId,
@@ -450,12 +492,17 @@ public sealed record RaceAdminInvestigationCommand(
     bool ApplyPenalty,
     RacePenaltyKind? Kind,
     double? ValueSeconds,
-    string? Reason);
+    string? Reason,
+    Guid? ParticipantId = null);
 
 public sealed record RaceAdminParticipantCommand(
     Guid ParticipantId,
     RaceParticipantStatus Status,
     string? Reason);
+
+public sealed record RaceAdminDisconnectCommand(Guid ClientId);
+
+public sealed record RaceAdminCollisionInvestigationSettingsCommand(bool Enabled);
 
 public static partial class RaceProtocolValidation
 {
@@ -505,7 +552,20 @@ public static partial class RaceProtocolValidation
         PitSpeedLimitKph = value.PitSpeedLimitKph > 0
             ? FiniteClamp(value.PitSpeedLimitKph, 10, 300)
             : 0,
-        PitLaneElapsedSeconds = FiniteClamp(value.PitLaneElapsedSeconds, 0, 86_400)
+        PitLaneElapsedSeconds = FiniteClamp(value.PitLaneElapsedSeconds, 0, 86_400),
+        WorldX = FiniteClamp(value.WorldX, -10_000_000, 10_000_000),
+        WorldY = FiniteClamp(value.WorldY, -10_000_000, 10_000_000),
+        WorldZ = FiniteClamp(value.WorldZ, -10_000_000, 10_000_000),
+        VelocityX = FiniteClamp(value.VelocityX, -500, 500),
+        VelocityY = FiniteClamp(value.VelocityY, -500, 500),
+        VelocityZ = FiniteClamp(value.VelocityZ, -500, 500),
+        ImpactSequence = Math.Max(0, value.ImpactSequence),
+        ImpactMagnitudeMps = FiniteClamp(value.ImpactMagnitudeMps, 0, 200),
+        ImpactSpeedLossMps = FiniteClamp(value.ImpactSpeedLossMps, 0, 200),
+        ImpactWorldX = FiniteClamp(value.ImpactWorldX, -10_000_000, 10_000_000),
+        ImpactWorldY = FiniteClamp(value.ImpactWorldY, -10_000_000, 10_000_000),
+        ImpactWorldZ = FiniteClamp(value.ImpactWorldZ, -10_000_000, 10_000_000),
+        ImpactAgeMilliseconds = Math.Clamp(value.ImpactAgeMilliseconds, 0, 2_000)
     };
 
     private static string NormalizeSingleLine(string? value, int maximumLength)

@@ -16,8 +16,9 @@ LazyForza 地产赛事的自托管服务端。单个赛事房间支持 1–12 �
 
 ## 版本与客户端兼容性
 
-当前正式服务端版本为 `v0.2.0`，适用于：
+当前正式服务端版本为 `v0.3.0`，适用于：
 
+- LazyForza `1.4.6`：完整支持赛中碰撞调查与可视化证据、赛后裁决、断线车手的比赛收尾、实时排行榜与本轮 HUD/进站策略交互；
 - LazyForza `1.4.5`：完整支持 1–3 节练习赛与排位赛、OB 席位、练习项目、进站策略约束、统一调查与判罚、实时 HUD、维修区路线、主办方 Logo、赛道文件按需下发和赛后成绩导出；
 - LazyForza `1.4.4`：协议和 `v0.1.1` 已有赛事流程兼容，但客户端没有练习项目、进站策略预测、OB 登录和本版新增的多节练习/排位交互；
 - LazyForza `1.4.3`：协议和主要比赛流程兼容，但客户端没有主办方 Logo、赛道文件按需下载、练习项目、进站策略预测、OB 登录和后续维修区路线修正；
@@ -61,7 +62,7 @@ chmod +x ./LazyForza.RaceServer.Web
 正式发布使用独立的服务端版本号，并在说明中列出全部已确认兼容的 LazyForza 客户端版本：
 
 ```powershell
-./scripts/Publish-Release.ps1 -Version 0.2.0 -ReleaseNotesPath ./release-notes.md
+./scripts/Publish-Release.ps1 -Version 0.3.0 -ReleaseNotesPath ./release-notes.md
 ```
 
 正式脚本会复跑原生与 Cloudflare 验证，生成五个平台的自包含包与 Cloudflare 源码包，推送注释标签并创建 GitHub Release。

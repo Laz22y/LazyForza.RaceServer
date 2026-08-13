@@ -61,6 +61,20 @@ export interface TelemetryUpdate {
   pitLaneElapsedSeconds?: number;
   isApproachingPit?: boolean;
   isOnPitRoute?: boolean;
+  hasWorldPosition?: boolean;
+  worldX?: number;
+  worldY?: number;
+  worldZ?: number;
+  velocityX?: number;
+  velocityY?: number;
+  velocityZ?: number;
+  impactSequence?: number;
+  impactMagnitudeMps?: number;
+  impactSpeedLossMps?: number;
+  impactWorldX?: number;
+  impactWorldY?: number;
+  impactWorldZ?: number;
+  impactAgeMilliseconds?: number;
 }
 
 export interface LapCompleted {
@@ -98,6 +112,33 @@ export interface InvestigationSnapshot {
   status: InvestigationStatus;
   penaltyId?: string | null;
   resolvedAt?: string | null;
+  relatedParticipantIds?: string[] | null;
+  collisionEvidence?: CollisionEvidenceSnapshot | null;
+}
+
+export interface CollisionEvidenceSnapshot {
+  incidentAt: string;
+  reporterParticipantId: string;
+  otherParticipantId: string;
+  reporterName: string;
+  otherName: string;
+  reporterThemeColor: string;
+  otherThemeColor: string;
+  reporterWorldX: number;
+  reporterWorldY: number;
+  reporterWorldZ: number;
+  otherWorldX: number;
+  otherWorldY: number;
+  otherWorldZ: number;
+  reporterVelocityX: number;
+  reporterVelocityZ: number;
+  otherVelocityX: number;
+  otherVelocityZ: number;
+  horizontalDistanceMeters: number;
+  verticalDistanceMeters: number;
+  relativeSpeedKph: number;
+  impactMagnitudeMps: number;
+  impactSpeedLossMps: number;
 }
 
 export interface ParticipantSnapshot {
@@ -220,6 +261,7 @@ export interface SessionSnapshot {
   practiceSessionMinutes?: number[];
   observers?: ObserverSnapshot[];
   minimumRequiredPitStops?: number;
+  automaticCollisionInvestigationsEnabled?: boolean;
 }
 
 export interface YellowZoneSnapshot {
@@ -250,6 +292,7 @@ export interface RoomSettings {
   totalRaceLaps: number;
   sectorCount: number;
   automaticYellowEnabled: boolean;
+  automaticCollisionInvestigationsEnabled?: boolean;
   slowSpeedKph: number;
   slowDurationSeconds: number;
   severeLateralOffsetMeters: number;
@@ -286,8 +329,10 @@ export interface InvestigationCommand {
   kind?: PenaltyKind | null;
   valueSeconds?: number | null;
   reason?: string | null;
+  participantId?: string | null;
 }
 export interface ParticipantCommand { participantId: string; status: ParticipantStatus; reason: string; }
+export interface DisconnectCommand { clientId: string; }
 
 export function clamp(value: unknown, minimum: number, maximum: number): number {
   const numeric = typeof value === "number" && Number.isFinite(value) ? value : minimum;

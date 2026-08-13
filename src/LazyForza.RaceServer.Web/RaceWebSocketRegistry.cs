@@ -33,15 +33,33 @@ public sealed class RaceWebSocketRegistry
         return RemoveIfCurrent(participantId, existing);
     }
 
-    public async Task SendAsync(Guid participantId, string message, CancellationToken cancellationToken)
+    public Task<bool> SendAsync(
+        Guid participantId,
+        WebSocket expectedSocket,
+        string message,
+        CancellationToken cancellationToken) =>
+        SendAsync(participantId, expectedSocket, Encoding.UTF8.GetBytes(message), cancellationToken);
+
+    public async Task<bool> SendAsync(
+        Guid participantId,
+        WebSocket expectedSocket,
+        ReadOnlyMemory<byte> message,
+        CancellationToken cancellationToken)
     {
-        if (!connections.TryGetValue(participantId, out var connection)) return;
-        if (!await connection.SendAsync(message, cancellationToken))
-            RemoveIfCurrent(participantId, connection);
+        if (!connections.TryGetValue(participantId, out var connection) ||
+            !ReferenceEquals(connection.Socket, expectedSocket))
+            return false;
+        return await connection.SendAsync(message, cancellationToken);
     }
 
-    public async Task BroadcastAsync(string message, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<Guid>> BroadcastAsync(string message, CancellationToken cancellationToken) =>
+        BroadcastAsync(Encoding.UTF8.GetBytes(message), cancellationToken);
+
+    public async Task<IReadOnlyList<Guid>> BroadcastAsync(
+        ReadOnlyMemory<byte> message,
+        CancellationToken cancellationToken)
     {
+        var disconnected = new ConcurrentQueue<Guid>();
         var sends = connections.Select(async pair =>
         {
             try
@@ -56,9 +74,23 @@ public sealed class RaceWebSocketRegistry
             {
                 // A single broken client must never terminate the room-wide broadcast loop.
             }
-            RemoveIfCurrent(pair.Key, pair.Value);
+            if (RemoveIfCurrent(pair.Key, pair.Value)) disconnected.Enqueue(pair.Key);
         });
         await Task.WhenAll(sends);
+        return disconnected.ToArray();
+    }
+
+    public async Task<bool> DisconnectAsync(
+        Guid clientId,
+        string description,
+        CancellationToken cancellationToken)
+    {
+        if (!connections.TryRemove(clientId, out var connection)) return false;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(2));
+        try { await connection.CloseAsync(description, timeout.Token); }
+        catch (OperationCanceledException) { connection.Abort(); }
+        return true;
     }
 
     private bool RemoveIfCurrent(Guid participantId, Connection expected) =>
@@ -67,25 +99,32 @@ public sealed class RaceWebSocketRegistry
 
     private sealed class Connection(WebSocket socket)
     {
+        private static readonly TimeSpan SendTimeout = TimeSpan.FromMilliseconds(750);
         private readonly SemaphoreSlim sendLock = new(1, 1);
         public WebSocket Socket { get; } = socket;
 
-        public async Task<bool> SendAsync(string message, CancellationToken cancellationToken)
+        public async Task<bool> SendAsync(ReadOnlyMemory<byte> message, CancellationToken cancellationToken)
         {
             if (Socket.State != WebSocketState.Open) return false;
-            var bytes = Encoding.UTF8.GetBytes(message);
             var lockTaken = false;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(SendTimeout);
             try
             {
-                await sendLock.WaitAsync(cancellationToken);
+                await sendLock.WaitAsync(timeout.Token);
                 lockTaken = true;
                 if (Socket.State != WebSocketState.Open) return false;
-                await Socket.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken);
+                await Socket.SendAsync(message, WebSocketMessageType.Text, true, timeout.Token);
                 return true;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 throw;
+            }
+            catch (OperationCanceledException)
+            {
+                Abort();
+                return false;
             }
             catch
             {
@@ -105,6 +144,12 @@ public sealed class RaceWebSocketRegistry
                 await Socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, description, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch { }
+        }
+
+        public void Abort()
+        {
+            try { Socket.Abort(); }
             catch { }
         }
     }

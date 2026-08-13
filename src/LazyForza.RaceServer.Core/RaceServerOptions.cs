@@ -13,6 +13,7 @@ public sealed record RaceServerOptions
     public int MinimumRequiredPitStops { get; init; } = 1;
     public int SectorCount { get; init; } = 3;
     public bool AutomaticYellowEnabled { get; init; } = true;
+    public bool AutomaticCollisionInvestigationsEnabled { get; init; }
     public double SlowSpeedKph { get; init; } = 12;
     public double SlowDurationSeconds { get; init; } = 3;
     public double SevereLateralOffsetMeters { get; init; } = 25;

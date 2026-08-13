@@ -25,6 +25,45 @@ public sealed class RaceWebSocketRegistryTests
     }
 
     [TestMethod]
+    public async Task StalledClientIsTimedOutWithoutHoldingTheRoomBroadcastLoop()
+    {
+        var registry = new RaceWebSocketRegistry();
+        var stalledId = Guid.NewGuid();
+        var stalled = new TestWebSocket { BlockSend = true };
+        var healthy = new TestWebSocket();
+        await registry.RegisterAsync(stalledId, stalled, CancellationToken.None);
+        await registry.RegisterAsync(Guid.NewGuid(), healthy, CancellationToken.None);
+
+        var disconnected = await registry.BroadcastAsync("snapshot", CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.AreEqual(1, registry.Count);
+        CollectionAssert.Contains(disconnected.ToArray(), stalledId);
+        Assert.AreEqual(WebSocketState.Aborted, stalled.State);
+        CollectionAssert.AreEqual(new[] { "snapshot" }, healthy.Messages.ToArray());
+    }
+
+    [TestMethod]
+    public async Task RegisteredRepliesShareTheSameSendLockAsRoomBroadcasts()
+    {
+        var registry = new RaceWebSocketRegistry();
+        var participantId = Guid.NewGuid();
+        var socket = new TestWebSocket { BlockSend = true };
+        await registry.RegisterAsync(participantId, socket, CancellationToken.None);
+
+        var broadcast = registry.BroadcastAsync("snapshot", CancellationToken.None);
+        await socket.SendStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var direct = registry.SendAsync(participantId, socket, "pong", CancellationToken.None);
+        await Task.Delay(50);
+        Assert.IsFalse(direct.IsCompleted, "单播回复必须等待同一连接上的广播发送完成。 ");
+
+        socket.AllowSend.TrySetResult(true);
+        await broadcast.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.IsTrue(await direct.WaitAsync(TimeSpan.FromSeconds(2)));
+        CollectionAssert.AreEqual(new[] { "snapshot", "pong" }, socket.Messages.ToArray());
+    }
+
+    [TestMethod]
     public async Task UnregisterDuringAnActiveSendCannotFaultTheBroadcast()
     {
         var registry = new RaceWebSocketRegistry();

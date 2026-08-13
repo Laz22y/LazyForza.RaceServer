@@ -3,6 +3,47 @@ import { defaultQualifyingEliminations, RaceCore } from "../src/race-core";
 import type { LapCompleted, LoginRequest, SessionCommand, TelemetryUpdate } from "../src/protocol";
 
 describe("RaceCore", () => {
+  it("opens collision investigations only during a race and keeps visual evidence for post-race review", () => {
+    const core = createCore();
+    const reporter = connect(core, "甲");
+    const other = connect(core, "乙");
+    expect(core.applyRoomSettings({
+      ...core.roomSettings(), totalRaceLaps: 1, minimumRequiredPitStops: 0,
+      automaticCollisionInvestigationsEnabled: true
+    }).ok).toBe(true);
+    const started = new Date("2026-08-13T12:00:00Z");
+    const peer = { ...telemetry(), hasWorldPosition: true, worldX: 101.5, worldY: 0, worldZ: 50,
+      velocityX: 10, velocityY: 0, velocityZ: 0 };
+    const impact = { ...telemetry(), hasWorldPosition: true, worldX: 100, worldY: 0, worldZ: 50,
+      velocityX: 20, velocityY: 0, velocityZ: 0, impactSequence: 1, impactMagnitudeMps: 4.4,
+      impactSpeedLossMps: 2.2, impactWorldX: 100, impactWorldY: 0, impactWorldZ: 50,
+      impactAgeMilliseconds: 80 };
+    core.updateTelemetry(other, peer, started);
+    core.updateTelemetry(reporter, impact, new Date(started.getTime() + 80));
+    expect(core.snapshot().investigations).toHaveLength(0);
+
+    core.applySession({ phase: "race", totalRaceLaps: 1 }, new Date(started.getTime() + 1_000));
+    core.updateTelemetry(other, { ...peer, impactSequence: 1, impactMagnitudeMps: 3.6,
+      impactSpeedLossMps: 1.7, impactWorldX: 101.5, impactWorldY: 0, impactWorldZ: 50,
+      impactAgeMilliseconds: 40 }, new Date(started.getTime() + 2_000));
+    core.updateTelemetry(reporter, { ...impact, impactSequence: 2 }, new Date(started.getTime() + 2_080));
+    const investigation = core.snapshot().investigations?.[0];
+    expect(investigation?.relatedParticipantIds).toEqual([reporter, other]);
+    expect(investigation?.collisionEvidence).toMatchObject({ horizontalDistanceMeters: 1.5 });
+    expect(core.setAutomaticCollisionInvestigations(false).ok).toBe(true);
+    expect(core.roomSettings().automaticCollisionInvestigationsEnabled).toBe(false);
+    expect(core.snapshot().investigations).toHaveLength(1);
+
+    core.completeLap(reporter, lap("collision-finish", 60, true, 1), new Date(started.getTime() + 60_000));
+    core.disconnect(other, new Date(started.getTime() + 61_000));
+    expect(core.snapshot().phase).toBe("finished");
+    expect(core.resolveInvestigation({ investigationId: investigation!.id, applyPenalty: true,
+      participantId: other, kind: "time", valueSeconds: 4, reason: "赛后复核确认责任" }).ok).toBe(true);
+    expect(core.snapshot().penalties).toContainEqual(expect.objectContaining({
+      participantId: other, valueSeconds: 4, isPostRaceAdjustment: true
+    }));
+  });
+
   it("supports exactly twelve participants and rejects the thirteenth", () => {
     const core = createCore();
     for (let index = 1; index <= 12; index++) {
@@ -58,6 +99,20 @@ describe("RaceCore", () => {
     expect(core.disconnect(observer.participantId)).toBe(true);
     expect(core.snapshot().observers).toEqual([]);
     expect(core.events().some(event => event.type === "observerDisconnected")).toBe(true);
+  });
+
+  it("returns only event rows newer than the control panel cursor", () => {
+    const core = createCore();
+    connect(core, "甲");
+    const firstSequence = Math.max(...core.events().map(event => event.sequence));
+
+    connect(core, "乙");
+    const incremental = core.events(250, firstSequence);
+
+    expect(incremental.length).toBeGreaterThan(0);
+    expect(incremental.every(event => event.sequence > firstSequence)).toBe(true);
+    expect(Math.max(...incremental.map(event => event.sequence)))
+      .toBe(Math.max(...core.events().map(event => event.sequence)));
   });
 
   it("does not let telemetry advance authoritative race laps", () => {
@@ -313,6 +368,41 @@ describe("RaceCore", () => {
     expect(core.snapshot().participants.find(item => item.id === second)?.status).not.toBe("finished");
     core.completeLap(second, lap("s2", 65, true, 2));
     expect(core.snapshot().phase).toBe("finished");
+  });
+
+  it("finishes the race when a trailing driver disconnects after the chequered flag", () => {
+    const core = createCore();
+    const leaderLogin = core.login(login("甲"));
+    const trailingLogin = core.login(login("乙"));
+    if (!leaderLogin.ok || !trailingLogin.ok) throw new Error("login failed");
+    core.applySession({ phase: "race", totalRaceLaps: 2 });
+    core.completeLap(leaderLogin.participantId, lap("l1", 64, true, 1));
+    core.completeLap(trailingLogin.participantId, lap("s1", 65, true, 1));
+    core.completeLap(leaderLogin.participantId, lap("l2", 64, true, 2));
+    expect(core.snapshot().flag).toBe("chequered");
+
+    expect(core.disconnect(trailingLogin.participantId)).toBe(true);
+    expect(core.snapshot().phase).toBe("finished");
+    const resumed = core.login({ ...login("乙"), resumeToken: trailingLogin.resumeToken });
+    expect(resumed.ok).toBe(true);
+    expect(core.snapshot().participants.find(item => item.id === trailingLogin.participantId)?.status)
+      .toBe("didNotFinish");
+    expect(core.snapshot().phase).toBe("finished");
+  });
+
+  it("releases a race-control disconnected display name and participant slot", () => {
+    const core = createCore(1);
+    const original = core.login(login("同名车手"));
+    if (!original.ok) throw new Error(original.message);
+    expect(core.disconnectAndReleaseClient(original.participantId).ok).toBe(true);
+    expect(core.snapshot().participants).toHaveLength(0);
+    const kickedRetry = core.login({ ...login("同名车手"), resumeToken: original.resumeToken });
+    expect(kickedRetry).toMatchObject({ ok: false, code: "disconnectedByControl" });
+    const replacement = core.login(login("同名车手"));
+    expect(replacement.ok).toBe(true);
+    if (replacement.ok) expect(replacement.participantId).not.toBe(original.participantId);
+    expect(core.events().some(event => event.type === "participantRemoved" &&
+      event.participantId === original.participantId)).toBe(true);
   });
 
   it("keeps a manual sector yellow after an automatic hazard recovers", () => {
@@ -826,7 +916,7 @@ describe("RaceCore", () => {
     core.updateTelemetry(participantId,
       { ...outside, clientMonotonicMilliseconds: 20_950, trackProgress: .63, lateralOffsetMeters: 0 },
       new Date(started.getTime() + 1_950));
-    let snapshot = core.snapshot();
+    let snapshot = core.snapshot(new Date(started.getTime() + 2_000));
     expect(snapshot.participants[0].penalties).toHaveLength(0);
     expect(snapshot.investigations).toHaveLength(1);
     expect(snapshot.investigations?.[0]).toMatchObject({ status: "pending", lapNumber: 1 });

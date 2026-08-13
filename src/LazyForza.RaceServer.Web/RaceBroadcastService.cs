@@ -52,11 +52,13 @@ public sealed class RaceBroadcastService : BackgroundService
                         await Task.Delay(remaining, stoppingToken);
                     while (snapshots.Reader.TryRead(out var newer)) snapshot = newer;
 
-                    var message = RaceProtocolJson.Serialize(
+                    var message = RaceProtocolJson.SerializeToUtf8Bytes(
                         RaceMessageTypes.Snapshot,
                         Interlocked.Increment(ref sequence),
                         WithOrganizerLogo(snapshot));
-                    await registry.BroadcastAsync(message, stoppingToken);
+                    var disconnected = await registry.BroadcastAsync(message, stoppingToken);
+                    foreach (var participantId in disconnected)
+                        coordinator.Disconnect(participantId);
                     lastBroadcastAt = DateTimeOffset.UtcNow;
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

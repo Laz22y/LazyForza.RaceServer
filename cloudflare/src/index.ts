@@ -6,6 +6,7 @@ import {
   maximumMessageBytes,
   maximumObservers,
   type ParticipantCommand,
+  type DisconnectCommand,
   type PenaltyCommand,
   type PenaltyUpdateCommand,
   type InvestigationCommand,
@@ -91,6 +92,7 @@ export class RaceRoom {
   private readonly initialized: Promise<void>;
   private serverSequence = 0;
   private lastBroadcastAt = 0;
+  private lastCoreTickAt = 0;
   private lastTelemetryPersistedAt = 0;
   private credentials: StoredCredentials | null = null;
   private hostedTrackPackage: HostedTrackPackageMetadata | null = null;
@@ -169,8 +171,11 @@ export class RaceRoom {
       return json({ error: "总控登录已过期。" }, 401);
     if (url.pathname === "/api/admin/state" && request.method === "GET")
       return json(this.core.snapshot());
-    if (url.pathname === "/api/admin/events" && request.method === "GET")
-      return json(this.core.events(Number.parseInt(url.searchParams.get("limit") ?? "250", 10)));
+    if (url.pathname === "/api/admin/events" && request.method === "GET") {
+      const afterText = url.searchParams.get("after");
+      const after = afterText === null ? undefined : Number.parseInt(afterText, 10);
+      return json(this.core.events(Number.parseInt(url.searchParams.get("limit") ?? "250", 10), after));
+    }
     if (url.pathname === "/api/admin/track-package" && request.method === "GET")
       return json({ package: this.hostedTrackPackage, maximumBytes: maximumHostedTrackPackageBytes });
     if (url.pathname === "/api/admin/track-package" && request.method === "POST")
@@ -187,6 +192,9 @@ export class RaceRoom {
       return json(this.core.roomSettings());
     if (url.pathname === "/api/admin/settings" && request.method === "POST")
       return this.applyAdmin(request, body => this.core.applyRoomSettings(body as RoomSettings));
+    if (url.pathname === "/api/admin/collision-investigations" && request.method === "POST")
+      return this.applyAdmin(request, body => this.core.setAutomaticCollisionInvestigations(
+        Boolean((body as { enabled?: boolean }).enabled)));
     if (url.pathname === "/api/admin/session" && request.method === "POST")
       return this.applyAdmin(request, body => this.core.applySession(body as SessionCommand));
     if (url.pathname === "/api/admin/flag" && request.method === "POST")
@@ -199,6 +207,8 @@ export class RaceRoom {
       return this.applyAdmin(request, body => this.core.resolveInvestigation(body as InvestigationCommand));
     if (url.pathname === "/api/admin/participant" && request.method === "POST")
       return this.applyAdmin(request, body => this.core.applyParticipant(body as ParticipantCommand));
+    if (url.pathname === "/api/admin/disconnect" && request.method === "POST")
+      return this.disconnectClient(request);
     return json({ error: "Not found" }, 404);
   }
 
@@ -242,10 +252,16 @@ export class RaceRoom {
       }
 
       let result: CommandResult;
-      // Durable Object alarms may be delivered late. Any active client message
-      // also advances the race clock so practice/qualifying expiry and their
-      // final-lap classification cannot remain stale while drivers are online.
-      let important = this.core.tick(new Date());
+      // Durable Object alarms may be delivered late. Active client traffic also
+      // advances the race clock, but doing so once per telemetry packet makes
+      // all 12 drivers pay for the same clock transition checks. Ten checks per
+      // second retain sub-frame flag/session responsiveness without that cost.
+      const messageNow = Date.now();
+      let important = false;
+      if (messageNow - this.lastCoreTickAt >= 100) {
+        important = this.core.tick(new Date(messageNow));
+        this.lastCoreTickAt = messageNow;
+      }
       if (envelope.type === "ready") {
         result = this.core.setReady(attachment.participantId, envelope.payload as ReadyUpdate);
         important = true;
@@ -294,6 +310,7 @@ export class RaceRoom {
 
   async alarm(): Promise<void> {
     await this.initialized;
+    this.lastCoreTickAt = Date.now();
     if (this.core.tick()) {
       await this.persist();
       this.broadcastSnapshot(true);
@@ -448,6 +465,27 @@ export class RaceRoom {
       const body = await readJson(request);
       const result = apply(body);
       if (!result.ok) return json({ error: result.error }, 400);
+      await this.persist();
+      await this.scheduleAlarm();
+      this.broadcastSnapshot(true);
+      return json({ ok: true });
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : "请求格式无效。" }, 400);
+    }
+  }
+
+  private async disconnectClient(request: Request): Promise<Response> {
+    if (!await this.isAdminAuthorized(request))
+      return json({ error: "总控登录已过期。" }, 401);
+    try {
+      const command = await readJson(request) as DisconnectCommand;
+      const clientId = cleanSetupText(command.clientId, 80) ?? "";
+      const result = this.core.disconnectAndReleaseClient(clientId);
+      if (!result.ok) return json({ error: result.error }, 400);
+      for (const webSocket of this.authenticatedSockets()) {
+        if (attachmentOf(webSocket).participantId !== clientId) continue;
+        try { webSocket.close(1008, "Disconnected by race control"); } catch { /* already closed */ }
+      }
       await this.persist();
       await this.scheduleAlarm();
       this.broadcastSnapshot(true);

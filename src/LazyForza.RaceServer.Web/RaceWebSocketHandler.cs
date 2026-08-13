@@ -1,6 +1,5 @@
 using System.Buffers;
 using System.Net.WebSockets;
-using System.Text;
 using System.Text.Json;
 using LazyForza.RaceServer.Core;
 using LazyForza.RaceServer.Protocol;
@@ -53,7 +52,7 @@ public sealed class RaceWebSocketHandler(
             participantId = result.Accepted!.ParticipantId;
             isObserver = result.Accepted.IsObserver;
             await registry.RegisterAsync(participantId.Value, socket, context.RequestAborted);
-            await SendAsync(socket, RaceMessageTypes.LoginAccepted,
+            await SendRegisteredAsync(participantId.Value, socket, RaceMessageTypes.LoginAccepted,
                 result.Accepted with { Snapshot = broadcasts.WithOrganizerLogo(result.Accepted.Snapshot) },
                 context.RequestAborted);
             broadcasts.Queue(result.Accepted.Snapshot);
@@ -71,7 +70,12 @@ public sealed class RaceWebSocketHandler(
                 }
                 if (envelope.ProtocolVersion != RaceProtocol.CurrentVersion)
                 {
-                    await SendErrorAsync(socket, "protocolMismatch", "协议版本不一致。", context.RequestAborted);
+                    await SendRegisteredErrorAsync(
+                        participantId.Value,
+                        socket,
+                        "protocolMismatch",
+                        "协议版本不一致。",
+                        context.RequestAborted);
                     continue;
                 }
 
@@ -115,70 +119,110 @@ public sealed class RaceWebSocketHandler(
             case RaceMessageTypes.Ready:
             {
                 if (isObserver)
-                    return SendErrorAsync(socket, "observerReadOnly", "OB 不参与准备与比赛流程。", cancellationToken);
+                    return SendRegisteredErrorAsync(
+                        participantId, socket, "observerReadOnly", "OB 不参与准备与比赛流程。", cancellationToken);
                 var update = RaceProtocolJson.DeserializePayload<RaceReadyUpdate>(envelope);
-                return ReplyToResult(socket, coordinator.SetReady(participantId, update.IsReady), cancellationToken);
+                return ReplyToResult(
+                    participantId, socket, coordinator.SetReady(participantId, update.IsReady), cancellationToken);
             }
             case RaceMessageTypes.Telemetry:
             {
                 if (isObserver)
-                    return SendErrorAsync(socket, "observerReadOnly", "OB 不能上传车辆遥测。", cancellationToken);
+                    return SendRegisteredErrorAsync(
+                        participantId, socket, "observerReadOnly", "OB 不能上传车辆遥测。", cancellationToken);
                 var update = RaceProtocolJson.DeserializePayload<RaceTelemetryUpdate>(envelope);
                 var result = coordinator.UpdateTelemetry(participantId, update);
-                return result.IsAccepted ? null : ReplyToResult(socket, result, cancellationToken);
+                return result.IsAccepted ? null : ReplyToResult(participantId, socket, result, cancellationToken);
             }
             case RaceMessageTypes.LapCompleted:
             {
                 if (isObserver)
-                    return SendErrorAsync(socket, "observerReadOnly", "OB 不能提交圈速。", cancellationToken);
+                    return SendRegisteredErrorAsync(
+                        participantId, socket, "observerReadOnly", "OB 不能提交圈速。", cancellationToken);
                 var completed = RaceProtocolJson.DeserializePayload<RaceLapCompleted>(envelope);
-                return ReplyToResult(socket, coordinator.CompleteLap(participantId, completed), cancellationToken);
+                return ReplyToResult(
+                    participantId, socket, coordinator.CompleteLap(participantId, completed), cancellationToken);
             }
             case RaceMessageTypes.Ping:
             {
                 var ping = RaceProtocolJson.DeserializePayload<RaceClockPing>(envelope);
-                return SendAsync(socket, RaceMessageTypes.Pong,
+                return SendRegisteredAsync(participantId, socket, RaceMessageTypes.Pong,
                     new RaceClockPong(ping.ClientMonotonicMilliseconds, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
                     cancellationToken);
             }
             default:
-                return SendErrorAsync(socket, "unsupportedMessage", $"不支持消息类型：{envelope.Type}", cancellationToken);
+                return SendRegisteredErrorAsync(
+                    participantId,
+                    socket,
+                    "unsupportedMessage",
+                    $"不支持消息类型：{envelope.Type}",
+                    cancellationToken);
         }
     }
 
-    private Task ReplyToResult(WebSocket socket, RaceCommandResult result, CancellationToken cancellationToken) =>
+    private Task ReplyToResult(
+        Guid participantId,
+        WebSocket socket,
+        RaceCommandResult result,
+        CancellationToken cancellationToken) =>
         result.IsAccepted
             ? Task.CompletedTask
-            : SendErrorAsync(socket, "commandRejected", result.Error ?? "命令被拒绝。", cancellationToken);
+            : SendRegisteredErrorAsync(
+                participantId, socket, "commandRejected", result.Error ?? "命令被拒绝。", cancellationToken);
 
     private Task SendErrorAsync(WebSocket socket, string code, string message, CancellationToken cancellationToken) =>
         SendAsync(socket, RaceMessageTypes.Error, new { code, message }, cancellationToken);
 
+    private Task SendRegisteredErrorAsync(
+        Guid participantId,
+        WebSocket socket,
+        string code,
+        string message,
+        CancellationToken cancellationToken) =>
+        SendRegisteredAsync(
+            participantId, socket, RaceMessageTypes.Error, new { code, message }, cancellationToken);
+
     private async Task SendAsync<T>(WebSocket socket, string type, T payload, CancellationToken cancellationToken)
     {
-        var message = RaceProtocolJson.Serialize(type, Interlocked.Increment(ref sequence), payload);
-        var bytes = Encoding.UTF8.GetBytes(message);
-        await socket.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken);
+        var message = RaceProtocolJson.SerializeToUtf8Bytes(type, Interlocked.Increment(ref sequence), payload);
+        await socket.SendAsync(message, WebSocketMessageType.Text, true, cancellationToken);
+    }
+
+    private async Task SendRegisteredAsync<T>(
+        Guid participantId,
+        WebSocket socket,
+        string type,
+        T payload,
+        CancellationToken cancellationToken)
+    {
+        var message = RaceProtocolJson.SerializeToUtf8Bytes(
+            type,
+            Interlocked.Increment(ref sequence),
+            payload);
+        if (!await registry.SendAsync(participantId, socket, message, cancellationToken))
+            throw new WebSocketException("赛事客户端连接已经被替换或发送失败。");
     }
 
     private static async Task<RaceEnvelope> ReceiveEnvelopeAsync(WebSocket socket, CancellationToken cancellationToken)
     {
-        var writer = new ArrayBufferWriter<byte>();
-        var buffer = ArrayPool<byte>.Shared.Rent(4096);
+        var buffer = ArrayPool<byte>.Shared.Rent(RaceProtocol.MaximumMessageBytes);
+        var written = 0;
         try
         {
             while (true)
             {
-                var received = await socket.ReceiveAsync(buffer, cancellationToken);
+                if (written >= RaceProtocol.MaximumMessageBytes)
+                    throw new JsonException("Race message exceeds the maximum size.");
+                var received = await socket.ReceiveAsync(
+                    buffer.AsMemory(written, RaceProtocol.MaximumMessageBytes - written),
+                    cancellationToken);
                 if (received.MessageType == WebSocketMessageType.Close) throw new WebSocketClosedException();
                 if (received.MessageType != WebSocketMessageType.Text)
                     throw new JsonException("Only text WebSocket messages are supported.");
-                if (writer.WrittenCount + received.Count > RaceProtocol.MaximumMessageBytes)
-                    throw new JsonException("Race message exceeds the maximum size.");
-                writer.Write(buffer.AsSpan(0, received.Count));
+                written += received.Count;
                 if (received.EndOfMessage) break;
             }
-            return RaceProtocolJson.DeserializeEnvelope(writer.WrittenSpan);
+            return RaceProtocolJson.DeserializeEnvelope(buffer.AsSpan(0, written));
         }
         finally
         {

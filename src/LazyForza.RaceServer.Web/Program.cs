@@ -22,6 +22,7 @@ serverOptions = serverOptions with
     MinimumRequiredPitStops = initialRoom.MinimumRequiredPitStops,
     SectorCount = initialRoom.SectorCount,
     AutomaticYellowEnabled = initialRoom.AutomaticYellowEnabled,
+    AutomaticCollisionInvestigationsEnabled = initialRoom.AutomaticCollisionInvestigationsEnabled,
     SlowSpeedKph = initialRoom.SlowSpeedKph,
     SlowDurationSeconds = initialRoom.SlowDurationSeconds,
     SevereLateralOffsetMeters = initialRoom.SevereLateralOffsetMeters,
@@ -170,7 +171,8 @@ app.MapPost("/api/setup", (
         room.DriversPerTeam,
         room.Teams,
         room.TrackLimitMode,
-        room.MinimumRequiredPitStops));
+        room.MinimumRequiredPitStops,
+        room.AutomaticCollisionInvestigationsEnabled));
     return applied.IsAccepted ? Results.Ok(new { ok = true }) : Results.BadRequest(new { error = applied.Error });
 });
 
@@ -203,9 +205,9 @@ app.MapGet("/api/admin/state", (HttpContext context, AdminSessionStore sessions,
 app.MapGet("/api/admin/settings", (HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
     Authorized(context, sessions) ? Results.Ok(coordinator.RoomSettings()) : Results.Unauthorized());
 
-app.MapGet("/api/admin/events", (HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator, int? limit) =>
+app.MapGet("/api/admin/events", (HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator, int? limit, long? after) =>
     Authorized(context, sessions)
-        ? Results.Ok(coordinator.Events(Math.Clamp(limit ?? 200, 20, 500)))
+        ? Results.Ok(coordinator.Events(Math.Clamp(limit ?? 200, 20, 500), after))
         : Results.Unauthorized());
 
 app.MapGet("/api/admin/track-package", (HttpContext context, AdminSessionStore sessions, HostedTrackPackageStore trackPackages) =>
@@ -297,7 +299,8 @@ app.MapPost("/api/admin/track-package", async (
             current.DriversPerTeam,
             current.Teams,
             current.TrackLimitMode,
-            current.MinimumRequiredPitStops));
+            current.MinimumRequiredPitStops,
+            current.AutomaticCollisionInvestigationsEnabled));
         if (!result.IsAccepted) return Results.BadRequest(new { error = result.Error });
         settings.SaveRoomSettings(coordinator.RoomSettings());
         return Results.Ok(new { package = metadata, room = coordinator.RoomSettings() });
@@ -333,6 +336,20 @@ app.MapPost("/api/admin/settings", (
     return Results.Ok();
 });
 
+app.MapPost("/api/admin/collision-investigations", (
+    RaceAdminCollisionInvestigationSettingsCommand command,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceCoordinator coordinator,
+    RaceServerConfigurationStore settings) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    var result = coordinator.SetAutomaticCollisionInvestigations(command.Enabled);
+    if (!result.IsAccepted) return Results.BadRequest(new { error = result.Error });
+    settings.SaveRoomSettings(coordinator.RoomSettings());
+    return Results.Ok();
+});
+
 app.MapPost("/api/admin/session", (RaceAdminSessionCommand command, HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
     AdminResult(context, sessions, () => coordinator.ApplySessionCommand(command)));
 
@@ -350,6 +367,21 @@ app.MapPost("/api/admin/investigation", (RaceAdminInvestigationCommand command, 
 
 app.MapPost("/api/admin/participant", (RaceAdminParticipantCommand command, HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
     AdminResult(context, sessions, () => coordinator.ApplyParticipantCommand(command)));
+
+app.MapPost("/api/admin/disconnect", async (
+    RaceAdminDisconnectCommand command,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceCoordinator coordinator,
+    RaceWebSocketRegistry sockets,
+    CancellationToken cancellationToken) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    _ = cancellationToken;
+    await sockets.DisconnectAsync(command.ClientId, "Disconnected by race control", CancellationToken.None);
+    var result = coordinator.DisconnectAndReleaseClient(command.ClientId);
+    return result.IsAccepted ? Results.Ok() : Results.BadRequest(new { error = result.Error });
+});
 
 if (!configurationStore.IsConfigured)
     app.Logger.LogWarning("Race server is waiting for first-time setup in the web control panel. Do not expose it before claiming the room.");

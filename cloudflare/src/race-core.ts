@@ -43,6 +43,7 @@ export interface RaceConfiguration {
   trackPackageHash?: string | null;
   sectorCount?: number;
   automaticYellowEnabled?: boolean;
+  automaticCollisionInvestigationsEnabled?: boolean;
   slowSpeedKph?: number;
   slowDurationSeconds?: number;
   severeLateralOffsetMeters?: number;
@@ -76,6 +77,25 @@ interface ParticipantState {
   mapX: number;
   mapY: number;
   speedKph: number;
+  telemetryValid?: boolean;
+  hasWorldPosition?: boolean;
+  worldX?: number;
+  worldY?: number;
+  worldZ?: number;
+  velocityX?: number;
+  velocityY?: number;
+  velocityZ?: number;
+  lastTelemetryReceivedAt?: string | null;
+  isApproachingPit?: boolean;
+  isOnPitRoute?: boolean;
+  lastReportedImpactSequence?: number;
+  lastProcessedImpactSequence?: number;
+  lastImpactAt?: string | null;
+  lastImpactWorldX?: number;
+  lastImpactWorldY?: number;
+  lastImpactWorldZ?: number;
+  lastImpactMagnitudeMps?: number;
+  lastImpactSpeedLossMps?: number;
   currentLapSeconds: number;
   lastLapSeconds?: number | null;
   bestLapSeconds?: number | null;
@@ -135,6 +155,7 @@ interface ParticipantState {
   driveThroughStopCandidateStartedAt?: string | null;
   pitVisitHadServiceStop?: boolean;
   pitVisitPaused?: boolean;
+  reservationActive?: boolean;
 }
 
 interface ObserverState {
@@ -183,6 +204,7 @@ export interface StoredRaceState {
   receivedLapEvents: string[];
   sectorCount: number;
   automaticYellowEnabled: boolean;
+  automaticCollisionInvestigationsEnabled: boolean;
   slowSpeedKph: number;
   slowDurationSeconds: number;
   severeLateralOffsetMeters: number;
@@ -201,6 +223,7 @@ export interface StoredRaceState {
   minimumRequiredPitStops: number;
   events: RaceEventSnapshot[];
   eventSequence: number;
+  revokedResumeTokens?: string[];
 }
 
 export type CommandResult = { ok: true } | { ok: false; error: string };
@@ -264,8 +287,10 @@ export class RaceCore {
   private static readonly liveGapHistoryLaps = 1.25;
   private static readonly liveGapProgressJitter = .002;
   private static readonly maximumLiveGapDistanceLaps = .95;
+  private static readonly collisionPairCooldownMilliseconds = 12_000;
   private readonly maximumParticipants: number;
   private readonly liveProgressSamples = new Map<string, RaceProgressSample[]>();
+  private readonly collisionPairCooldowns = new Map<string, number>();
   private state: StoredRaceState;
 
   constructor(configuration: RaceConfiguration, stored?: StoredRaceState | null) {
@@ -305,6 +330,7 @@ export class RaceCore {
       receivedLapEvents: []
       ,sectorCount: clampInteger(configuration.sectorCount ?? 3, 1, 20)
       ,automaticYellowEnabled: configuration.automaticYellowEnabled ?? true
+      ,automaticCollisionInvestigationsEnabled: configuration.automaticCollisionInvestigationsEnabled ?? false
       ,slowSpeedKph: clamp(configuration.slowSpeedKph ?? 12, 3, 50)
       ,slowDurationSeconds: clamp(configuration.slowDurationSeconds ?? 3, 1, 15)
       ,severeLateralOffsetMeters: clamp(configuration.severeLateralOffsetMeters ?? 25, 5, 200)
@@ -329,16 +355,27 @@ export class RaceCore {
     return structuredClone(this.state);
   }
 
-  events(limit = 250): RaceEventSnapshot[] {
-    return this.state.events.slice(-clampInteger(limit, 1, 500)).reverse().map(event => ({ ...event }));
+  events(limit = 250, afterSequence?: number): RaceEventSnapshot[] {
+    const selected = Number.isFinite(afterSequence)
+      ? this.state.events.filter(event => event.sequence > (afterSequence as number))
+      : this.state.events;
+    return selected.slice(-clampInteger(limit, 1, 500)).reverse().map(event => ({ ...event }));
   }
 
   login(request: LoginRequest, now = new Date()): LoginResult {
     const displayName = cleanText(request.displayName, 20);
     const resumeToken = cleanText(request.resumeToken, 256);
+    if (resumeToken && (this.state.revokedResumeTokens ?? []).some(token =>
+      constantTimeTextEquals(token, resumeToken)))
+      return {
+        ok: false,
+        code: "disconnectedByControl",
+        message: "赛事总控已断开这个客户端。再次手动进入房间时可以重新申请席位。"
+      };
     const isObserver = request.isObserver === true;
     const resumed = !isObserver && resumeToken
-      ? this.state.participants.find(participant => constantTimeTextEquals(participant.resumeToken, resumeToken))
+      ? this.state.participants.find(participant =>
+          participant.reservationActive !== false && constantTimeTextEquals(participant.resumeToken, resumeToken))
       : undefined;
     const resumedObserver = isObserver && resumeToken
       ? this.state.observers.find(observer => constantTimeTextEquals(observer.resumeToken, resumeToken))
@@ -406,8 +443,15 @@ export class RaceCore {
       resumed.teamId = team?.id ?? null;
       resumed.teamColor = team?.themeColor ?? null;
       resumed.isConnected = true;
-      resumed.status = resumed.isReady ? "ready" : "connected";
+      resumed.status = this.state.flag === "chequered" &&
+                       (this.state.phase === "race" || this.state.phase === "finished")
+        ? "didNotFinish"
+        : ["race", "countdown", "practice", "outLap", "formationLap"].includes(this.state.phase)
+          ? "onTrack"
+          : resumed.isReady ? "ready" : "connected";
+      if (resumed.status === "didNotFinish") resumed.finishedAt ??= now.toISOString();
       resumed.lastSeenAt = now.toISOString();
+      this.tryCompleteRaceIfReady(now);
       this.touch();
       return { ok: true, participantId: resumed.id, resumeToken: resumed.resumeToken, resumed: true, isObserver: false };
     }
@@ -415,7 +459,7 @@ export class RaceCore {
     if (this.state.phase === "qualifying" && (this.state.qualifyingSessionCount ?? 1) > 1)
       return { ok: false, code: "sessionLocked", message: "多节排位赛已经开始，只允许已参赛车手重新连接。" };
 
-    if (this.state.participants.length >= this.maximumParticipants)
+    if (this.state.participants.filter(participant => participant.reservationActive !== false).length >= this.maximumParticipants)
       return { ok: false, code: "roomFull", message: `本场已达到 ${this.maximumParticipants} 人上限。` };
     if (this.hasDuplicateName(displayName))
       return { ok: false, code: "duplicateName", message: "该比赛显示名已被使用。" };
@@ -489,6 +533,7 @@ export class RaceCore {
       ,driveThroughStopCandidateStartedAt: null
       ,pitVisitHadServiceStop: false
       ,pitVisitPaused: false
+      ,reservationActive: true
     };
     this.state.participants.push(participant);
     this.recordEvent("participantJoined", `${participant.displayName} 进入房间。`, participant.id, now);
@@ -508,7 +553,7 @@ export class RaceCore {
     }
     if (!participant.isConnected) return false;
     participant.isConnected = false;
-    participant.status = "disconnected";
+    if (!terminal(participant.status)) participant.status = "disconnected";
     participant.automaticYellowActive = false;
     participant.hazardCandidateStartedAt = null;
     participant.hazardRecoveryStartedAt = null;
@@ -519,6 +564,7 @@ export class RaceCore {
     this.completeQualifyingIfReady(now);
     this.completePracticeIfReady(now);
     this.refreshYellowFlag(now);
+    this.tryCompleteRaceIfReady(now);
     this.touch();
     return true;
   }
@@ -557,6 +603,12 @@ export class RaceCore {
       this.recordEvent("pitExited", `${participant.displayName} 离开维修区。`, participant.id, now);
     if (!update.isTelemetryValid || update.isPausedOrRewinding) {
       participant.progressContinuityReady = false;
+      participant.telemetryValid = false;
+      participant.lastReportedImpactSequence = Math.max(participant.lastReportedImpactSequence ?? 0, update.impactSequence ?? 0);
+      participant.lastProcessedImpactSequence = participant.lastReportedImpactSequence;
+      participant.lastImpactAt = null;
+      participant.lastImpactMagnitudeMps = 0;
+      participant.lastImpactSpeedLossMps = 0;
       return accepted();
     }
 
@@ -566,6 +618,17 @@ export class RaceCore {
     participant.mapX = clamp(update.mapX, -10_000_000, 10_000_000);
     participant.mapY = clamp(update.mapY, -10_000_000, 10_000_000);
     participant.speedKph = clamp(update.speedKph, 0, 800);
+    participant.telemetryValid = true;
+    participant.hasWorldPosition = update.hasWorldPosition === true;
+    participant.worldX = clamp(update.worldX, -10_000_000, 10_000_000);
+    participant.worldY = clamp(update.worldY, -10_000_000, 10_000_000);
+    participant.worldZ = clamp(update.worldZ, -10_000_000, 10_000_000);
+    participant.velocityX = clamp(update.velocityX, -500, 500);
+    participant.velocityY = clamp(update.velocityY, -500, 500);
+    participant.velocityZ = clamp(update.velocityZ, -500, 500);
+    participant.lastTelemetryReceivedAt = now.toISOString();
+    participant.isApproachingPit = update.isApproachingPit === true;
+    participant.isOnPitRoute = update.isOnPitRoute === true;
     participant.currentSector = clampInteger(update.currentSector, 0, this.state.sectorCount - 1);
     participant.currentLapSeconds = clamp(update.currentLapSeconds, 0, 7_200);
     participant.trackToleranceMeters = update.trackToleranceMeters && update.trackToleranceMeters > 0
@@ -594,6 +657,7 @@ export class RaceCore {
       this.recordEvent("automaticYellowCleared", `${participant.displayName} 的异常状态已恢复，自动黄旗解除。`, participant.id, now);
     this.refreshYellowFlag(now);
     this.refreshChequeredImminent(now);
+    this.evaluateCollisionInvestigation(participant, update, now);
     // completedLaps is deliberately ignored. Only a unique, valid lap event
     // may advance the server-authoritative counter.
     return accepted();
@@ -701,17 +765,7 @@ export class RaceCore {
         this.enforceMinimumPitStopsAtFinish(participant, now);
       }
       else this.updateDriveThroughDeadline(participant, now, false);
-      const classified = this.state.participants.filter(candidate => candidate.isConnected &&
-        candidate.status !== "didNotFinish" && candidate.status !== "disqualified" && candidate.status !== "disconnected");
-      if (this.state.flag === "chequered" && classified.every(candidate => candidate.status === "finished")) {
-        this.state.phase = "finished";
-        this.state.raceEndedAt = now.toISOString();
-        const winner = this.orderParticipants(now).find(candidate => candidate.status === "finished");
-        if (winner) this.state.banner = this.newBanner(
-          "winner", "比赛胜者",
-          `${winner.displayName}  ${formatRaceTime(this.adjustedRaceTotalSeconds(winner, now))}`,
-          winner.id, null, now);
-      }
+      this.tryCompleteRaceIfReady(now);
     }
     this.completeQualifyingIfReady(now);
     this.completePracticeIfReady(now);
@@ -725,6 +779,7 @@ export class RaceCore {
       totalRaceLaps: this.state.totalRaceLaps,
       sectorCount: this.state.sectorCount,
       automaticYellowEnabled: this.state.automaticYellowEnabled,
+      automaticCollisionInvestigationsEnabled: this.state.automaticCollisionInvestigationsEnabled,
       slowSpeedKph: this.state.slowSpeedKph,
       slowDurationSeconds: this.state.slowDurationSeconds,
       severeLateralOffsetMeters: this.state.severeLateralOffsetMeters,
@@ -776,6 +831,7 @@ export class RaceCore {
     this.state.minimumRequiredPitStops = clampInteger(command.minimumRequiredPitStops ?? 1, 0, 20);
     this.state.sectorCount = clampInteger(command.sectorCount, 1, 20);
     this.state.automaticYellowEnabled = Boolean(command.automaticYellowEnabled);
+    this.state.automaticCollisionInvestigationsEnabled = command.automaticCollisionInvestigationsEnabled === true;
     this.state.slowSpeedKph = clamp(command.slowSpeedKph, 3, 50);
     this.state.slowDurationSeconds = clamp(command.slowDurationSeconds, 1, 15);
     this.state.severeLateralOffsetMeters = clamp(command.severeLateralOffsetMeters, 5, 200);
@@ -803,8 +859,34 @@ export class RaceCore {
       }
       this.refreshYellowFlag(now);
     }
+    if (!this.state.automaticCollisionInvestigationsEnabled) {
+      for (const participant of this.state.participants) {
+        participant.lastProcessedImpactSequence = participant.lastReportedImpactSequence ?? participant.lastProcessedImpactSequence ?? 0;
+        participant.lastImpactAt = null;
+        participant.lastImpactMagnitudeMps = 0;
+        participant.lastImpactSpeedLossMps = 0;
+      }
+    }
     this.touch();
     this.recordEvent("roomSettings", `房间设置已更新，赛道边界处理为 ${this.state.trackLimitMode}。`, null, now);
+    return accepted();
+  }
+
+  setAutomaticCollisionInvestigations(enabled: boolean, now = new Date()): CommandResult {
+    this.state.automaticCollisionInvestigationsEnabled = enabled;
+    if (!enabled) {
+      for (const participant of this.state.participants) {
+        participant.lastProcessedImpactSequence = participant.lastReportedImpactSequence ?? participant.lastProcessedImpactSequence ?? 0;
+        participant.lastImpactAt = null;
+        participant.lastImpactMagnitudeMps = 0;
+        participant.lastImpactSpeedLossMps = 0;
+      }
+      this.collisionPairCooldowns.clear();
+    }
+    this.recordEvent("collisionInvestigationSetting",
+      enabled ? "赛事总控已启用疑似碰撞自动调查。" : "赛事总控已关闭疑似碰撞自动调查；已有调查仍会保留。",
+      null, now);
+    this.touch();
     return accepted();
   }
 
@@ -1029,7 +1111,11 @@ export class RaceCore {
     const investigation = (this.state.investigations ?? []).find(item => item.id === command.investigationId);
     if (!investigation) return rejected("调查记录不存在。");
     if (investigation.status !== "pending") return rejected("该调查已经处理。");
-    const participant = this.find(investigation.participantId);
+    const participantId = command.participantId ?? investigation.participantId;
+    const relatedParticipantIds = investigation.relatedParticipantIds?.length
+      ? investigation.relatedParticipantIds : [investigation.participantId];
+    if (!relatedParticipantIds.includes(participantId)) return rejected("所选车手不在该调查事件中。");
+    const participant = this.find(participantId);
     if (!participant) return rejected("车手不存在。");
     if (!command.applyPenalty) {
       investigation.status = "dismissed";
@@ -1085,6 +1171,40 @@ export class RaceCore {
       `${participant.displayName} · ${cleanText(command.reason, 160) ?? "未填写原因"}`,
       participant.id, 8_000, now);
     this.recordEvent("participantStatus", `${participant.displayName} 被标记为 ${command.status}：${cleanText(command.reason, 160) ?? "未填写原因"}。`, participant.id, now);
+    this.touch();
+    return accepted();
+  }
+
+  disconnectAndReleaseClient(clientId: string, now = new Date()): CommandResult {
+    const participant = this.find(clientId);
+    if (participant) {
+      if (participant.reservationActive === false) return rejected("该车手已经由总控断开。");
+      const releasedName = participant.displayName;
+      this.revokeResumeToken(participant.resumeToken);
+      participant.reservationActive = false;
+      participant.isConnected = false;
+      participant.displayName = `${releasedName} · 已断开`;
+      if (!terminal(participant.status))
+        participant.status = this.state.phase === "race" ? "didNotFinish" : "disconnected";
+      if (this.state.phase === "race") participant.finishedAt ??= now.toISOString();
+      participant.automaticYellowActive = false;
+      participant.hazardCandidateStartedAt = null;
+      participant.hazardRecoveryStartedAt = null;
+      participant.qualifyingFinalLapPending = false;
+      participant.practiceFinalLapPending = false;
+      this.completeQualifyingIfReady(now);
+      this.completePracticeIfReady(now);
+      this.refreshYellowFlag(now);
+      this.tryCompleteRaceIfReady(now);
+      this.recordEvent("participantRemoved", `赛事总控断开了 ${releasedName}，显示名称已释放。`, participant.id, now);
+      this.touch();
+      return accepted();
+    }
+    const observerIndex = this.state.observers.findIndex(observer => observer.id === clientId);
+    if (observerIndex < 0) return rejected("客户端不存在或已经离开房间。");
+    const [observer] = this.state.observers.splice(observerIndex, 1);
+    this.revokeResumeToken(observer.resumeToken);
+    this.recordEvent("observerRemoved", `赛事总控断开了 OB ${observer.displayName}，显示名称已释放。`, observer.id, now);
     this.touch();
     return accepted();
   }
@@ -1166,7 +1286,7 @@ export class RaceCore {
   }
 
   snapshot(now = new Date()): SessionSnapshot {
-    const ordered = this.orderParticipants(now);
+    const ordered = this.orderParticipants(now).filter(participant => participant.reservationActive !== false);
     const leader = ordered[0];
     let prior: ParticipantState | undefined;
     const participants: ParticipantSnapshot[] = ordered.map((participant, index) => {
@@ -1345,6 +1465,7 @@ export class RaceCore {
       banner: stored.banner ?? null,
       participants: Array.isArray(stored.participants) ? stored.participants.slice(0, 12).map(participant => ({
         ...participant,
+        reservationActive: participant.reservationActive ?? true,
         qualifyingFinalLapPending: participant.qualifyingFinalLapPending ?? false,
         qualifyingEligible: participant.qualifyingEligible ?? true,
         qualifyingEliminatedInSession: participant.qualifyingEliminatedInSession ?? null,
@@ -1386,6 +1507,16 @@ export class RaceCore {
         driveThroughStopCandidateStartedAt: participant.driveThroughStopCandidateStartedAt ?? null,
         pitVisitHadServiceStop: participant.pitVisitHadServiceStop ?? false,
         pitVisitPaused: participant.pitVisitPaused ?? false,
+        telemetryValid: participant.telemetryValid ?? false,
+        hasWorldPosition: participant.hasWorldPosition ?? false,
+        lastTelemetryReceivedAt: participant.lastTelemetryReceivedAt ?? null,
+        isApproachingPit: participant.isApproachingPit ?? false,
+        isOnPitRoute: participant.isOnPitRoute ?? false,
+        lastReportedImpactSequence: clampInteger(participant.lastReportedImpactSequence ?? 0, 0, Number.MAX_SAFE_INTEGER),
+        lastProcessedImpactSequence: clampInteger(participant.lastProcessedImpactSequence ?? 0, 0, Number.MAX_SAFE_INTEGER),
+        lastImpactAt: participant.lastImpactAt ?? null,
+        lastImpactMagnitudeMps: clamp(participant.lastImpactMagnitudeMps ?? 0, 0, 200),
+        lastImpactSpeedLossMps: clamp(participant.lastImpactSpeedLossMps ?? 0, 0, 200),
         teamId: cleanText(participant.teamId, 40),
         teamColor: isThemeColor(participant.teamColor) ? participant.teamColor.toUpperCase() : null
       })) : [],
@@ -1414,12 +1545,17 @@ export class RaceCore {
           lapNumber: clampInteger(item.lapNumber, 1, 9999),
           status: item.status === "penalized" || item.status === "dismissed" ? item.status : "pending",
           penaltyId: cleanText(item.penaltyId, 80),
-          resolvedAt: item.resolvedAt ?? null
+          resolvedAt: item.resolvedAt ?? null,
+          relatedParticipantIds: Array.isArray(item.relatedParticipantIds)
+            ? item.relatedParticipantIds.map(id => cleanText(id, 80)).filter((id): id is string => Boolean(id)).slice(0, 2)
+            : null,
+          collisionEvidence: item.collisionEvidence ?? null
         }))
         : [],
       receivedLapEvents: Array.isArray(stored.receivedLapEvents) ? stored.receivedLapEvents.slice(-10_000) : []
       ,sectorCount: clampInteger(stored.sectorCount ?? 3, 1, 20)
       ,automaticYellowEnabled: stored.automaticYellowEnabled ?? true
+      ,automaticCollisionInvestigationsEnabled: stored.automaticCollisionInvestigationsEnabled ?? false
       ,slowSpeedKph: clamp(stored.slowSpeedKph ?? 12, 3, 50)
       ,slowDurationSeconds: clamp(stored.slowDurationSeconds ?? 3, 1, 15)
       ,severeLateralOffsetMeters: clamp(stored.severeLateralOffsetMeters ?? 25, 5, 200)
@@ -1439,7 +1575,17 @@ export class RaceCore {
         ? stored.trackLimitMode : "warningsOnly"
       ,events: Array.isArray(stored.events) ? stored.events.slice(-500) : []
       ,eventSequence: clampInteger(stored.eventSequence ?? 0, 0, Number.MAX_SAFE_INTEGER)
+      ,revokedResumeTokens: Array.isArray(stored.revokedResumeTokens)
+        ? stored.revokedResumeTokens.map(token => cleanText(token, 256)).filter((token): token is string => Boolean(token)).slice(-100)
+        : []
     };
+  }
+
+  private revokeResumeToken(token: string): void {
+    this.state.revokedResumeTokens ??= [];
+    if (!this.state.revokedResumeTokens.includes(token)) this.state.revokedResumeTokens.push(token);
+    if (this.state.revokedResumeTokens.length > 100)
+      this.state.revokedResumeTokens.splice(0, this.state.revokedResumeTokens.length - 100);
   }
 
   private trackMatches(request: LoginRequest): boolean {
@@ -1450,7 +1596,8 @@ export class RaceCore {
 
   private hasDuplicateName(displayName: string, exceptId?: string): boolean {
     return this.state.participants.some(participant =>
-      participant.id !== exceptId && participant.displayName.localeCompare(displayName, undefined, { sensitivity: "accent" }) === 0) ||
+      participant.reservationActive !== false && participant.id !== exceptId &&
+      participant.displayName.localeCompare(displayName, undefined, { sensitivity: "accent" }) === 0) ||
       this.state.observers.some(observer =>
         observer.id !== exceptId && observer.displayName.localeCompare(displayName, undefined, { sensitivity: "accent" }) === 0);
   }
@@ -1467,7 +1614,8 @@ export class RaceCore {
 
   private teamHasCapacity(teamId: string, exceptId?: string): boolean {
     return this.state.participants.filter(participant =>
-      participant.id !== exceptId && equalsIgnoreCase(teamId, participant.teamId)).length < this.state.driversPerTeam;
+      participant.reservationActive !== false && participant.id !== exceptId &&
+      equalsIgnoreCase(teamId, participant.teamId)).length < this.state.driversPerTeam;
   }
 
   private selectLegacyTeam(exceptId?: string): TeamDefinition | null {
@@ -1476,7 +1624,8 @@ export class RaceCore {
         team,
         index,
         members: this.state.participants.filter(participant =>
-          participant.id !== exceptId && equalsIgnoreCase(team.id, participant.teamId)).length
+          participant.reservationActive !== false && participant.id !== exceptId &&
+          equalsIgnoreCase(team.id, participant.teamId)).length
       }))
       .filter(candidate => candidate.members < this.state.driversPerTeam)
       .sort((left, right) => left.members - right.members || left.index - right.index);
@@ -1541,6 +1690,102 @@ export class RaceCore {
     participant.automaticYellowActive = false;
     participant.automaticYellowReason = null;
     participant.hazardRecoveryStartedAt = null;
+  }
+
+  private evaluateCollisionInvestigation(participant: ParticipantState, update: TelemetryUpdate, now: Date): void {
+    const impactSequence = clampInteger(update.impactSequence ?? 0, 0, Number.MAX_SAFE_INTEGER);
+    const incomingEvidenceIsNew = impactSequence > (participant.lastReportedImpactSequence ?? 0);
+    if (incomingEvidenceIsNew) {
+      participant.lastReportedImpactSequence = impactSequence;
+      participant.lastImpactAt = new Date(now.getTime() - clampInteger(update.impactAgeMilliseconds ?? 0, 0, 2_000)).toISOString();
+      participant.lastImpactWorldX = clamp(update.impactWorldX, -10_000_000, 10_000_000);
+      participant.lastImpactWorldY = clamp(update.impactWorldY, -10_000_000, 10_000_000);
+      participant.lastImpactWorldZ = clamp(update.impactWorldZ, -10_000_000, 10_000_000);
+      participant.lastImpactMagnitudeMps = clamp(update.impactMagnitudeMps ?? 0, 0, 200);
+      participant.lastImpactSpeedLossMps = clamp(update.impactSpeedLossMps ?? 0, 0, 200);
+    }
+    if (!this.state.automaticCollisionInvestigationsEnabled) {
+      participant.lastProcessedImpactSequence = participant.lastReportedImpactSequence;
+      return;
+    }
+    if (!incomingEvidenceIsNew || impactSequence <= (participant.lastProcessedImpactSequence ?? 0)) return;
+    participant.lastProcessedImpactSequence = impactSequence;
+    const impactAge = clampInteger(update.impactAgeMilliseconds ?? 0, 0, 2_000);
+    const impactMagnitude = clamp(update.impactMagnitudeMps ?? 0, 0, 200);
+    const impactSpeedLoss = clamp(update.impactSpeedLossMps ?? 0, 0, 200);
+    if (this.state.phase !== "race" || this.state.flag === "chequered" ||
+        (this.state.investigations ?? []).filter(item => item.collisionEvidence).length >= 24 ||
+        update.hasWorldPosition !== true || impactAge > 750 ||
+        impactMagnitude < 2.8 || participant.isInPitLane || participant.isInServiceZone ||
+        participant.isApproachingPit || participant.isOnPitRoute || terminal(participant.status)) return;
+
+    const incidentAt = new Date(now.getTime() - impactAge);
+    let nearest: ParticipantState | null = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    let nearestVerticalDistance = 0;
+    let nearestRelativeSpeed = 0;
+    let nearestIncidentX = 0, nearestIncidentY = 0, nearestIncidentZ = 0;
+    const impactX = clamp(update.impactWorldX, -10_000_000, 10_000_000);
+    const impactY = clamp(update.impactWorldY, -10_000_000, 10_000_000);
+    const impactZ = clamp(update.impactWorldZ, -10_000_000, 10_000_000);
+    for (const candidate of this.state.participants) {
+      if (candidate.id === participant.id || candidate.reservationActive === false || !candidate.isConnected ||
+          candidate.telemetryValid !== true || candidate.hasWorldPosition !== true || candidate.isInPitLane ||
+          candidate.isInServiceZone || candidate.isApproachingPit || candidate.isOnPitRoute || terminal(candidate.status) ||
+          !candidate.lastTelemetryReceivedAt || now.getTime() - Date.parse(candidate.lastTelemetryReceivedAt) > 500) continue;
+      if (!candidate.lastImpactAt || Math.abs(Date.parse(candidate.lastImpactAt) - incidentAt.getTime()) > 750 ||
+          (candidate.lastImpactMagnitudeMps ?? 0) < 2.8) continue;
+      const candidateX = candidate.lastImpactWorldX ?? 0;
+      const candidateY = candidate.lastImpactWorldY ?? 0;
+      const candidateZ = candidate.lastImpactWorldZ ?? 0;
+      const horizontalDistance = Math.hypot(impactX - candidateX, impactZ - candidateZ);
+      const verticalDistance = Math.abs(impactY - candidateY);
+      if (horizontalDistance > 4.8 || verticalDistance > 2.5) continue;
+      const relativeSpeed = Math.hypot(
+        clamp(update.velocityX, -500, 500) - (candidate.velocityX ?? 0),
+        clamp(update.velocityZ, -500, 500) - (candidate.velocityZ ?? 0));
+      if (relativeSpeed < 3 && impactSpeedLoss < 1.5 || horizontalDistance >= nearestDistance) continue;
+      nearest = candidate;
+      nearestDistance = horizontalDistance;
+      nearestVerticalDistance = verticalDistance;
+      nearestRelativeSpeed = relativeSpeed;
+      nearestIncidentX = candidateX;
+      nearestIncidentY = candidateY;
+      nearestIncidentZ = candidateZ;
+    }
+    if (!nearest) return;
+    const pairKey = [participant.id, nearest.id].sort().join(":");
+    if ((this.collisionPairCooldowns.get(pairKey) ?? 0) > now.getTime() ||
+        (this.state.investigations ?? []).some(item => item.status === "pending" &&
+          now.getTime() - Date.parse(item.detectedAt) < RaceCore.collisionPairCooldownMilliseconds &&
+          item.relatedParticipantIds?.includes(participant.id) && item.relatedParticipantIds.includes(nearest!.id))) return;
+    this.collisionPairCooldowns.set(pairKey, now.getTime() + RaceCore.collisionPairCooldownMilliseconds);
+    const lapNumber = Math.max(1, Math.max(participant.completedLaps, nearest.completedLaps) + 1);
+    const offense = `疑似车辆接触：${participant.displayName} 与 ${nearest.displayName}；最近距离 ${nearestDistance.toFixed(1)} m，运动突变 ${impactMagnitude.toFixed(1)} m/s，相对速度 ${(nearestRelativeSpeed * 3.6).toFixed(0)} km/h。仅供总控结合画面核查，不代表责任判定`;
+    const investigation: InvestigationSnapshot = {
+      id: crypto.randomUUID(), participantId: participant.id, offense,
+      detectedAt: now.toISOString(), lapNumber, status: "pending",
+      relatedParticipantIds: [participant.id, nearest.id],
+      collisionEvidence: {
+        incidentAt: incidentAt.toISOString(), reporterParticipantId: participant.id, otherParticipantId: nearest.id,
+        reporterName: participant.displayName, otherName: nearest.displayName,
+        reporterThemeColor: participant.themeColor, otherThemeColor: nearest.themeColor,
+        reporterWorldX: impactX, reporterWorldY: impactY, reporterWorldZ: impactZ,
+        otherWorldX: nearestIncidentX, otherWorldY: nearestIncidentY, otherWorldZ: nearestIncidentZ,
+        reporterVelocityX: clamp(update.velocityX, -500, 500), reporterVelocityZ: clamp(update.velocityZ, -500, 500),
+        otherVelocityX: nearest.velocityX ?? 0, otherVelocityZ: nearest.velocityZ ?? 0,
+        horizontalDistanceMeters: nearestDistance, verticalDistanceMeters: nearestVerticalDistance,
+        relativeSpeedKph: nearestRelativeSpeed * 3.6, impactMagnitudeMps: impactMagnitude,
+        impactSpeedLossMps: impactSpeedLoss
+      }
+    };
+    (this.state.investigations ??= []).push(investigation);
+    this.state.banner = this.newBanner("information", "正在调查 · 疑似碰撞",
+      `${participant.displayName} ↔ ${nearest.displayName} · 第 ${lapNumber} 圈`, null, 8_000, now);
+    this.state.banner.isInvestigation = true;
+    this.recordEvent("collisionInvestigationOpened",
+      `${participant.displayName} 与 ${nearest.displayName} 发生疑似车辆接触，已交由总控调查（第 ${lapNumber} 圈）。`,
+      participant.id, now);
   }
 
   private refreshYellowFlag(now: Date): void {
@@ -2290,6 +2535,15 @@ export class RaceCore {
     participant.driveThroughStopCandidateStartedAt = null;
     participant.pitVisitHadServiceStop = false;
     participant.pitVisitPaused = false;
+    participant.telemetryValid = false;
+    participant.hasWorldPosition = false;
+    participant.lastTelemetryReceivedAt = null;
+    participant.isApproachingPit = false;
+    participant.isOnPitRoute = false;
+    participant.lastProcessedImpactSequence = participant.lastReportedImpactSequence ?? participant.lastProcessedImpactSequence ?? 0;
+    participant.lastImpactAt = null;
+    participant.lastImpactMagnitudeMps = 0;
+    participant.lastImpactSpeedLossMps = 0;
     participant.status = participant.isConnected ? (onTrack ? "onTrack" : "connected") : "disconnected";
   }
 
@@ -2312,6 +2566,7 @@ export class RaceCore {
 
   private fastestLap(): { participant: ParticipantState; time: number } | null {
     const participant = this.state.participants
+      .filter(candidate => candidate.reservationActive !== false)
       .filter(candidate => this.state.phase !== "qualifying" || candidate.qualifyingEligible !== false)
       .filter(candidate => candidate.bestLapSeconds !== null && candidate.bestLapSeconds !== undefined)
       .sort((left, right) => (left.bestLapSeconds! - right.bestLapSeconds!) ||
@@ -2320,10 +2575,11 @@ export class RaceCore {
   }
 
   private fastestSectors(): Array<number | null> {
-    const count = this.state.participants.reduce(
+    const activeParticipants = this.state.participants.filter(participant => participant.reservationActive !== false);
+    const count = activeParticipants.reduce(
       (maximum, participant) => Math.max(maximum, participant.bestSectorSeconds.length), 0);
     return Array.from({ length: count }, (_, index) => {
-      const values = this.state.participants
+      const values = activeParticipants
         .filter(participant => this.state.phase !== "qualifying" || participant.qualifyingEligible !== false)
         .map(participant => participant.bestSectorSeconds[index])
         .filter((value): value is number => typeof value === "number" && value > 0);
@@ -2622,7 +2878,7 @@ export class RaceCore {
   }
 
   private orderParticipants(now: Date): ParticipantState[] {
-    const participants = [...this.state.participants];
+    const participants = this.state.participants.filter(participant => participant.reservationActive !== false);
     if ((this.state.phase === "qualifying" || this.state.phase === "grid") &&
         (this.state.qualifyingSessionCount ?? 1) > 1) {
       const count = this.state.qualifyingSessionCount ?? 1;
@@ -2673,6 +2929,26 @@ export class RaceCore {
   private isRaceClassificationPhase(): boolean {
     return this.state.phase === "race" || this.state.phase === "finished" ||
       this.state.phase === "suspended" && this.state.phaseBeforeSuspension === "race";
+  }
+
+  private tryCompleteRaceIfReady(now: Date): boolean {
+    if (this.state.phase !== "race" || this.state.flag !== "chequered") return false;
+    const awaitingFinish = this.state.participants.some(participant =>
+      participant.reservationActive !== false && participant.isConnected &&
+      !terminal(participant.status) && participant.status !== "disconnected");
+    if (awaitingFinish) return false;
+    this.state.phase = "finished";
+    this.state.raceEndedAt = now.toISOString();
+    const winner = this.orderParticipants(now).find(participant =>
+      participant.reservationActive !== false && participant.status === "finished");
+    if (winner) this.state.banner = this.newBanner(
+      "winner",
+      "比赛胜者",
+      `${winner.displayName}  ${formatRaceTime(this.adjustedRaceTotalSeconds(winner, now))}`,
+      winner.id,
+      null,
+      now);
+    return true;
   }
 
   private newBanner(

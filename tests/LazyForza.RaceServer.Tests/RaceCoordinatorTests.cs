@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using LazyForza.RaceServer.Core;
 using LazyForza.RaceServer.Protocol;
@@ -8,6 +9,123 @@ namespace LazyForza.RaceServer.Tests;
 [TestClass]
 public sealed class RaceCoordinatorTests
 {
+    [TestMethod]
+    public void CollisionInvestigationRequiresRaceToggleFreshNearbyPeerAndPreservesEvidenceForPostRaceReview()
+    {
+        var coordinator = CreateCoordinator();
+        var reporter = Join(coordinator, 1).Accepted!;
+        var other = Join(coordinator, 2).Accepted!;
+        var settings = coordinator.RoomSettings();
+        Assert.IsTrue(coordinator.ApplyRoomSettings(new RaceAdminRoomSettingsCommand(
+            settings.SessionName, 1, settings.SectorCount, settings.AutomaticYellowEnabled,
+            settings.SlowSpeedKph, settings.SlowDurationSeconds, settings.SevereLateralOffsetMeters,
+            settings.RecoveryDurationSeconds, settings.AllowTeams, settings.TrackName, settings.TrackId,
+            settings.TrackRevision, settings.TrackPackageHash, settings.TeamCount, settings.DriversPerTeam,
+            settings.Teams, settings.TrackLimitMode, 0, true)).IsAccepted);
+
+        var now = DateTimeOffset.UtcNow;
+        Assert.IsTrue(coordinator.UpdateTelemetry(other.ParticipantId,
+            CollisionTelemetry(1, 101.5, 10, 0, 0), now).IsAccepted);
+        Assert.IsTrue(coordinator.UpdateTelemetry(reporter.ParticipantId,
+            CollisionTelemetry(2, 100, 20, 1, 4.4) with
+            {
+                ImpactSpeedLossMps = 2.2,
+                ImpactWorldX = 100,
+                ImpactWorldY = 0,
+                ImpactWorldZ = 50,
+                ImpactAgeMilliseconds = 80
+            }, now.AddMilliseconds(80)).IsAccepted);
+        Assert.IsEmpty(coordinator.Snapshot().Investigations!, "大厅不得创建碰撞调查。");
+
+        Assert.IsTrue(coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Race, null, 1, 0, null), now.AddSeconds(1)).IsAccepted);
+        Assert.IsTrue(coordinator.UpdateTelemetry(other.ParticipantId,
+            CollisionTelemetry(3, 101.5, 10, 1, 3.6) with
+            {
+                ImpactSpeedLossMps = 1.7,
+                ImpactWorldX = 101.5,
+                ImpactWorldY = 0,
+                ImpactWorldZ = 50,
+                ImpactAgeMilliseconds = 40
+            }, now.AddSeconds(2)).IsAccepted);
+        Assert.IsTrue(coordinator.UpdateTelemetry(reporter.ParticipantId,
+            CollisionTelemetry(4, 100, 20, 3, 4.4) with
+            {
+                ImpactSpeedLossMps = 2.2,
+                ImpactWorldX = 100,
+                ImpactWorldY = 0,
+                ImpactWorldZ = 50,
+                ImpactAgeMilliseconds = 80
+            }, now.AddSeconds(2).AddMilliseconds(80)).IsAccepted);
+
+        var pending = coordinator.Snapshot().Investigations!.Single();
+        CollectionAssert.AreEquivalent(
+            new[] { reporter.ParticipantId, other.ParticipantId },
+            pending.RelatedParticipantIds!.ToArray());
+        Assert.IsNotNull(pending.CollisionEvidence);
+        Assert.AreEqual(1.5, pending.CollisionEvidence.HorizontalDistanceMeters, .15);
+        Assert.IsTrue(pending.Offense.Contains("不代表责任判定", StringComparison.Ordinal));
+        Assert.IsTrue(coordinator.SetAutomaticCollisionInvestigations(false).IsAccepted);
+        Assert.IsFalse(coordinator.RoomSettings().AutomaticCollisionInvestigationsEnabled);
+        Assert.HasCount(1, coordinator.Snapshot().Investigations!, "赛中关闭检测不得删除已有调查。");
+
+        CompleteLap(coordinator, reporter.ParticipantId, 1, 60, now.AddMinutes(1));
+        coordinator.Disconnect(other.ParticipantId);
+        Assert.AreEqual(RaceSessionPhase.Finished, coordinator.Snapshot().Phase);
+        Assert.IsTrue(coordinator.ResolveInvestigation(new RaceAdminInvestigationCommand(
+            pending.Id, true, RacePenaltyKind.Time, 4, "赛后复核确认责任", other.ParticipantId)).IsAccepted);
+        var finished = coordinator.Snapshot();
+        Assert.AreEqual(RaceInvestigationStatus.Penalized, finished.Investigations!.Single().Status);
+        Assert.IsTrue(finished.Penalties!.Any(item =>
+            item.ParticipantId == other.ParticipantId && item.IsPostRaceAdjustment && item.ValueSeconds == 4));
+    }
+
+    [TestMethod]
+    public void CollisionInvestigationRejectsFarStalePitAndDuplicateEvidence()
+    {
+        var coordinator = CreateCoordinator();
+        var reporter = Join(coordinator, 1).Accepted!;
+        var other = Join(coordinator, 2).Accepted!;
+        var settings = coordinator.RoomSettings();
+        Assert.IsTrue(coordinator.ApplyRoomSettings(new RaceAdminRoomSettingsCommand(
+            settings.SessionName, settings.TotalRaceLaps, settings.SectorCount, settings.AutomaticYellowEnabled,
+            settings.SlowSpeedKph, settings.SlowDurationSeconds, settings.SevereLateralOffsetMeters,
+            settings.RecoveryDurationSeconds, settings.AllowTeams, settings.TrackName, settings.TrackId,
+            settings.TrackRevision, settings.TrackPackageHash, settings.TeamCount, settings.DriversPerTeam,
+            settings.Teams, settings.TrackLimitMode, 0, true)).IsAccepted);
+        Assert.IsTrue(coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Race, null, 10, 0, null)).IsAccepted);
+        var now = DateTimeOffset.UtcNow;
+        coordinator.UpdateTelemetry(other.ParticipantId, CollisionTelemetry(1, 150, 0, 0, 0), now);
+        coordinator.UpdateTelemetry(reporter.ParticipantId, CollisionTelemetry(2, 100, 20, 1, 5) with
+        {
+            ImpactWorldX = 100, ImpactWorldZ = 50, ImpactAgeMilliseconds = 50
+        }, now.AddMilliseconds(50));
+        Assert.IsEmpty(coordinator.Snapshot().Investigations!);
+
+        coordinator.UpdateTelemetry(other.ParticipantId, CollisionTelemetry(3, 101, 0, 0, 0) with
+        {
+            IsInPitLane = true, IsOnPitRoute = true
+        }, now.AddSeconds(1));
+        coordinator.UpdateTelemetry(reporter.ParticipantId, CollisionTelemetry(4, 100, 20, 2, 5) with
+        {
+            ImpactWorldX = 100, ImpactWorldZ = 50, ImpactAgeMilliseconds = 50
+        }, now.AddSeconds(1).AddMilliseconds(50));
+        Assert.IsEmpty(coordinator.Snapshot().Investigations!);
+
+        coordinator.UpdateTelemetry(other.ParticipantId, CollisionTelemetry(5, 101, 0, 1, 3.4) with
+        {
+            ImpactWorldX = 101, ImpactWorldZ = 50, ImpactAgeMilliseconds = 40
+        }, now.AddSeconds(2));
+        var impact = CollisionTelemetry(6, 100, 20, 3, 5) with
+        {
+            ImpactWorldX = 100, ImpactWorldZ = 50, ImpactAgeMilliseconds = 50
+        };
+        coordinator.UpdateTelemetry(reporter.ParticipantId, impact, now.AddSeconds(2).AddMilliseconds(50));
+        coordinator.UpdateTelemetry(reporter.ParticipantId, impact, now.AddSeconds(2).AddMilliseconds(150));
+        Assert.HasCount(1, coordinator.Snapshot().Investigations!);
+    }
+
     [TestMethod]
     public void TwelveDriverSnapshotFitsQuarterSecondBroadcastBudget()
     {
@@ -30,6 +148,46 @@ public sealed class RaceCoordinatorTests
         Assert.IsTrue(bytes < 64 * 1024, "单个 12 人快照必须保持在协议消息上限内。");
         Assert.IsTrue(egressBytesPerSecond < 3 * 1024 * 1024,
             "每秒四次向 12 个客户端广播不应产生不可接受的单房间带宽。");
+    }
+
+    [TestMethod]
+    public void HighFrequencyTelemetryCoalescesRoomSnapshotsWithoutDroppingStateUpdates()
+    {
+        var coordinator = CreateCoordinator();
+        var participants = Enumerable.Range(1, RaceProtocol.MaximumParticipants)
+            .Select(index => Join(coordinator, index).Accepted!)
+            .ToArray();
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Race, null, 10, null, null));
+        var published = 0;
+        coordinator.SnapshotChanged += _ => Interlocked.Increment(ref published);
+
+        var allocationStart = GC.GetAllocatedBytesForCurrentThread();
+        var timer = Stopwatch.StartNew();
+        for (var sample = 0; sample < 10; sample++)
+        for (var index = 0; index < participants.Length; index++)
+            coordinator.UpdateTelemetry(
+                participants[index].ParticipantId,
+                Telemetry(0, (sample * participants.Length + index) / 120d));
+        timer.Stop();
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - allocationStart;
+        Console.WriteLine(
+            $"12-driver telemetry burst: 120 packets in {timer.Elapsed.TotalMilliseconds:0.###} ms, " +
+            $"{allocated / 120d:0.##} B/packet, {Volatile.Read(ref published)} room snapshots");
+
+        Assert.IsTrue(Volatile.Read(ref published) < 12,
+            "120 个紧邻遥测包不应触发 120 次整房快照重建。 ");
+        Assert.IsTrue(timer.Elapsed < TimeSpan.FromMilliseconds(500),
+            "12 人各 10 个遥测包必须在宽松的实时预算内处理完成。 ");
+        Assert.IsTrue(allocated < 16 * 1024 * 1024,
+            "高频遥测合并路径不应产生大规模瞬时分配。 ");
+        var beforeNextWindow = Volatile.Read(ref published);
+        Thread.Sleep(120);
+        coordinator.UpdateTelemetry(participants[0].ParticipantId, Telemetry(0, .75));
+        Assert.IsTrue(Volatile.Read(ref published) > beforeNextWindow,
+            "进入下一广播窗口后必须发布包含全部累计状态的快照。 ");
+        Assert.AreEqual(.75, coordinator.Snapshot().Participants
+            .Single(item => item.Id == participants[0].ParticipantId).TrackProgress, 0.0001);
     }
 
     [TestMethod]
@@ -90,6 +248,21 @@ public sealed class RaceCoordinatorTests
         coordinator.Disconnect(observer.Accepted.ParticipantId);
         Assert.IsEmpty(coordinator.Snapshot().Observers!);
         Assert.IsTrue(coordinator.Events().Any(item => item.Type == "observerDisconnected"));
+    }
+
+    [TestMethod]
+    public void EventFeedCanReturnOnlyItemsAfterTheLastRenderedSequence()
+    {
+        var coordinator = CreateCoordinator();
+        Join(coordinator, 1);
+        var firstSequence = coordinator.Events().Max(item => item.Sequence);
+
+        Join(coordinator, 2);
+        var incremental = coordinator.Events(200, firstSequence);
+
+        Assert.IsNotEmpty(incremental);
+        Assert.IsTrue(incremental.All(item => item.Sequence > firstSequence));
+        Assert.AreEqual(coordinator.Events().Max(item => item.Sequence), incremental.Max(item => item.Sequence));
     }
 
     [TestMethod]
@@ -655,6 +828,55 @@ public sealed class RaceCoordinatorTests
         Assert.AreEqual(joined.ParticipantId, resumed.Accepted?.ParticipantId);
         Assert.AreEqual(1, coordinator.Snapshot().Participants.Count);
         Assert.AreEqual("#AA55CC", coordinator.Snapshot().Participants.Single().ThemeColor);
+    }
+
+    [TestMethod]
+    public void DisconnectAfterChequeredDoesNotBlockRaceFinishOrReopenFinishedDriver()
+    {
+        var coordinator = CreateCoordinator();
+        var leader = Join(coordinator, 1).Accepted!;
+        var trailing = Join(coordinator, 2).Accepted!;
+        var started = DateTimeOffset.Parse("2026-08-13T10:00:00Z");
+        Assert.IsTrue(coordinator.ApplySessionCommand(
+            new RaceAdminSessionCommand(RaceSessionPhase.Race, "掉线完赛测试", 2, null, null),
+            started).IsAccepted);
+        CompleteLap(coordinator, leader.ParticipantId, 1, 60, started.AddSeconds(60));
+        CompleteLap(coordinator, trailing.ParticipantId, 1, 61, started.AddSeconds(61));
+        CompleteLap(coordinator, leader.ParticipantId, 2, 60, started.AddSeconds(120));
+
+        coordinator.Disconnect(trailing.ParticipantId);
+        var finished = coordinator.Snapshot(started.AddSeconds(122));
+        Assert.AreEqual(RaceSessionPhase.Finished, finished.Phase);
+        Assert.AreEqual(RaceParticipantStatus.Finished,
+            finished.Participants.Single(item => item.Id == leader.ParticipantId).Status);
+
+        var resumed = coordinator.TryJoin(Login(2) with { ResumeToken = trailing.ResumeToken });
+        Assert.IsTrue(resumed.IsAccepted);
+        Assert.AreEqual(RaceParticipantStatus.DidNotFinish,
+            coordinator.Snapshot().Participants.Single(item => item.Id == trailing.ParticipantId).Status,
+            "方格旗后的掉线重连不能重新进入待完赛集合。 ");
+        Assert.AreEqual(RaceSessionPhase.Finished, coordinator.Snapshot().Phase);
+    }
+
+    [TestMethod]
+    public void RaceControlDisconnectReleasesNameAndSlotWithoutDeletingAuditHistory()
+    {
+        var coordinator = CreateCoordinator(maximumParticipants: 1);
+        var joined = Join(coordinator, 1).Accepted!;
+        Assert.IsTrue(coordinator.DisconnectAndReleaseClient(joined.ParticipantId).IsAccepted);
+        Assert.AreEqual(0, coordinator.Snapshot().Participants.Count);
+
+        var kickedClientRetry = coordinator.TryJoin(Login(1) with { ResumeToken = joined.ResumeToken });
+        Assert.IsFalse(kickedClientRetry.IsAccepted,
+            "被总控断开的旧客户端不能依靠自动重连立即夺回名称。 ");
+        Assert.AreEqual("disconnectedByControl", kickedClientRetry.Rejected?.Code);
+
+        var replacement = coordinator.TryJoin(Login(1));
+        Assert.IsTrue(replacement.IsAccepted,
+            "总控主动断开后，相同显示名应能立即重新加入且不再占用房间席位。 ");
+        Assert.AreNotEqual(joined.ParticipantId, replacement.Accepted?.ParticipantId);
+        Assert.IsTrue(coordinator.Events().Any(item =>
+            item.Type == "participantRemoved" && item.ParticipantId == joined.ParticipantId));
     }
 
     [TestMethod]
@@ -1665,6 +1887,28 @@ public sealed class RaceCoordinatorTests
         0,
         false,
         0);
+
+    private static RaceTelemetryUpdate CollisionTelemetry(
+        long sequence,
+        double worldX,
+        double velocityX,
+        long impactSequence,
+        double impactMagnitude) => Telemetry(0, .5) with
+        {
+            ClientMonotonicMilliseconds = sequence * 100,
+            HasWorldPosition = true,
+            WorldX = worldX,
+            WorldY = 0,
+            WorldZ = 50,
+            VelocityX = velocityX,
+            VelocityY = 0,
+            VelocityZ = 0,
+            ImpactSequence = impactSequence,
+            ImpactMagnitudeMps = impactMagnitude,
+            ImpactWorldX = worldX,
+            ImpactWorldY = 0,
+            ImpactWorldZ = 50
+        };
 
     private static void CompleteLap(
         RaceCoordinator coordinator,

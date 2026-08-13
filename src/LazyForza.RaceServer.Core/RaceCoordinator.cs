@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -27,6 +28,16 @@ public sealed class RaceCoordinator
     private const double LiveGapHistoryLaps = 1.25;
     private const double LiveGapProgressJitter = 0.002;
     private const double MaximumLiveGapDistanceLaps = 0.95;
+    private const double MinimumCollisionImpactMagnitudeMps = 2.8;
+    private const double MinimumCollisionRelativeSpeedMps = 3.0;
+    private const double MinimumCollisionSpeedLossMps = 1.5;
+    private const double MaximumCollisionHorizontalDistanceMeters = 4.8;
+    private const double MaximumCollisionVerticalDistanceMeters = 2.5;
+    private const int MaximumCollisionInvestigationsPerSession = 24;
+    private static readonly TimeSpan CollisionEvidenceLifetime = TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan CollisionPeerFreshness = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan CollisionPairCooldown = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan MinimumTelemetrySnapshotInterval = TimeSpan.FromMilliseconds(100);
     private readonly object sync = new();
     private readonly RaceServerOptions options;
     private readonly IRaceStatePersistence persistence;
@@ -36,6 +47,7 @@ public sealed class RaceCoordinator
     private readonly List<RaceInvestigationSnapshot> investigations = [];
     private readonly List<RaceEventSnapshot> events = [];
     private readonly HashSet<Guid> receivedLapEvents = [];
+    private readonly HashSet<string> revokedResumeTokens = new(StringComparer.Ordinal);
     private readonly Func<string, bool> playerPasswordMatches;
     private readonly Dictionary<int, string> manualSectorYellows = [];
     private string? manualFullCourseYellow;
@@ -48,6 +60,7 @@ public sealed class RaceCoordinator
     private int minimumRequiredPitStops;
     private int sectorCount;
     private bool automaticYellowEnabled;
+    private bool automaticCollisionInvestigationsEnabled;
     private double slowSpeedKph;
     private double slowDurationSeconds;
     private double severeLateralOffsetMeters;
@@ -82,6 +95,7 @@ public sealed class RaceCoordinator
     private RaceBannerSnapshot? banner;
     private long revision;
     private long eventSequence;
+    private long lastTelemetrySnapshotTimestamp;
 
     public RaceCoordinator(
         RaceServerOptions options,
@@ -95,6 +109,7 @@ public sealed class RaceCoordinator
         minimumRequiredPitStops = this.options.MinimumRequiredPitStops;
         sectorCount = this.options.SectorCount;
         automaticYellowEnabled = this.options.AutomaticYellowEnabled;
+        automaticCollisionInvestigationsEnabled = this.options.AutomaticCollisionInvestigationsEnabled;
         slowSpeedKph = this.options.SlowSpeedKph;
         slowDurationSeconds = this.options.SlowDurationSeconds;
         severeLateralOffsetMeters = this.options.SevereLateralOffsetMeters;
@@ -137,13 +152,15 @@ public sealed class RaceCoordinator
                 driversPerTeam,
                 teams,
                 trackLimitMode,
-                minimumRequiredPitStops);
+                minimumRequiredPitStops,
+                automaticCollisionInvestigationsEnabled);
     }
 
-    public IReadOnlyList<RaceEventSnapshot> Events(int limit = 200)
+    public IReadOnlyList<RaceEventSnapshot> Events(int limit = 200, long? afterSequence = null)
     {
         lock (sync)
             return events
+                .Where(item => afterSequence is null || item.Sequence > afterSequence.Value)
                 .TakeLast(Math.Clamp(limit, 20, 500))
                 .Reverse()
                 .ToArray();
@@ -177,6 +194,13 @@ public sealed class RaceCoordinator
                 rejected = new RaceLoginRejected(
                     "sectorMismatch",
                     $"客户端赛道为 {requestedSectorCount} 个分段，房间设置为 {sectorCount} 个分段。");
+            }
+            else if (!string.IsNullOrWhiteSpace(request.ResumeToken) &&
+                     revokedResumeTokens.Any(token => ConstantTimeEquals(token, request.ResumeToken)))
+            {
+                rejected = new RaceLoginRejected(
+                    "disconnectedByControl",
+                    "赛事总控已断开这个客户端。再次手动进入房间时可以重新申请席位。");
             }
             else
             {
@@ -283,11 +307,19 @@ public sealed class RaceCoordinator
                     resumed.IsConnected = true;
                     resumed.LastSeenAt = DateTimeOffset.UtcNow;
                     if (resumed.Status == RaceParticipantStatus.Disconnected)
-                        resumed.Status = phase is RaceSessionPhase.Race or RaceSessionPhase.Countdown or
-                            RaceSessionPhase.Practice or
-                            RaceSessionPhase.OutLap or RaceSessionPhase.FormationLap
-                            ? RaceParticipantStatus.OnTrack
-                            : RaceParticipantStatus.Connected;
+                    {
+                        resumed.Status = flag == RaceControlFlag.Chequered &&
+                                         phase is RaceSessionPhase.Race or RaceSessionPhase.Finished
+                            ? RaceParticipantStatus.DidNotFinish
+                            : phase is RaceSessionPhase.Race or RaceSessionPhase.Countdown or
+                                RaceSessionPhase.Practice or RaceSessionPhase.OutLap or
+                                RaceSessionPhase.FormationLap
+                                ? RaceParticipantStatus.OnTrack
+                                : RaceParticipantStatus.Connected;
+                        if (resumed.Status == RaceParticipantStatus.DidNotFinish)
+                            resumed.FinishedAt ??= DateTimeOffset.UtcNow;
+                    }
+                    TryCompleteRaceIfReady(DateTimeOffset.UtcNow);
                     IncrementRevision();
                     published = BuildSnapshot(DateTimeOffset.UtcNow);
                     accepted = new RaceLoginAccepted(resumed.Id, resumed.ResumeToken, published, published.ServerTime);
@@ -309,7 +341,7 @@ public sealed class RaceCoordinator
                     rejected = new RaceLoginRejected("sessionLocked", "比赛已开始，只允许已有车手重新连接。");
                     goto Complete;
                 }
-                if (participants.Count >= options.MaximumParticipants)
+                if (participants.Count(candidate => candidate.ReservationActive) >= options.MaximumParticipants)
                 {
                     rejected = new RaceLoginRejected("roomFull", $"房间人数已达到 {options.MaximumParticipants} 人上限。");
                     goto Complete;
@@ -378,8 +410,9 @@ public sealed class RaceCoordinator
         RaceTelemetryUpdate update,
         DateTimeOffset? receivedAt = null)
     {
-        RaceSessionSnapshot snapshot;
+        RaceSessionSnapshot? snapshot = null;
         var audits = new List<RaceAuditEntry>();
+        var important = false;
         lock (sync)
         {
             var now = receivedAt ?? DateTimeOffset.UtcNow;
@@ -409,8 +442,14 @@ public sealed class RaceCoordinator
             {
                 participant.TelemetryValid = false;
                 participant.ProgressContinuityReady = false;
+                participant.LastReportedImpactSequence = Math.Max(
+                    participant.LastReportedImpactSequence,
+                    normalized.ImpactSequence);
+                participant.LastProcessedImpactSequence = participant.LastReportedImpactSequence;
+                participant.LastImpactAt = null;
+                participant.LastImpactMagnitudeMps = 0;
+                participant.LastImpactSpeedLossMps = 0;
                 IncrementRevision();
-                snapshot = BuildSnapshot(now);
                 goto Complete;
             }
 
@@ -424,6 +463,16 @@ public sealed class RaceCoordinator
             participant.CurrentSector = Math.Clamp(normalized.CurrentSector, 0, sectorCount - 1);
             participant.CurrentLapSeconds = normalized.CurrentLapSeconds;
             participant.TrackToleranceMeters = normalized.TrackToleranceMeters;
+            participant.HasWorldPosition = normalized.HasWorldPosition;
+            participant.WorldX = normalized.WorldX;
+            participant.WorldY = normalized.WorldY;
+            participant.WorldZ = normalized.WorldZ;
+            participant.VelocityX = normalized.VelocityX;
+            participant.VelocityY = normalized.VelocityY;
+            participant.VelocityZ = normalized.VelocityZ;
+            participant.LastTelemetryReceivedAt = now;
+            participant.IsApproachingPit = normalized.IsApproachingPit;
+            participant.IsOnPitRoute = normalized.IsOnPitRoute;
             participant.GripCondition = normalized.GripCondition;
             if (phase == RaceSessionPhase.Race)
                 RecordRaceProgressSample(participant, now);
@@ -472,11 +521,14 @@ public sealed class RaceCoordinator
                 audits.Add(new RaceAuditEntry(now, "automaticGreen", $"{participant.DisplayName} 的异常状态已解除。", participant.Id));
             RefreshYellowFlag(now);
             RefreshChequeredImminent(now);
+            EvaluateCollisionInvestigations(participant, normalized, now, audits);
             IncrementRevision();
-            snapshot = BuildSnapshot(now);
         Complete:;
+            important = audits.Count > 0;
+            if (ShouldPublishTelemetrySnapshot(important))
+                snapshot = BuildSnapshot(now);
         }
-        Publish(snapshot, important: audits.Count > 0, audits);
+        if (snapshot is not null) Publish(snapshot, important, audits);
         return RaceCommandResult.Accepted;
     }
 
@@ -600,24 +652,7 @@ public sealed class RaceCoordinator
                 else
                     UpdateDriveThroughDeadline(participant, now, false, audits);
 
-                var classified = participants.Where(candidate =>
-                    candidate.IsConnected &&
-                    candidate.Status is not (RaceParticipantStatus.DidNotFinish or
-                        RaceParticipantStatus.Disqualified or RaceParticipantStatus.Disconnected));
-                if (flag == RaceControlFlag.Chequered && classified.All(candidate => candidate.Status == RaceParticipantStatus.Finished))
-                {
-                    phase = RaceSessionPhase.Finished;
-                    raceEndedAt = now;
-                    var winner = OrderParticipants(now).FirstOrDefault(candidate =>
-                        candidate.Status == RaceParticipantStatus.Finished);
-                    if (winner is not null)
-                        banner = NewBanner(
-                            RaceBannerKind.Winner,
-                            "比赛胜者",
-                            $"{winner.DisplayName}  {FormatRaceTime(AdjustedRaceTotalSeconds(winner, now))}",
-                            winner.Id,
-                            null);
-                }
+                TryCompleteRaceIfReady(now);
             }
             else if (phase == RaceSessionPhase.Race)
             {
@@ -664,16 +699,20 @@ public sealed class RaceCoordinator
             }
             if (!participant.IsConnected) return;
             participant.IsConnected = false;
-            participant.Status = RaceParticipantStatus.Disconnected;
+            if (participant.Status is not (RaceParticipantStatus.Finished or
+                    RaceParticipantStatus.DidNotFinish or RaceParticipantStatus.Disqualified))
+                participant.Status = RaceParticipantStatus.Disconnected;
             participant.AutomaticYellowActive = false;
             participant.HazardCandidateStartedAt = null;
             participant.HazardRecoveryStartedAt = null;
+            ResetCollisionState(participant);
             participant.LastSeenAt = DateTimeOffset.UtcNow;
             participant.QualifyingFinalLapPending = false;
             participant.PracticeFinalLapPending = false;
             CompleteQualifyingIfReady(DateTimeOffset.UtcNow);
             CompletePracticeIfReady(DateTimeOffset.UtcNow);
             RefreshYellowFlag(DateTimeOffset.UtcNow);
+            TryCompleteRaceIfReady(DateTimeOffset.UtcNow);
             IncrementRevision();
             snapshot = BuildSnapshot(DateTimeOffset.UtcNow);
             audit = new RaceAuditEntry(snapshot.ServerTime, "participantDisconnected", $"{participant.DisplayName} 断开连接。", participant.Id);
@@ -736,6 +775,7 @@ public sealed class RaceCoordinator
             minimumRequiredPitStops = Math.Clamp(command.MinimumRequiredPitStops, 0, 20);
             sectorCount = Math.Clamp(command.SectorCount, 1, 20);
             automaticYellowEnabled = command.AutomaticYellowEnabled;
+            automaticCollisionInvestigationsEnabled = command.AutomaticCollisionInvestigationsEnabled;
             slowSpeedKph = Math.Clamp(command.SlowSpeedKph, 3, 50);
             slowDurationSeconds = Math.Clamp(command.SlowDurationSeconds, 1, 15);
             severeLateralOffsetMeters = Math.Clamp(command.SevereLateralOffsetMeters, 5, 200);
@@ -766,6 +806,17 @@ public sealed class RaceCoordinator
                     participant.HazardRecoveryStartedAt = null;
                 }
                 RefreshYellowFlag(DateTimeOffset.UtcNow);
+            }
+            if (!automaticCollisionInvestigationsEnabled)
+            {
+                foreach (var participant in participants)
+                {
+                    participant.LastProcessedImpactSequence = participant.LastReportedImpactSequence;
+                    participant.LastImpactAt = null;
+                    participant.LastImpactMagnitudeMps = 0;
+                    participant.LastImpactSpeedLossMps = 0;
+                    participant.CollisionPairCooldowns.Clear();
+                }
             }
             IncrementRevision();
             snapshot = BuildSnapshot(DateTimeOffset.UtcNow);
@@ -927,6 +978,35 @@ public sealed class RaceCoordinator
             IncrementRevision();
             snapshot = BuildSnapshot(now);
             audit = new RaceAuditEntry(now, "sessionPhase", $"赛事阶段切换为 {phase}。", Detail: command);
+        }
+        Publish(snapshot, important: true, audit);
+        return RaceCommandResult.Accepted;
+    }
+
+    public RaceCommandResult SetAutomaticCollisionInvestigations(bool enabled)
+    {
+        RaceSessionSnapshot snapshot;
+        RaceAuditEntry audit;
+        lock (sync)
+        {
+            automaticCollisionInvestigationsEnabled = enabled;
+            if (!enabled)
+            {
+                foreach (var participant in participants)
+                {
+                    participant.LastProcessedImpactSequence = participant.LastReportedImpactSequence;
+                    participant.LastImpactAt = null;
+                    participant.LastImpactMagnitudeMps = 0;
+                    participant.LastImpactSpeedLossMps = 0;
+                    participant.CollisionPairCooldowns.Clear();
+                }
+            }
+            IncrementRevision();
+            snapshot = BuildSnapshot(DateTimeOffset.UtcNow);
+            audit = new RaceAuditEntry(
+                snapshot.ServerTime,
+                "collisionInvestigationSetting",
+                enabled ? "赛事总控已启用疑似碰撞自动调查。" : "赛事总控已关闭疑似碰撞自动调查；已有调查仍会保留。");
         }
         Publish(snapshot, important: true, audit);
         return RaceCommandResult.Accepted;
@@ -1106,7 +1186,11 @@ public sealed class RaceCoordinator
             var existing = investigations[index];
             if (existing.Status != RaceInvestigationStatus.Pending)
                 return RaceCommandResult.Reject("该调查已经处理。");
-            var participant = Find(existing.ParticipantId);
+            var targetParticipantId = command.ParticipantId ?? existing.ParticipantId;
+            var relatedParticipantIds = existing.RelatedParticipantIds ?? [existing.ParticipantId];
+            if (!relatedParticipantIds.Contains(targetParticipantId))
+                return RaceCommandResult.Reject("所选车手不在该调查事件中。");
+            var participant = Find(targetParticipantId);
             if (participant is null) return RaceCommandResult.Reject("参赛者不存在。");
 
             RacePenaltySnapshot? penalty = null;
@@ -1209,6 +1293,65 @@ public sealed class RaceCoordinator
                 $"{participant.DisplayName} 状态改为 {command.Status}：{NormalizeReason(command.Reason, 160) ?? "未填写原因"}。",
                 participant.Id,
                 command);
+        }
+        Publish(snapshot, important: true, audit);
+        return RaceCommandResult.Accepted;
+    }
+
+    public RaceCommandResult DisconnectAndReleaseClient(Guid clientId)
+    {
+        RaceSessionSnapshot snapshot;
+        RaceAuditEntry audit;
+        lock (sync)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var participant = Find(clientId);
+            if (participant is not null)
+            {
+                if (!participant.ReservationActive)
+                    return RaceCommandResult.Reject("该车手已经由总控断开。");
+                var releasedName = participant.DisplayName;
+                revokedResumeTokens.Add(participant.ResumeToken);
+                participant.ReservationActive = false;
+                participant.IsConnected = false;
+                participant.DisplayName = $"{releasedName} · 已断开";
+                if (participant.Status is not (RaceParticipantStatus.Finished or
+                        RaceParticipantStatus.DidNotFinish or RaceParticipantStatus.Disqualified))
+                    participant.Status = phase == RaceSessionPhase.Race
+                        ? RaceParticipantStatus.DidNotFinish
+                        : RaceParticipantStatus.Disconnected;
+                participant.FinishedAt ??= phase == RaceSessionPhase.Race ? now : null;
+                participant.AutomaticYellowActive = false;
+                participant.HazardCandidateStartedAt = null;
+                participant.HazardRecoveryStartedAt = null;
+                participant.QualifyingFinalLapPending = false;
+                participant.PracticeFinalLapPending = false;
+                CompleteQualifyingIfReady(now);
+                CompletePracticeIfReady(now);
+                RefreshYellowFlag(now);
+                TryCompleteRaceIfReady(now);
+                IncrementRevision();
+                snapshot = BuildSnapshot(now);
+                audit = new RaceAuditEntry(
+                    snapshot.ServerTime,
+                    "participantRemoved",
+                    $"赛事总控断开了 {releasedName}，显示名称已释放。",
+                    participant.Id);
+            }
+            else
+            {
+                var observer = observers.FirstOrDefault(candidate => candidate.Id == clientId);
+                if (observer is null) return RaceCommandResult.Reject("客户端不存在或已经离开房间。");
+                revokedResumeTokens.Add(observer.ResumeToken);
+                observers.Remove(observer);
+                IncrementRevision();
+                snapshot = BuildSnapshot(now);
+                audit = new RaceAuditEntry(
+                    snapshot.ServerTime,
+                    "observerRemoved",
+                    $"赛事总控断开了 OB {observer.DisplayName}，显示名称已释放。",
+                    observer.Id);
+            }
         }
         Publish(snapshot, important: true, audit);
         return RaceCommandResult.Accepted;
@@ -1909,6 +2052,166 @@ public sealed class RaceCoordinator
             now);
     }
 
+    private void EvaluateCollisionInvestigations(
+        ParticipantState participant,
+        RaceTelemetryUpdate telemetry,
+        DateTimeOffset now,
+        ICollection<RaceAuditEntry> audits)
+    {
+        var incomingEvidenceIsNew = telemetry.ImpactSequence > participant.LastReportedImpactSequence;
+        if (incomingEvidenceIsNew)
+        {
+            participant.LastReportedImpactSequence = telemetry.ImpactSequence;
+            participant.LastImpactAt = now - TimeSpan.FromMilliseconds(telemetry.ImpactAgeMilliseconds);
+            participant.LastImpactWorldX = telemetry.ImpactWorldX;
+            participant.LastImpactWorldY = telemetry.ImpactWorldY;
+            participant.LastImpactWorldZ = telemetry.ImpactWorldZ;
+            participant.LastImpactMagnitudeMps = telemetry.ImpactMagnitudeMps;
+            participant.LastImpactSpeedLossMps = telemetry.ImpactSpeedLossMps;
+        }
+        if (!automaticCollisionInvestigationsEnabled)
+        {
+            participant.LastProcessedImpactSequence = participant.LastReportedImpactSequence;
+            return;
+        }
+
+        if (!incomingEvidenceIsNew || telemetry.ImpactSequence <= participant.LastProcessedImpactSequence)
+            return;
+        participant.LastProcessedImpactSequence = telemetry.ImpactSequence;
+
+        if (phase != RaceSessionPhase.Race || flag == RaceControlFlag.Chequered ||
+            investigations.Count(item => item.CollisionEvidence is not null) >= MaximumCollisionInvestigationsPerSession ||
+            !telemetry.HasWorldPosition ||
+            telemetry.ImpactAgeMilliseconds < 0 ||
+            telemetry.ImpactAgeMilliseconds > CollisionEvidenceLifetime.TotalMilliseconds ||
+            telemetry.ImpactMagnitudeMps < MinimumCollisionImpactMagnitudeMps ||
+            participant.IsInPitLane || participant.IsInServiceZone ||
+            participant.IsApproachingPit || participant.IsOnPitRoute ||
+            IsCollisionTerminal(participant))
+            return;
+
+        var incidentAt = now - TimeSpan.FromMilliseconds(telemetry.ImpactAgeMilliseconds);
+        ParticipantState? nearest = null;
+        var nearestHorizontalDistance = double.MaxValue;
+        var nearestRelativeSpeed = 0d;
+        var nearestIncidentX = 0d;
+        var nearestIncidentY = 0d;
+        var nearestIncidentZ = 0d;
+        foreach (var candidate in participants)
+        {
+            if (candidate.Id == participant.Id || !candidate.ReservationActive || !candidate.IsConnected ||
+                !candidate.TelemetryValid || !candidate.HasWorldPosition ||
+                candidate.IsInPitLane || candidate.IsInServiceZone ||
+                candidate.IsApproachingPit || candidate.IsOnPitRoute ||
+                IsCollisionTerminal(candidate) ||
+                now - candidate.LastTelemetryReceivedAt > CollisionPeerFreshness)
+                continue;
+
+            if (candidate.LastImpactAt is not DateTimeOffset candidateImpactAt ||
+                Math.Abs((candidateImpactAt - incidentAt).TotalMilliseconds) >
+                    CollisionEvidenceLifetime.TotalMilliseconds ||
+                candidate.LastImpactMagnitudeMps < MinimumCollisionImpactMagnitudeMps)
+                continue;
+            var candidateX = candidate.LastImpactWorldX;
+            var candidateY = candidate.LastImpactWorldY;
+            var candidateZ = candidate.LastImpactWorldZ;
+            var deltaX = telemetry.ImpactWorldX - candidateX;
+            var deltaY = telemetry.ImpactWorldY - candidateY;
+            var deltaZ = telemetry.ImpactWorldZ - candidateZ;
+            var horizontalDistance = Math.Sqrt(deltaX * deltaX + deltaZ * deltaZ);
+            if (horizontalDistance > MaximumCollisionHorizontalDistanceMeters ||
+                Math.Abs(deltaY) > MaximumCollisionVerticalDistanceMeters)
+                continue;
+
+            var relativeX = telemetry.VelocityX - candidate.VelocityX;
+            var relativeZ = telemetry.VelocityZ - candidate.VelocityZ;
+            var relativeSpeed = Math.Sqrt(relativeX * relativeX + relativeZ * relativeZ);
+            if (relativeSpeed < MinimumCollisionRelativeSpeedMps &&
+                telemetry.ImpactSpeedLossMps < MinimumCollisionSpeedLossMps)
+                continue;
+            if (horizontalDistance >= nearestHorizontalDistance)
+                continue;
+            nearest = candidate;
+            nearestHorizontalDistance = horizontalDistance;
+            nearestRelativeSpeed = relativeSpeed;
+            nearestIncidentX = candidateX;
+            nearestIncidentY = candidateY;
+            nearestIncidentZ = candidateZ;
+        }
+
+        if (nearest is null) return;
+        var pairKey = CollisionPairKey(participant.Id, nearest.Id);
+        if (participant.CollisionPairCooldowns.TryGetValue(pairKey, out var cooldownUntil) && cooldownUntil > now ||
+            nearest.CollisionPairCooldowns.TryGetValue(pairKey, out cooldownUntil) && cooldownUntil > now ||
+            investigations.Any(item =>
+                item.Status == RaceInvestigationStatus.Pending &&
+                now - item.DetectedAt < CollisionPairCooldown &&
+                item.RelatedParticipantIds?.Contains(participant.Id) == true &&
+                item.RelatedParticipantIds.Contains(nearest.Id)))
+            return;
+
+        var nextAllowedAt = now + CollisionPairCooldown;
+        participant.CollisionPairCooldowns[pairKey] = nextAllowedAt;
+        nearest.CollisionPairCooldowns[pairKey] = nextAllowedAt;
+        var related = new[] { participant.Id, nearest.Id };
+        var lapNumber = Math.Max(1, Math.Max(participant.CompletedLaps, nearest.CompletedLaps) + 1);
+        var offense =
+            $"疑似车辆接触：{participant.DisplayName} 与 {nearest.DisplayName}；" +
+            $"最近距离 {nearestHorizontalDistance:0.0} m，运动突变 {telemetry.ImpactMagnitudeMps:0.0} m/s，" +
+            $"相对速度 {nearestRelativeSpeed * 3.6:0} km/h。仅供总控结合画面核查，不代表责任判定";
+        var investigation = new RaceInvestigationSnapshot(
+            Guid.NewGuid(),
+            participant.Id,
+            offense,
+            now,
+            lapNumber,
+            RaceInvestigationStatus.Pending,
+            RelatedParticipantIds: related,
+            CollisionEvidence: new RaceCollisionEvidenceSnapshot(
+                incidentAt,
+                participant.Id,
+                nearest.Id,
+                participant.DisplayName,
+                nearest.DisplayName,
+                participant.ThemeColor,
+                nearest.ThemeColor,
+                telemetry.ImpactWorldX,
+                telemetry.ImpactWorldY,
+                telemetry.ImpactWorldZ,
+                nearestIncidentX,
+                nearestIncidentY,
+                nearestIncidentZ,
+                telemetry.VelocityX,
+                telemetry.VelocityZ,
+                nearest.VelocityX,
+                nearest.VelocityZ,
+                nearestHorizontalDistance,
+                Math.Abs(telemetry.ImpactWorldY - nearestIncidentY),
+                nearestRelativeSpeed * 3.6,
+                telemetry.ImpactMagnitudeMps,
+                telemetry.ImpactSpeedLossMps));
+        investigations.Add(investigation);
+        banner = NewBanner(
+            RaceBannerKind.Information,
+            "正在调查 · 疑似碰撞",
+            $"{participant.DisplayName} ↔ {nearest.DisplayName} · 第 {lapNumber} 圈",
+            null,
+            TimeSpan.FromSeconds(8)) with { IsInvestigation = true };
+        audits.Add(new RaceAuditEntry(
+            now,
+            "collisionInvestigationOpened",
+            $"{participant.DisplayName} 与 {nearest.DisplayName} 发生疑似车辆接触，已交由总控调查（第 {lapNumber} 圈）。",
+            participant.Id,
+            investigation));
+    }
+
+    private static bool IsCollisionTerminal(ParticipantState participant) =>
+        participant.Status is RaceParticipantStatus.Finished or RaceParticipantStatus.DidNotFinish or
+            RaceParticipantStatus.Disqualified or RaceParticipantStatus.Disconnected;
+
+    private static string CollisionPairKey(Guid left, Guid right) =>
+        left.CompareTo(right) <= 0 ? $"{left:N}:{right:N}" : $"{right:N}:{left:N}";
+
     private TrackLimitDecision? EvaluateTrackLimits(
         ParticipantState participant,
         RaceTelemetryUpdate telemetry,
@@ -2367,6 +2670,7 @@ public sealed class RaceCoordinator
         participant.LastTelemetryMonotonicMilliseconds = 0;
         participant.LastContinuityProgress = 0;
         participant.ShortcutPenaltyIssued = false;
+        ResetCollisionState(participant);
         participant.Status = participant.IsConnected
             ? RaceParticipantStatus.OnTrack
             : RaceParticipantStatus.Disconnected;
@@ -2505,6 +2809,30 @@ public sealed class RaceCoordinator
     private bool IsRaceClassificationPhase(RaceSessionPhase value) =>
         value is RaceSessionPhase.Race or RaceSessionPhase.Finished ||
         value == RaceSessionPhase.Suspended && phaseBeforeSuspension == RaceSessionPhase.Race;
+
+    private bool TryCompleteRaceIfReady(DateTimeOffset now)
+    {
+        if (phase != RaceSessionPhase.Race || flag != RaceControlFlag.Chequered) return false;
+        var awaitingFinish = participants.Any(candidate =>
+            candidate.IsConnected &&
+            candidate.Status is not (RaceParticipantStatus.Finished or
+                RaceParticipantStatus.DidNotFinish or RaceParticipantStatus.Disqualified or
+                RaceParticipantStatus.Disconnected));
+        if (awaitingFinish) return false;
+
+        phase = RaceSessionPhase.Finished;
+        raceEndedAt = now;
+        var winner = OrderParticipants(now).FirstOrDefault(candidate =>
+            candidate.ReservationActive && candidate.Status == RaceParticipantStatus.Finished);
+        if (winner is not null)
+            banner = NewBanner(
+                RaceBannerKind.Winner,
+                "比赛胜者",
+                $"{winner.DisplayName}  {FormatRaceTime(AdjustedRaceTotalSeconds(winner, now))}",
+                winner.Id,
+                null);
+        return true;
+    }
 
     private double RaceElapsedSeconds(DateTimeOffset now)
     {
@@ -2645,7 +2973,9 @@ public sealed class RaceCoordinator
 
     private RaceSessionSnapshot BuildSnapshot(DateTimeOffset now)
     {
-        var ordered = OrderParticipants(now);
+        var ordered = OrderParticipants(now)
+            .Where(candidate => candidate.ReservationActive)
+            .ToList();
         var snapshots = new List<RaceParticipantSnapshot>(ordered.Count);
         var leader = ordered.FirstOrDefault();
         ParticipantState? prior = null;
@@ -2801,8 +3131,9 @@ public sealed class RaceCoordinator
 
     private List<ParticipantState> OrderParticipants(DateTimeOffset now)
     {
+        var activeParticipants = participants.Where(candidate => candidate.ReservationActive);
         if ((phase is RaceSessionPhase.Qualifying or RaceSessionPhase.Grid) && qualifyingSessionCount > 1)
-            return participants
+            return activeParticipants
                 .OrderBy(QualifyingClassificationGroup)
                 .ThenBy(candidate => QualifyingDisplayedBestLap(candidate) is null)
                 .ThenBy(QualifyingDisplayedBestLap)
@@ -2810,7 +3141,7 @@ public sealed class RaceCoordinator
                 .ToList();
 
         if (phase is RaceSessionPhase.Practice or RaceSessionPhase.Qualifying or RaceSessionPhase.Grid)
-            return participants
+            return activeParticipants
                 .OrderBy(candidate => candidate.BestLapSeconds is null)
                 .ThenBy(candidate => candidate.BestLapSeconds)
                 .ThenBy(candidate => candidate.JoinedAt)
@@ -2819,7 +3150,7 @@ public sealed class RaceCoordinator
         if (phase is RaceSessionPhase.OutLap or RaceSessionPhase.FormationLap or
             RaceSessionPhase.Race or RaceSessionPhase.Countdown or
             RaceSessionPhase.Suspended or RaceSessionPhase.Finished)
-            return participants
+            return activeParticipants
                 .OrderBy(candidate => TerminalRank(candidate.Status))
                 .ThenByDescending(candidate => candidate.CompletedLaps)
                 .ThenBy(candidate => candidate.Status == RaceParticipantStatus.Finished
@@ -2829,7 +3160,7 @@ public sealed class RaceCoordinator
                 .ThenBy(candidate => candidate.JoinedAt)
                 .ToList();
 
-        return participants
+        return activeParticipants
             .OrderByDescending(candidate => candidate.IsReady)
             .ThenBy(candidate => candidate.JoinedAt)
             .ToList();
@@ -2917,6 +3248,7 @@ public sealed class RaceCoordinator
             participant.PitSpeedCandidateStartedAt = null;
             participant.PitSpeedPenaltyIssued = false;
             participant.LapHasTrackLimitIncident = false;
+            ResetCollisionState(participant);
             ResetPenaltyServiceState(participant);
             participant.Status = participant.IsConnected ? RaceParticipantStatus.OnTrack : RaceParticipantStatus.Disconnected;
         }
@@ -2995,6 +3327,7 @@ public sealed class RaceCoordinator
             participant.PitSpeedCandidateStartedAt = null;
             participant.PitSpeedPenaltyIssued = false;
             participant.LapHasTrackLimitIncident = false;
+            ResetCollisionState(participant);
             ResetPenaltyServiceState(participant);
             participant.Status = participant.IsConnected ? RaceParticipantStatus.Connected : RaceParticipantStatus.Disconnected;
         }
@@ -3017,6 +3350,20 @@ public sealed class RaceCoordinator
         participant.PitVisitPaused = false;
     }
 
+    private static void ResetCollisionState(ParticipantState participant)
+    {
+        participant.TelemetryValid = false;
+        participant.HasWorldPosition = false;
+        participant.IsApproachingPit = false;
+        participant.IsOnPitRoute = false;
+        participant.LastTelemetryReceivedAt = default;
+        participant.LastProcessedImpactSequence = participant.LastReportedImpactSequence;
+        participant.LastImpactAt = null;
+        participant.LastImpactMagnitudeMps = 0;
+        participant.LastImpactSpeedLossMps = 0;
+        participant.CollisionPairCooldowns.Clear();
+    }
+
     private void ClearYellowState()
     {
         manualFullCourseYellow = null;
@@ -3032,6 +3379,7 @@ public sealed class RaceCoordinator
     private (ParticipantState Participant, double Time)? FastestLap()
     {
         var fastest = participants
+            .Where(candidate => candidate.ReservationActive)
             .Where(candidate => phase != RaceSessionPhase.Qualifying || candidate.QualifyingEligible)
             .Where(candidate => candidate.BestLapSeconds is not null)
             .OrderBy(candidate => candidate.BestLapSeconds)
@@ -3042,13 +3390,14 @@ public sealed class RaceCoordinator
 
     private IReadOnlyList<double?> FastestSectors()
     {
-        var count = participants.Count == 0
+        var activeParticipants = participants.Where(candidate => candidate.ReservationActive).ToArray();
+        var count = activeParticipants.Length == 0
             ? 0
-            : participants.Max(candidate => candidate.BestSectorSeconds.Count);
+            : activeParticipants.Max(candidate => candidate.BestSectorSeconds.Count);
         var result = new double?[count];
         for (var index = 0; index < count; index++)
         {
-            var candidates = participants
+            var candidates = activeParticipants
                 .Where(candidate => phase != RaceSessionPhase.Qualifying || candidate.QualifyingEligible)
                 .Where(candidate => candidate.BestSectorSeconds.Count > index)
                 .Select(candidate => candidate.BestSectorSeconds[index])
@@ -3127,6 +3476,7 @@ public sealed class RaceCoordinator
 
     private bool TeamHasCapacity(string teamId, Guid? exceptParticipantId = null) =>
         participants.Count(candidate =>
+            candidate.ReservationActive &&
             candidate.Id != exceptParticipantId &&
             string.Equals(candidate.TeamId, teamId, StringComparison.OrdinalIgnoreCase)) < driversPerTeam;
 
@@ -3137,6 +3487,7 @@ public sealed class RaceCoordinator
                 Team = team,
                 Index = index,
                 Members = participants.Count(candidate =>
+                    candidate.ReservationActive &&
                     candidate.Id != exceptParticipantId &&
                     string.Equals(candidate.TeamId, team.Id, StringComparison.OrdinalIgnoreCase))
             })
@@ -3223,7 +3574,8 @@ public sealed class RaceCoordinator
     private ParticipantState? FindByResumeToken(string? resumeToken) =>
         string.IsNullOrWhiteSpace(resumeToken)
             ? null
-            : participants.FirstOrDefault(candidate => ConstantTimeEquals(candidate.ResumeToken, resumeToken));
+            : participants.FirstOrDefault(candidate =>
+                candidate.ReservationActive && ConstantTimeEquals(candidate.ResumeToken, resumeToken));
 
     private ObserverState? FindObserverByResumeToken(string? resumeToken) =>
         string.IsNullOrWhiteSpace(resumeToken)
@@ -3232,6 +3584,7 @@ public sealed class RaceCoordinator
 
     private bool HasDuplicateName(string displayName, Guid? exceptParticipantId) =>
         participants.Any(candidate =>
+            candidate.ReservationActive &&
             candidate.Id != exceptParticipantId &&
             string.Equals(candidate.DisplayName, displayName, StringComparison.OrdinalIgnoreCase)) ||
         observers.Any(candidate =>
@@ -3244,6 +3597,16 @@ public sealed class RaceCoordinator
         CryptographicOperations.FixedTimeEquals(Hash(left), Hash(right));
 
     private void IncrementRevision() => revision++;
+
+    private bool ShouldPublishTelemetrySnapshot(bool important)
+    {
+        var timestamp = Stopwatch.GetTimestamp();
+        if (!important && lastTelemetrySnapshotTimestamp != 0 &&
+            Stopwatch.GetElapsedTime(lastTelemetrySnapshotTimestamp, timestamp) < MinimumTelemetrySnapshotInterval)
+            return false;
+        lastTelemetrySnapshotTimestamp = timestamp;
+        return true;
+    }
 
     private void Publish(RaceSessionSnapshot snapshot, bool important, RaceAuditEntry? audit = null)
         => Publish(
@@ -3335,6 +3698,7 @@ public sealed class RaceCoordinator
         public string? TeamId { get; set; } = teamId;
         public string? TeamColor { get; set; } = teamColor;
         public DateTimeOffset JoinedAt { get; } = joinedAt;
+        public bool ReservationActive { get; set; } = true;
         public DateTimeOffset LastSeenAt { get; set; } = joinedAt;
         public RaceParticipantStatus Status { get; set; } = RaceParticipantStatus.Connected;
         public bool IsConnected { get; set; } = true;
@@ -3347,6 +3711,25 @@ public sealed class RaceCoordinator
         public double MapX { get; set; }
         public double MapY { get; set; }
         public double SpeedKph { get; set; }
+        public bool HasWorldPosition { get; set; }
+        public double WorldX { get; set; }
+        public double WorldY { get; set; }
+        public double WorldZ { get; set; }
+        public double VelocityX { get; set; }
+        public double VelocityY { get; set; }
+        public double VelocityZ { get; set; }
+        public DateTimeOffset LastTelemetryReceivedAt { get; set; }
+        public bool IsApproachingPit { get; set; }
+        public bool IsOnPitRoute { get; set; }
+        public long LastReportedImpactSequence { get; set; }
+        public long LastProcessedImpactSequence { get; set; }
+        public DateTimeOffset? LastImpactAt { get; set; }
+        public double LastImpactWorldX { get; set; }
+        public double LastImpactWorldY { get; set; }
+        public double LastImpactWorldZ { get; set; }
+        public double LastImpactMagnitudeMps { get; set; }
+        public double LastImpactSpeedLossMps { get; set; }
+        public Dictionary<string, DateTimeOffset> CollisionPairCooldowns { get; } = [];
         public double CurrentLapSeconds { get; set; }
         public double? LastLapSeconds { get; set; }
         public double? BestLapSeconds { get; set; }

@@ -106,6 +106,7 @@
           <details class="room-submenu">
             <summary><span>判定与自动化</span><small>黄旗、边界与恢复阈值</small></summary>
             <div class="room-submenu-body">
+            <label class="toggle"><input id="automaticCollisionInvestigations" type="checkbox"><span>启用疑似碰撞自动调查</span></label>
             <div class="field-grid hazard-fields">
               <label>赛道边界处理<select id="trackLimitMode"><option value="warningsOnly">仅记录警告，交总控核查</option><option value="automatic">自动警告与罚时</option><option value="disabled">关闭判定</option></select></label>
               <label>极低速阈值 km/h<input id="slowSpeedKph" type="number" min="3" max="50" step="1"></label>
@@ -113,6 +114,7 @@
               <label>严重偏离/严重切弯距离 m<input id="severeLateralOffsetMeters" type="number" min="5" max="200" step="1"></label>
               <label>恢复确认秒数<input id="recoveryDurationSeconds" type="number" min="1" max="15" step="0.5"></label>
             </div>
+            <p class="muted compact">碰撞识别只会在两名车手同时使用支持该功能的 LazyForza、遥测足够新鲜且车辆近距离接触时创建调查，不会自动认定责任或下发处罚。总控应结合直播、录像或车手说明决定是否处罚其中一人；墙体、落地、维修区拥堵和网络过期数据会尽量排除。</p>
             <p class="muted compact">排位赛和正赛都会记录赛道边界事件。系统会结合路线进度、车速和驶离期间的实际路程估算是否获得距离优势；单纯压草、冲入砂石或合法驶入维修区不会因为横向距离过大就自动罚时。“仅记录警告”会保留次数和证据，交由总控人工核查；“自动警告与罚时”才会在三次轻微警告后罚时，明确的严重获利会直接罚时。</p>
             </div>
           </details>
