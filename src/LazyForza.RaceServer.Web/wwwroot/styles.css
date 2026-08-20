@@ -41,7 +41,7 @@ button, input, select, summary, a { -webkit-tap-highlight-color: transparent; }
 
 .topbar { min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
 .brand-lockup { display: flex; align-items: center; gap: 14px; }
-.brand-mark { width: 50px; height: 50px; display: grid; place-items: center; color: #070a0d; background: linear-gradient(145deg, #fff, #b8c4ce); font-size: 18px; font-style: italic; font-weight: 950; clip-path: polygon(0 0, 100% 0, 82% 100%, 0 100%); }
+.brand-mark { width: 50px; height: 50px; display: block; flex: 0 0 auto; object-fit: contain; }
 .brand-copy h1 { margin: 2px 0 0; font-size: 25px; line-height: 1.1; letter-spacing: -.035em; }
 .eyebrow { margin: 0; color: var(--cyan); font-size: 9px; font-weight: 900; letter-spacing: .18em; }
 .connection-state { display: inline-flex; align-items: center; gap: 9px; min-height: 34px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted-strong); background: rgba(10,15,22,.82); font-size: 11px; font-weight: 700; }
