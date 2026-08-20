@@ -13,23 +13,31 @@ describe("RaceCore", () => {
     }).ok).toBe(true);
     const started = new Date("2026-08-13T12:00:00Z");
     const peer = { ...telemetry(), hasWorldPosition: true, worldX: 101.5, worldY: 0, worldZ: 50,
-      velocityX: 10, velocityY: 0, velocityZ: 0 };
+      velocityX: 10, velocityY: 0, velocityZ: 0, hasWorldVelocity: true,
+      worldVelocityX: 10, worldVelocityY: 0, worldVelocityZ: 0 };
     const impact = { ...telemetry(), hasWorldPosition: true, worldX: 100, worldY: 0, worldZ: 50,
       velocityX: 20, velocityY: 0, velocityZ: 0, impactSequence: 1, impactMagnitudeMps: 4.4,
       impactSpeedLossMps: 2.2, impactWorldX: 100, impactWorldY: 0, impactWorldZ: 50,
-      impactAgeMilliseconds: 80 };
+      impactAgeMilliseconds: 80, hasWorldVelocity: true,
+      worldVelocityX: 20, worldVelocityY: 0, worldVelocityZ: 0,
+      impactWorldVelocityX: 20, impactWorldVelocityY: 0, impactWorldVelocityZ: 0 };
     core.updateTelemetry(other, peer, started);
     core.updateTelemetry(reporter, impact, new Date(started.getTime() + 80));
     expect(core.snapshot().investigations).toHaveLength(0);
 
     core.applySession({ phase: "race", totalRaceLaps: 1 }, new Date(started.getTime() + 1_000));
-    core.updateTelemetry(other, { ...peer, impactSequence: 1, impactMagnitudeMps: 3.6,
-      impactSpeedLossMps: 1.7, impactWorldX: 101.5, impactWorldY: 0, impactWorldZ: 50,
-      impactAgeMilliseconds: 40 }, new Date(started.getTime() + 2_000));
+    core.updateTelemetry(reporter, { ...impact, impactSequence: 0, impactMagnitudeMps: 0,
+      impactSpeedLossMps: 0, impactAgeMilliseconds: 0 }, new Date(started.getTime() + 1_700));
+    core.updateTelemetry(other, { ...peer, worldX: 105 }, new Date(started.getTime() + 1_700));
+    core.updateTelemetry(other, peer, new Date(started.getTime() + 2_000));
     core.updateTelemetry(reporter, { ...impact, impactSequence: 2 }, new Date(started.getTime() + 2_080));
     const investigation = core.snapshot().investigations?.[0];
     expect(investigation?.relatedParticipantIds).toEqual([reporter, other]);
-    expect(investigation?.collisionEvidence).toMatchObject({ horizontalDistanceMeters: 1.5 });
+    expect(investigation?.collisionEvidence).toMatchObject({
+      horizontalDistanceMeters: 1.5,
+      bothDriversReportedImpact: false
+    });
+    expect(investigation?.collisionEvidence?.approachDistanceReductionMeters).toBeGreaterThanOrEqual(3);
     expect(core.setAutomaticCollisionInvestigations(false).ok).toBe(true);
     expect(core.roomSettings().automaticCollisionInvestigationsEnabled).toBe(false);
     expect(core.snapshot().investigations).toHaveLength(1);
@@ -42,6 +50,121 @@ describe("RaceCore", () => {
     expect(core.snapshot().penalties).toContainEqual(expect.objectContaining({
       participantId: other, valueSeconds: 4, isPostRaceAdjustment: true
     }));
+  });
+
+  it("does not treat official smashable-object evidence as a vehicle collision", () => {
+    const core = createCore();
+    const reporter = connect(core, "甲"), other = connect(core, "乙");
+    expect(core.applyRoomSettings({
+      ...core.roomSettings(), automaticCollisionInvestigationsEnabled: true
+    }).ok).toBe(true);
+    const started = new Date("2026-08-20T12:00:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 5 }, started);
+    const motion = { ...telemetry(), hasWorldPosition: true, worldY: 0, worldZ: 50,
+      hasWorldVelocity: true, worldVelocityY: 0, worldVelocityZ: 0 };
+    core.updateTelemetry(reporter, { ...motion, worldX: 100, worldVelocityX: 20 },
+      new Date(started.getTime() + 100));
+    core.updateTelemetry(other, { ...motion, worldX: 105, worldVelocityX: 10 },
+      new Date(started.getTime() + 100));
+    core.updateTelemetry(other, { ...motion, worldX: 101.5, worldVelocityX: 10 },
+      new Date(started.getTime() + 400));
+    core.updateTelemetry(reporter, {
+      ...motion, worldX: 100, worldVelocityX: 20, impactSequence: 1,
+      impactMagnitudeMps: 5, impactSpeedLossMps: 2, impactWorldX: 100,
+      impactWorldY: 0, impactWorldZ: 50, impactAgeMilliseconds: 80,
+      impactWorldVelocityX: 20, impactWorldVelocityY: 0, impactWorldVelocityZ: 0,
+      impactSmashableVelDiff: 5, impactSmashableMass: 25
+    }, new Date(started.getTime() + 480));
+
+    expect(core.snapshot().investigations).toHaveLength(0);
+  });
+
+  it("groups repeated contacts for the same driver pair into one investigation", () => {
+    const core = createCore();
+    const reporter = connect(core, "甲"), other = connect(core, "乙");
+    core.applyRoomSettings({
+      ...core.roomSettings(), automaticCollisionInvestigationsEnabled: true
+    });
+    const started = new Date("2026-08-20T11:00:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 10 }, started);
+    const motion = { ...telemetry(), hasWorldPosition: true, worldY: 0, worldZ: 50,
+      hasWorldVelocity: true, worldVelocityY: 0, worldVelocityZ: 0 };
+    core.updateTelemetry(other, {
+      ...motion, worldX: 101, worldVelocityX: 10, impactSequence: 1,
+      impactMagnitudeMps: 3.5, impactWorldX: 101, impactWorldY: 0, impactWorldZ: 50,
+      impactWorldVelocityX: 10, impactWorldVelocityY: 0, impactWorldVelocityZ: 0
+    }, new Date(started.getTime() + 1_000));
+    core.updateTelemetry(reporter, {
+      ...motion, worldX: 100, worldVelocityX: 20, impactSequence: 1,
+      impactMagnitudeMps: 4.5, impactWorldX: 100, impactWorldY: 0, impactWorldZ: 50,
+      impactAgeMilliseconds: 50, impactWorldVelocityX: 20,
+      impactWorldVelocityY: 0, impactWorldVelocityZ: 0
+    }, new Date(started.getTime() + 1_050));
+    const first = core.snapshot().investigations?.[0];
+    const firstBannerId = core.snapshot().banner?.id;
+
+    core.updateTelemetry(other, {
+      ...motion, worldX: 100.8, worldVelocityX: 9, impactSequence: 2,
+      impactMagnitudeMps: 4, impactWorldX: 100.8, impactWorldY: 0, impactWorldZ: 50,
+      impactWorldVelocityX: 9, impactWorldVelocityY: 0, impactWorldVelocityZ: 0
+    }, new Date(started.getTime() + 3_000));
+    core.updateTelemetry(reporter, {
+      ...motion, worldX: 100, worldVelocityX: 21, impactSequence: 2,
+      impactMagnitudeMps: 6, impactWorldX: 100, impactWorldY: 0, impactWorldZ: 50,
+      impactAgeMilliseconds: 50, impactWorldVelocityX: 21,
+      impactWorldVelocityY: 0, impactWorldVelocityZ: 0
+    }, new Date(started.getTime() + 3_050));
+
+    const grouped = core.snapshot().investigations;
+    expect(grouped).toHaveLength(1);
+    expect(grouped?.[0]).toMatchObject({
+      id: first?.id,
+      collisionEvidence: {
+        contactCount: 2,
+        impactMagnitudeMps: 6
+      }
+    });
+    expect(grouped?.[0].collisionEvidence?.horizontalDistanceMeters).toBeCloseTo(.8, 3);
+    expect(grouped?.[0].offense).toContain("连续疑似车辆接触（2 次");
+    expect(core.snapshot().banner?.id).toBe(firstBannerId);
+    expect(core.events().filter(event => event.type === "collisionInvestigationOpened")).toHaveLength(1);
+
+    core.updateTelemetry(other, {
+      ...motion, worldX: 101, worldVelocityX: 10, impactSequence: 3,
+      impactMagnitudeMps: 4, impactWorldX: 101, impactWorldY: 0, impactWorldZ: 50,
+      impactWorldVelocityX: 10, impactWorldVelocityY: 0, impactWorldVelocityZ: 0
+    }, new Date(started.getTime() + 16_000));
+    core.updateTelemetry(reporter, {
+      ...motion, worldX: 100, worldVelocityX: 20, impactSequence: 3,
+      impactMagnitudeMps: 5, impactWorldX: 100, impactWorldY: 0, impactWorldZ: 50,
+      impactAgeMilliseconds: 50, impactWorldVelocityX: 20,
+      impactWorldVelocityY: 0, impactWorldVelocityZ: 0
+    }, new Date(started.getTime() + 16_050));
+    expect(core.snapshot().investigations).toHaveLength(2);
+    expect(core.events().filter(event => event.type === "collisionInvestigationOpened")).toHaveLength(2);
+  });
+
+  it("does not treat parallel braking without an approach trajectory as contact", () => {
+    const core = createCore();
+    const reporter = connect(core, "甲"), other = connect(core, "乙");
+    core.applyRoomSettings({
+      ...core.roomSettings(), automaticCollisionInvestigationsEnabled: true
+    });
+    const started = new Date("2026-08-20T12:10:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 5 }, started);
+    const motion = { ...telemetry(), hasWorldPosition: true, worldY: 0, worldZ: 50,
+      hasWorldVelocity: true, worldVelocityX: 20, worldVelocityY: 0, worldVelocityZ: 0 };
+    core.updateTelemetry(reporter, { ...motion, worldX: 100 }, new Date(started.getTime() + 100));
+    core.updateTelemetry(other, { ...motion, worldX: 102 }, new Date(started.getTime() + 100));
+    core.updateTelemetry(other, { ...motion, worldX: 102 }, new Date(started.getTime() + 400));
+    core.updateTelemetry(reporter, {
+      ...motion, worldX: 100, impactSequence: 1, impactMagnitudeMps: 4,
+      impactSpeedLossMps: 2, impactWorldX: 100, impactWorldY: 0, impactWorldZ: 50,
+      impactAgeMilliseconds: 80, impactWorldVelocityX: 20,
+      impactWorldVelocityY: 0, impactWorldVelocityZ: 0
+    }, new Date(started.getTime() + 480));
+
+    expect(core.snapshot().investigations).toHaveLength(0);
   });
 
   it("supports exactly twelve participants and rejects the thirteenth", () => {
@@ -649,6 +772,25 @@ describe("RaceCore", () => {
     expect(refreshed.gapToLeaderSeconds).toBe(3);
     expect(refreshed.intervalSeconds).toBe(3);
     expect(refreshed.completedLaps).toBe(0);
+  });
+
+  it("keeps a seconds gap when the leader crosses before the trailing driver", () => {
+    const core = createCore();
+    const leader = connect(core, "甲"), trailing = connect(core, "乙");
+    const started = new Date("2026-08-09T10:45:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 5 }, started);
+
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .90 },
+      new Date(started.getTime() + 50_000));
+    core.updateTelemetry(trailing, { ...telemetry(), trackProgress: .90 },
+      new Date(started.getTime() + 55_000));
+    core.completeLap(leader, lap("leader-crossing", 60, true, 1),
+      new Date(started.getTime() + 60_000));
+
+    const trailingSnapshot = core.snapshot(new Date(started.getTime() + 60_000))
+      .participants.find(item => item.id === trailing);
+    expect(trailingSnapshot?.completedLaps).toBe(0);
+    expect(trailingSnapshot?.gapToLeaderSeconds).toBe(5);
   });
 
   it("freezes race elapsed time during a red flag", () => {

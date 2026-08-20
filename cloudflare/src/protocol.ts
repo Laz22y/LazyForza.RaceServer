@@ -75,6 +75,15 @@ export interface TelemetryUpdate {
   impactWorldY?: number;
   impactWorldZ?: number;
   impactAgeMilliseconds?: number;
+  hasWorldVelocity?: boolean;
+  worldVelocityX?: number;
+  worldVelocityY?: number;
+  worldVelocityZ?: number;
+  impactWorldVelocityX?: number;
+  impactWorldVelocityY?: number;
+  impactWorldVelocityZ?: number;
+  impactSmashableVelDiff?: number;
+  impactSmashableMass?: number;
 }
 
 export interface LapCompleted {
@@ -139,6 +148,10 @@ export interface CollisionEvidenceSnapshot {
   relativeSpeedKph: number;
   impactMagnitudeMps: number;
   impactSpeedLossMps: number;
+  approachDistanceReductionMeters?: number;
+  bothDriversReportedImpact?: boolean;
+  contactCount?: number;
+  lastIncidentAt?: string | null;
 }
 
 export interface ParticipantSnapshot {

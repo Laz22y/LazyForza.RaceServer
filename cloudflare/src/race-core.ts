@@ -21,6 +21,7 @@ import {
   type PenaltySnapshot,
   type InvestigationCommand,
   type InvestigationSnapshot,
+  type CollisionEvidenceSnapshot,
   type ReadyUpdate,
   type RoomSettings,
   type SessionCommand,
@@ -96,6 +97,8 @@ interface ParticipantState {
   lastImpactWorldZ?: number;
   lastImpactMagnitudeMps?: number;
   lastImpactSpeedLossMps?: number;
+  lastImpactSmashableVelDiff?: number;
+  lastImpactSmashableMass?: number;
   currentLapSeconds: number;
   lastLapSeconds?: number | null;
   bestLapSeconds?: number | null;
@@ -168,6 +171,17 @@ interface ObserverState {
 interface RaceProgressSample {
   distanceLaps: number;
   elapsedSeconds: number;
+}
+
+interface CollisionPositionSample {
+  at: number;
+  worldX: number;
+  worldY: number;
+  worldZ: number;
+  hasWorldVelocity: boolean;
+  worldVelocityX: number;
+  worldVelocityY: number;
+  worldVelocityZ: number;
 }
 
 export interface StoredRaceState {
@@ -286,11 +300,15 @@ export class RaceCore {
   private static readonly maximumLiveGapSamples = 3_600;
   private static readonly liveGapHistoryLaps = 1.25;
   private static readonly liveGapProgressJitter = .002;
-  private static readonly maximumLiveGapDistanceLaps = .95;
+  private static readonly maximumLiveGapDistanceLaps = .999;
   private static readonly collisionPairCooldownMilliseconds = 12_000;
+  private static readonly collisionTrajectoryLifetimeMilliseconds = 2_000;
+  private static readonly collisionTrajectoryMatchToleranceMilliseconds = 650;
+  private static readonly collisionApproachLookbackMilliseconds = 280;
   private readonly maximumParticipants: number;
   private readonly liveProgressSamples = new Map<string, RaceProgressSample[]>();
   private readonly collisionPairCooldowns = new Map<string, number>();
+  private readonly collisionTrajectories = new Map<string, CollisionPositionSample[]>();
   private state: StoredRaceState;
 
   constructor(configuration: RaceConfiguration, stored?: StoredRaceState | null) {
@@ -609,6 +627,9 @@ export class RaceCore {
       participant.lastImpactAt = null;
       participant.lastImpactMagnitudeMps = 0;
       participant.lastImpactSpeedLossMps = 0;
+      participant.lastImpactSmashableVelDiff = 0;
+      participant.lastImpactSmashableMass = 0;
+      this.collisionTrajectories.delete(participant.id);
       return accepted();
     }
 
@@ -627,6 +648,7 @@ export class RaceCore {
     participant.velocityY = clamp(update.velocityY, -500, 500);
     participant.velocityZ = clamp(update.velocityZ, -500, 500);
     participant.lastTelemetryReceivedAt = now.toISOString();
+    this.recordCollisionPositionSample(participant, update, now);
     participant.isApproachingPit = update.isApproachingPit === true;
     participant.isOnPitRoute = update.isOnPitRoute === true;
     participant.currentSector = clampInteger(update.currentSector, 0, this.state.sectorCount - 1);
@@ -865,6 +887,8 @@ export class RaceCore {
         participant.lastImpactAt = null;
         participant.lastImpactMagnitudeMps = 0;
         participant.lastImpactSpeedLossMps = 0;
+        participant.lastImpactSmashableVelDiff = 0;
+        participant.lastImpactSmashableMass = 0;
       }
     }
     this.touch();
@@ -880,8 +904,11 @@ export class RaceCore {
         participant.lastImpactAt = null;
         participant.lastImpactMagnitudeMps = 0;
         participant.lastImpactSpeedLossMps = 0;
+        participant.lastImpactSmashableVelDiff = 0;
+        participant.lastImpactSmashableMass = 0;
       }
       this.collisionPairCooldowns.clear();
+      this.collisionTrajectories.clear();
     }
     this.recordEvent("collisionInvestigationSetting",
       enabled ? "赛事总控已启用疑似碰撞自动调查。" : "赛事总控已关闭疑似碰撞自动调查；已有调查仍会保留。",
@@ -1517,6 +1544,8 @@ export class RaceCore {
         lastImpactAt: participant.lastImpactAt ?? null,
         lastImpactMagnitudeMps: clamp(participant.lastImpactMagnitudeMps ?? 0, 0, 200),
         lastImpactSpeedLossMps: clamp(participant.lastImpactSpeedLossMps ?? 0, 0, 200),
+        lastImpactSmashableVelDiff: clamp(participant.lastImpactSmashableVelDiff ?? 0, 0, 200),
+        lastImpactSmashableMass: clamp(participant.lastImpactSmashableMass ?? 0, 0, 100_000),
         teamId: cleanText(participant.teamId, 40),
         teamColor: isThemeColor(participant.teamColor) ? participant.teamColor.toUpperCase() : null
       })) : [],
@@ -1703,6 +1732,8 @@ export class RaceCore {
       participant.lastImpactWorldZ = clamp(update.impactWorldZ, -10_000_000, 10_000_000);
       participant.lastImpactMagnitudeMps = clamp(update.impactMagnitudeMps ?? 0, 0, 200);
       participant.lastImpactSpeedLossMps = clamp(update.impactSpeedLossMps ?? 0, 0, 200);
+      participant.lastImpactSmashableVelDiff = clamp(update.impactSmashableVelDiff ?? 0, 0, 200);
+      participant.lastImpactSmashableMass = clamp(update.impactSmashableMass ?? 0, 0, 100_000);
     }
     if (!this.state.automaticCollisionInvestigationsEnabled) {
       participant.lastProcessedImpactSequence = participant.lastReportedImpactSequence;
@@ -1714,9 +1745,11 @@ export class RaceCore {
     const impactMagnitude = clamp(update.impactMagnitudeMps ?? 0, 0, 200);
     const impactSpeedLoss = clamp(update.impactSpeedLossMps ?? 0, 0, 200);
     if (this.state.phase !== "race" || this.state.flag === "chequered" ||
-        (this.state.investigations ?? []).filter(item => item.collisionEvidence).length >= 24 ||
-        update.hasWorldPosition !== true || impactAge > 750 ||
-        impactMagnitude < 2.8 || participant.isInPitLane || participant.isInServiceZone ||
+        update.hasWorldPosition !== true || impactAge > 1_000 ||
+        impactMagnitude < 1.4 ||
+        clamp(update.impactSmashableVelDiff ?? 0, 0, 200) >= .2 ||
+        clamp(update.impactSmashableMass ?? 0, 0, 100_000) >= .5 ||
+        participant.isInPitLane || participant.isInServiceZone ||
         participant.isApproachingPit || participant.isOnPitRoute || terminal(participant.status)) return;
 
     const incidentAt = new Date(now.getTime() - impactAge);
@@ -1725,6 +1758,9 @@ export class RaceCore {
     let nearestVerticalDistance = 0;
     let nearestRelativeSpeed = 0;
     let nearestIncidentX = 0, nearestIncidentY = 0, nearestIncidentZ = 0;
+    let nearestApproachDistanceReduction = 0;
+    let nearestBothReportedImpact = false;
+    let nearestWorldVelocityX = 0, nearestWorldVelocityZ = 0;
     const impactX = clamp(update.impactWorldX, -10_000_000, 10_000_000);
     const impactY = clamp(update.impactWorldY, -10_000_000, 10_000_000);
     const impactZ = clamp(update.impactWorldZ, -10_000_000, 10_000_000);
@@ -1733,18 +1769,32 @@ export class RaceCore {
           candidate.telemetryValid !== true || candidate.hasWorldPosition !== true || candidate.isInPitLane ||
           candidate.isInServiceZone || candidate.isApproachingPit || candidate.isOnPitRoute || terminal(candidate.status) ||
           !candidate.lastTelemetryReceivedAt || now.getTime() - Date.parse(candidate.lastTelemetryReceivedAt) > 500) continue;
-      if (!candidate.lastImpactAt || Math.abs(Date.parse(candidate.lastImpactAt) - incidentAt.getTime()) > 750 ||
-          (candidate.lastImpactMagnitudeMps ?? 0) < 2.8) continue;
-      const candidateX = candidate.lastImpactWorldX ?? 0;
-      const candidateY = candidate.lastImpactWorldY ?? 0;
-      const candidateZ = candidate.lastImpactWorldZ ?? 0;
+      const candidateSample = this.closestCollisionPositionSample(candidate.id, incidentAt.getTime());
+      if (!candidateSample) continue;
+      const candidateX = candidateSample.worldX;
+      const candidateY = candidateSample.worldY;
+      const candidateZ = candidateSample.worldZ;
       const horizontalDistance = Math.hypot(impactX - candidateX, impactZ - candidateZ);
       const verticalDistance = Math.abs(impactY - candidateY);
-      if (horizontalDistance > 4.8 || verticalDistance > 2.5) continue;
-      const relativeSpeed = Math.hypot(
-        clamp(update.velocityX, -500, 500) - (candidate.velocityX ?? 0),
-        clamp(update.velocityZ, -500, 500) - (candidate.velocityZ ?? 0));
-      if (relativeSpeed < 3 && impactSpeedLoss < 1.5 || horizontalDistance >= nearestDistance) continue;
+      if (horizontalDistance > 5.2 || verticalDistance > 2.5) continue;
+      const relativeSpeed = update.hasWorldVelocity === true && candidateSample.hasWorldVelocity
+        ? Math.hypot(
+          clamp(update.impactWorldVelocityX, -500, 500) - candidateSample.worldVelocityX,
+          clamp(update.impactWorldVelocityZ, -500, 500) - candidateSample.worldVelocityZ)
+        : 0;
+      const bothReportedImpact = Boolean(candidate.lastImpactAt) &&
+        Math.abs(Date.parse(candidate.lastImpactAt!) - incidentAt.getTime()) <= 1_000 &&
+        (candidate.lastImpactMagnitudeMps ?? 0) >= 1.4 &&
+        (candidate.lastImpactSmashableVelDiff ?? 0) < .2 &&
+        (candidate.lastImpactSmashableMass ?? 0) < .5;
+      const approachDistanceReduction = this.collisionApproachDistanceReduction(
+        participant.id, candidate.id, incidentAt.getTime(), horizontalDistance);
+      const strongReporterEvidence = impactMagnitude >= 2.8 || impactSpeedLoss >= 1.25;
+      const trajectoryConfirmed = approachDistanceReduction >= .2 &&
+        (relativeSpeed >= .8 || strongReporterEvidence);
+      const strongCloseContact = strongReporterEvidence && relativeSpeed >= .8 && horizontalDistance <= 3.8;
+      if (!bothReportedImpact && !trajectoryConfirmed && !strongCloseContact ||
+          horizontalDistance >= nearestDistance) continue;
       nearest = candidate;
       nearestDistance = horizontalDistance;
       nearestVerticalDistance = verticalDistance;
@@ -1752,32 +1802,43 @@ export class RaceCore {
       nearestIncidentX = candidateX;
       nearestIncidentY = candidateY;
       nearestIncidentZ = candidateZ;
+      nearestApproachDistanceReduction = approachDistanceReduction;
+      nearestBothReportedImpact = bothReportedImpact;
+      nearestWorldVelocityX = candidateSample.worldVelocityX;
+      nearestWorldVelocityZ = candidateSample.worldVelocityZ;
     }
     if (!nearest) return;
     const pairKey = [participant.id, nearest.id].sort().join(":");
-    if ((this.collisionPairCooldowns.get(pairKey) ?? 0) > now.getTime() ||
-        (this.state.investigations ?? []).some(item => item.status === "pending" &&
-          now.getTime() - Date.parse(item.detectedAt) < RaceCore.collisionPairCooldownMilliseconds &&
-          item.relatedParticipantIds?.includes(participant.id) && item.relatedParticipantIds.includes(nearest!.id))) return;
-    this.collisionPairCooldowns.set(pairKey, now.getTime() + RaceCore.collisionPairCooldownMilliseconds);
     const lapNumber = Math.max(1, Math.max(participant.completedLaps, nearest.completedLaps) + 1);
-    const offense = `疑似车辆接触：${participant.displayName} 与 ${nearest.displayName}；最近距离 ${nearestDistance.toFixed(1)} m，运动突变 ${impactMagnitude.toFixed(1)} m/s，相对速度 ${(nearestRelativeSpeed * 3.6).toFixed(0)} km/h。仅供总控结合画面核查，不代表责任判定`;
+    const currentEvidence: CollisionEvidenceSnapshot = {
+      incidentAt: incidentAt.toISOString(), reporterParticipantId: participant.id, otherParticipantId: nearest.id,
+      reporterName: participant.displayName, otherName: nearest.displayName,
+      reporterThemeColor: participant.themeColor, otherThemeColor: nearest.themeColor,
+      reporterWorldX: impactX, reporterWorldY: impactY, reporterWorldZ: impactZ,
+      otherWorldX: nearestIncidentX, otherWorldY: nearestIncidentY, otherWorldZ: nearestIncidentZ,
+      reporterVelocityX: clamp(update.impactWorldVelocityX, -500, 500),
+      reporterVelocityZ: clamp(update.impactWorldVelocityZ, -500, 500),
+      otherVelocityX: nearestWorldVelocityX, otherVelocityZ: nearestWorldVelocityZ,
+      horizontalDistanceMeters: nearestDistance, verticalDistanceMeters: nearestVerticalDistance,
+      relativeSpeedKph: nearestRelativeSpeed * 3.6, impactMagnitudeMps: impactMagnitude,
+      impactSpeedLossMps: impactSpeedLoss,
+      approachDistanceReductionMeters: Math.max(0, nearestApproachDistanceReduction),
+      bothDriversReportedImpact: nearestBothReportedImpact,
+      contactCount: 1,
+      lastIncidentAt: incidentAt.toISOString()
+    };
+    if (this.tryMergeCollisionInvestigation(pairKey, currentEvidence, lapNumber)) {
+      this.collisionPairCooldowns.set(pairKey, now.getTime() + RaceCore.collisionPairCooldownMilliseconds);
+      return;
+    }
+    if ((this.state.investigations ?? []).filter(item => item.collisionEvidence).length >= 24 ||
+        (this.collisionPairCooldowns.get(pairKey) ?? 0) > now.getTime()) return;
+    this.collisionPairCooldowns.set(pairKey, now.getTime() + RaceCore.collisionPairCooldownMilliseconds);
     const investigation: InvestigationSnapshot = {
-      id: crypto.randomUUID(), participantId: participant.id, offense,
+      id: crypto.randomUUID(), participantId: participant.id, offense: this.collisionOffense(currentEvidence),
       detectedAt: now.toISOString(), lapNumber, status: "pending",
       relatedParticipantIds: [participant.id, nearest.id],
-      collisionEvidence: {
-        incidentAt: incidentAt.toISOString(), reporterParticipantId: participant.id, otherParticipantId: nearest.id,
-        reporterName: participant.displayName, otherName: nearest.displayName,
-        reporterThemeColor: participant.themeColor, otherThemeColor: nearest.themeColor,
-        reporterWorldX: impactX, reporterWorldY: impactY, reporterWorldZ: impactZ,
-        otherWorldX: nearestIncidentX, otherWorldY: nearestIncidentY, otherWorldZ: nearestIncidentZ,
-        reporterVelocityX: clamp(update.velocityX, -500, 500), reporterVelocityZ: clamp(update.velocityZ, -500, 500),
-        otherVelocityX: nearest.velocityX ?? 0, otherVelocityZ: nearest.velocityZ ?? 0,
-        horizontalDistanceMeters: nearestDistance, verticalDistanceMeters: nearestVerticalDistance,
-        relativeSpeedKph: nearestRelativeSpeed * 3.6, impactMagnitudeMps: impactMagnitude,
-        impactSpeedLossMps: impactSpeedLoss
-      }
+      collisionEvidence: currentEvidence
     };
     (this.state.investigations ??= []).push(investigation);
     this.state.banner = this.newBanner("information", "正在调查 · 疑似碰撞",
@@ -1786,6 +1847,106 @@ export class RaceCore {
     this.recordEvent("collisionInvestigationOpened",
       `${participant.displayName} 与 ${nearest.displayName} 发生疑似车辆接触，已交由总控调查（第 ${lapNumber} 圈）。`,
       participant.id, now);
+  }
+
+  private tryMergeCollisionInvestigation(
+    pairKey: string,
+    current: CollisionEvidenceSnapshot,
+    lapNumber: number): boolean {
+    const investigations = this.state.investigations ?? [];
+    for (let index = investigations.length - 1; index >= 0; index--) {
+      const existing = investigations[index], previous = existing.collisionEvidence;
+      if (existing.status !== "pending" || !previous ||
+          [previous.reporterParticipantId, previous.otherParticipantId].sort().join(":") !== pairKey) continue;
+      const previousLastAt = Date.parse(previous.lastIncidentAt ?? previous.incidentAt);
+      const currentAt = Date.parse(current.incidentAt);
+      if (!Number.isFinite(previousLastAt) || !Number.isFinite(currentAt) ||
+          Math.abs(currentAt - previousLastAt) > RaceCore.collisionPairCooldownMilliseconds) continue;
+
+      const useCurrentGeometry = current.impactMagnitudeMps > previous.impactMagnitudeMps ||
+        current.horizontalDistanceMeters < previous.horizontalDistanceMeters;
+      const geometry = useCurrentGeometry ? current : previous;
+      const firstAt = Math.min(Date.parse(previous.incidentAt), currentAt);
+      const lastAt = Math.max(previousLastAt, currentAt);
+      const merged: CollisionEvidenceSnapshot = {
+        ...geometry,
+        incidentAt: new Date(firstAt).toISOString(),
+        lastIncidentAt: new Date(lastAt).toISOString(),
+        contactCount: clampInteger((previous.contactCount ?? 1) + 1, 1, 99),
+        horizontalDistanceMeters: Math.min(previous.horizontalDistanceMeters, current.horizontalDistanceMeters),
+        verticalDistanceMeters: Math.min(previous.verticalDistanceMeters, current.verticalDistanceMeters),
+        relativeSpeedKph: Math.max(previous.relativeSpeedKph, current.relativeSpeedKph),
+        impactMagnitudeMps: Math.max(previous.impactMagnitudeMps, current.impactMagnitudeMps),
+        impactSpeedLossMps: Math.max(previous.impactSpeedLossMps, current.impactSpeedLossMps),
+        approachDistanceReductionMeters: Math.max(
+          previous.approachDistanceReductionMeters ?? 0,
+          current.approachDistanceReductionMeters ?? 0),
+        bothDriversReportedImpact:
+          previous.bothDriversReportedImpact === true || current.bothDriversReportedImpact === true
+      };
+      investigations[index] = {
+        ...existing,
+        offense: this.collisionOffense(merged),
+        lapNumber: Math.min(existing.lapNumber, lapNumber),
+        collisionEvidence: merged
+      };
+      return true;
+    }
+    return false;
+  }
+
+  private collisionOffense(evidence: CollisionEvidenceSnapshot): string {
+    const count = Math.max(1, evidence.contactCount ?? 1);
+    const durationSeconds = Math.max(0,
+      (Date.parse(evidence.lastIncidentAt ?? evidence.incidentAt) - Date.parse(evidence.incidentAt)) / 1_000);
+    const prefix = count > 1
+      ? `连续疑似车辆接触（${count} 次，${durationSeconds.toFixed(1)} 秒内）`
+      : "疑似车辆接触";
+    return `${prefix}：${evidence.reporterName} 与 ${evidence.otherName}；最近距离 ${evidence.horizontalDistanceMeters.toFixed(1)} m，运动突变 ${evidence.impactMagnitudeMps.toFixed(1)} m/s，相对速度 ${evidence.relativeSpeedKph.toFixed(0)} km/h，接触前距离收窄 ${Math.max(0, evidence.approachDistanceReductionMeters ?? 0).toFixed(1)} m。仅供总控结合画面核查，不代表责任判定`;
+  }
+
+  private recordCollisionPositionSample(participant: ParticipantState, update: TelemetryUpdate, now: Date): void {
+    if (update.hasWorldPosition !== true) return;
+    const samples = this.collisionTrajectories.get(participant.id) ?? [];
+    samples.push({
+      at: now.getTime(),
+      worldX: clamp(update.worldX, -10_000_000, 10_000_000),
+      worldY: clamp(update.worldY, -10_000_000, 10_000_000),
+      worldZ: clamp(update.worldZ, -10_000_000, 10_000_000),
+      hasWorldVelocity: update.hasWorldVelocity === true,
+      worldVelocityX: clamp(update.worldVelocityX, -500, 500),
+      worldVelocityY: clamp(update.worldVelocityY, -500, 500),
+      worldVelocityZ: clamp(update.worldVelocityZ, -500, 500)
+    });
+    const minimumAt = now.getTime() - RaceCore.collisionTrajectoryLifetimeMilliseconds;
+    while (samples.length > 0 && samples[0].at < minimumAt) samples.shift();
+    if (samples.length > 32) samples.splice(0, samples.length - 32);
+    this.collisionTrajectories.set(participant.id, samples);
+  }
+
+  private closestCollisionPositionSample(participantId: string, target: number): CollisionPositionSample | null {
+    const samples = this.collisionTrajectories.get(participantId) ?? [];
+    let nearest: CollisionPositionSample | null = null;
+    let difference = Number.POSITIVE_INFINITY;
+    for (const sample of samples) {
+      const candidateDifference = Math.abs(sample.at - target);
+      if (candidateDifference >= difference) continue;
+      nearest = sample;
+      difference = candidateDifference;
+    }
+    return difference <= RaceCore.collisionTrajectoryMatchToleranceMilliseconds ? nearest : null;
+  }
+
+  private collisionApproachDistanceReduction(
+    reporterId: string,
+    otherId: string,
+    incidentAt: number,
+    incidentDistance: number): number {
+    const lookbackAt = incidentAt - RaceCore.collisionApproachLookbackMilliseconds;
+    const reporter = this.closestCollisionPositionSample(reporterId, lookbackAt);
+    const other = this.closestCollisionPositionSample(otherId, lookbackAt);
+    if (!reporter || !other) return 0;
+    return Math.hypot(reporter.worldX - other.worldX, reporter.worldZ - other.worldZ) - incidentDistance;
   }
 
   private refreshYellowFlag(now: Date): void {
@@ -2544,6 +2705,9 @@ export class RaceCore {
     participant.lastImpactAt = null;
     participant.lastImpactMagnitudeMps = 0;
     participant.lastImpactSpeedLossMps = 0;
+    participant.lastImpactSmashableVelDiff = 0;
+    participant.lastImpactSmashableMass = 0;
+    this.collisionTrajectories.delete(participant.id);
     participant.status = participant.isConnected ? (onTrack ? "onTrack" : "connected") : "disconnected";
   }
 

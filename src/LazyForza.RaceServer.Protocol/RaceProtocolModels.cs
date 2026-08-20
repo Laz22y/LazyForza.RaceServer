@@ -214,7 +214,16 @@ public sealed record RaceTelemetryUpdate(
     double ImpactWorldX = 0,
     double ImpactWorldY = 0,
     double ImpactWorldZ = 0,
-    int ImpactAgeMilliseconds = 0);
+    int ImpactAgeMilliseconds = 0,
+    bool HasWorldVelocity = false,
+    double WorldVelocityX = 0,
+    double WorldVelocityY = 0,
+    double WorldVelocityZ = 0,
+    double ImpactWorldVelocityX = 0,
+    double ImpactWorldVelocityY = 0,
+    double ImpactWorldVelocityZ = 0,
+    double ImpactSmashableVelDiff = 0,
+    double ImpactSmashableMass = 0);
 
 public sealed record RaceLapCompleted(
     Guid EventId,
@@ -274,7 +283,11 @@ public sealed record RaceCollisionEvidenceSnapshot(
     double VerticalDistanceMeters,
     double RelativeSpeedKph,
     double ImpactMagnitudeMps,
-    double ImpactSpeedLossMps);
+    double ImpactSpeedLossMps,
+    double ApproachDistanceReductionMeters = 0,
+    bool BothDriversReportedImpact = false,
+    int ContactCount = 1,
+    DateTimeOffset? LastIncidentAt = null);
 
 public sealed record RaceParticipantSnapshot(
     Guid Id,
@@ -565,7 +578,15 @@ public static partial class RaceProtocolValidation
         ImpactWorldX = FiniteClamp(value.ImpactWorldX, -10_000_000, 10_000_000),
         ImpactWorldY = FiniteClamp(value.ImpactWorldY, -10_000_000, 10_000_000),
         ImpactWorldZ = FiniteClamp(value.ImpactWorldZ, -10_000_000, 10_000_000),
-        ImpactAgeMilliseconds = Math.Clamp(value.ImpactAgeMilliseconds, 0, 2_000)
+        ImpactAgeMilliseconds = Math.Clamp(value.ImpactAgeMilliseconds, 0, 2_000),
+        WorldVelocityX = FiniteClamp(value.WorldVelocityX, -500, 500),
+        WorldVelocityY = FiniteClamp(value.WorldVelocityY, -500, 500),
+        WorldVelocityZ = FiniteClamp(value.WorldVelocityZ, -500, 500),
+        ImpactWorldVelocityX = FiniteClamp(value.ImpactWorldVelocityX, -500, 500),
+        ImpactWorldVelocityY = FiniteClamp(value.ImpactWorldVelocityY, -500, 500),
+        ImpactWorldVelocityZ = FiniteClamp(value.ImpactWorldVelocityZ, -500, 500),
+        ImpactSmashableVelDiff = FiniteClamp(value.ImpactSmashableVelDiff, 0, 200),
+        ImpactSmashableMass = FiniteClamp(value.ImpactSmashableMass, 0, 100_000)
     };
 
     private static string NormalizeSingleLine(string? value, int maximumLength)

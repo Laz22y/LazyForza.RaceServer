@@ -27,15 +27,20 @@ public sealed class RaceCoordinator
     private const int MaximumLiveGapSamples = 3_600;
     private const double LiveGapHistoryLaps = 1.25;
     private const double LiveGapProgressJitter = 0.002;
-    private const double MaximumLiveGapDistanceLaps = 0.95;
-    private const double MinimumCollisionImpactMagnitudeMps = 2.8;
-    private const double MinimumCollisionRelativeSpeedMps = 3.0;
-    private const double MinimumCollisionSpeedLossMps = 1.5;
-    private const double MaximumCollisionHorizontalDistanceMeters = 4.8;
+    private const double MaximumLiveGapDistanceLaps = 0.999;
+    private const double MinimumCollisionImpactMagnitudeMps = 1.4;
+    private const double StrongCollisionImpactMagnitudeMps = 2.8;
+    private const double MinimumCollisionRelativeSpeedMps = .8;
+    private const double MinimumCollisionSpeedLossMps = 1.25;
+    private const double MinimumCollisionApproachMeters = .2;
+    private const double MaximumCollisionHorizontalDistanceMeters = 5.2;
     private const double MaximumCollisionVerticalDistanceMeters = 2.5;
     private const int MaximumCollisionInvestigationsPerSession = 24;
-    private static readonly TimeSpan CollisionEvidenceLifetime = TimeSpan.FromMilliseconds(750);
-    private static readonly TimeSpan CollisionPeerFreshness = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan CollisionEvidenceLifetime = TimeSpan.FromMilliseconds(1_000);
+    private static readonly TimeSpan CollisionPeerFreshness = TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan CollisionTrajectoryLifetime = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan CollisionTrajectoryMatchTolerance = TimeSpan.FromMilliseconds(650);
+    private static readonly TimeSpan CollisionApproachLookback = TimeSpan.FromMilliseconds(280);
     private static readonly TimeSpan CollisionPairCooldown = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan MinimumTelemetrySnapshotInterval = TimeSpan.FromMilliseconds(100);
     private readonly object sync = new();
@@ -449,6 +454,9 @@ public sealed class RaceCoordinator
                 participant.LastImpactAt = null;
                 participant.LastImpactMagnitudeMps = 0;
                 participant.LastImpactSpeedLossMps = 0;
+                participant.LastImpactSmashableVelDiff = 0;
+                participant.LastImpactSmashableMass = 0;
+                participant.CollisionPositionSamples.Clear();
                 IncrementRevision();
                 goto Complete;
             }
@@ -471,6 +479,7 @@ public sealed class RaceCoordinator
             participant.VelocityY = normalized.VelocityY;
             participant.VelocityZ = normalized.VelocityZ;
             participant.LastTelemetryReceivedAt = now;
+            RecordCollisionPositionSample(participant, normalized, now);
             participant.IsApproachingPit = normalized.IsApproachingPit;
             participant.IsOnPitRoute = normalized.IsOnPitRoute;
             participant.GripCondition = normalized.GripCondition;
@@ -2068,6 +2077,8 @@ public sealed class RaceCoordinator
             participant.LastImpactWorldZ = telemetry.ImpactWorldZ;
             participant.LastImpactMagnitudeMps = telemetry.ImpactMagnitudeMps;
             participant.LastImpactSpeedLossMps = telemetry.ImpactSpeedLossMps;
+            participant.LastImpactSmashableVelDiff = telemetry.ImpactSmashableVelDiff;
+            participant.LastImpactSmashableMass = telemetry.ImpactSmashableMass;
         }
         if (!automaticCollisionInvestigationsEnabled)
         {
@@ -2080,11 +2091,11 @@ public sealed class RaceCoordinator
         participant.LastProcessedImpactSequence = telemetry.ImpactSequence;
 
         if (phase != RaceSessionPhase.Race || flag == RaceControlFlag.Chequered ||
-            investigations.Count(item => item.CollisionEvidence is not null) >= MaximumCollisionInvestigationsPerSession ||
             !telemetry.HasWorldPosition ||
             telemetry.ImpactAgeMilliseconds < 0 ||
             telemetry.ImpactAgeMilliseconds > CollisionEvidenceLifetime.TotalMilliseconds ||
             telemetry.ImpactMagnitudeMps < MinimumCollisionImpactMagnitudeMps ||
+            telemetry.ImpactSmashableVelDiff >= .2 || telemetry.ImpactSmashableMass >= .5 ||
             participant.IsInPitLane || participant.IsInServiceZone ||
             participant.IsApproachingPit || participant.IsOnPitRoute ||
             IsCollisionTerminal(participant))
@@ -2092,11 +2103,11 @@ public sealed class RaceCoordinator
 
         var incidentAt = now - TimeSpan.FromMilliseconds(telemetry.ImpactAgeMilliseconds);
         ParticipantState? nearest = null;
+        CollisionPositionSample? nearestSample = null;
         var nearestHorizontalDistance = double.MaxValue;
         var nearestRelativeSpeed = 0d;
-        var nearestIncidentX = 0d;
-        var nearestIncidentY = 0d;
-        var nearestIncidentZ = 0d;
+        var nearestApproachDistanceReduction = 0d;
+        var nearestBothReportedImpact = false;
         foreach (var candidate in participants)
         {
             if (candidate.Id == participant.Id || !candidate.ReservationActive || !candidate.IsConnected ||
@@ -2107,89 +2118,110 @@ public sealed class RaceCoordinator
                 now - candidate.LastTelemetryReceivedAt > CollisionPeerFreshness)
                 continue;
 
-            if (candidate.LastImpactAt is not DateTimeOffset candidateImpactAt ||
-                Math.Abs((candidateImpactAt - incidentAt).TotalMilliseconds) >
-                    CollisionEvidenceLifetime.TotalMilliseconds ||
-                candidate.LastImpactMagnitudeMps < MinimumCollisionImpactMagnitudeMps)
+            if (ClosestCollisionPositionSample(candidate, incidentAt) is not CollisionPositionSample candidateSample)
                 continue;
-            var candidateX = candidate.LastImpactWorldX;
-            var candidateY = candidate.LastImpactWorldY;
-            var candidateZ = candidate.LastImpactWorldZ;
-            var deltaX = telemetry.ImpactWorldX - candidateX;
-            var deltaY = telemetry.ImpactWorldY - candidateY;
-            var deltaZ = telemetry.ImpactWorldZ - candidateZ;
+            var deltaX = telemetry.ImpactWorldX - candidateSample.WorldX;
+            var deltaY = telemetry.ImpactWorldY - candidateSample.WorldY;
+            var deltaZ = telemetry.ImpactWorldZ - candidateSample.WorldZ;
             var horizontalDistance = Math.Sqrt(deltaX * deltaX + deltaZ * deltaZ);
             if (horizontalDistance > MaximumCollisionHorizontalDistanceMeters ||
                 Math.Abs(deltaY) > MaximumCollisionVerticalDistanceMeters)
                 continue;
 
-            var relativeX = telemetry.VelocityX - candidate.VelocityX;
-            var relativeZ = telemetry.VelocityZ - candidate.VelocityZ;
-            var relativeSpeed = Math.Sqrt(relativeX * relativeX + relativeZ * relativeZ);
-            if (relativeSpeed < MinimumCollisionRelativeSpeedMps &&
-                telemetry.ImpactSpeedLossMps < MinimumCollisionSpeedLossMps)
+            var relativeSpeed = telemetry.HasWorldVelocity && candidateSample.HasWorldVelocity
+                ? Math.Sqrt(
+                    Math.Pow(telemetry.ImpactWorldVelocityX - candidateSample.WorldVelocityX, 2) +
+                    Math.Pow(telemetry.ImpactWorldVelocityZ - candidateSample.WorldVelocityZ, 2))
+                : 0;
+            var bothReportedImpact = candidate.LastImpactAt is DateTimeOffset candidateImpactAt &&
+                                     Math.Abs((candidateImpactAt - incidentAt).TotalMilliseconds) <=
+                                         CollisionEvidenceLifetime.TotalMilliseconds &&
+                                     candidate.LastImpactMagnitudeMps >= MinimumCollisionImpactMagnitudeMps &&
+                                     candidate.LastImpactSmashableVelDiff < .2 &&
+                                     candidate.LastImpactSmashableMass < .5;
+            var approachDistanceReduction = CollisionApproachDistanceReduction(
+                participant,
+                candidate,
+                incidentAt,
+                horizontalDistance);
+            var strongReporterEvidence =
+                telemetry.ImpactMagnitudeMps >= StrongCollisionImpactMagnitudeMps ||
+                telemetry.ImpactSpeedLossMps >= MinimumCollisionSpeedLossMps;
+            var trajectoryConfirmed =
+                approachDistanceReduction >= MinimumCollisionApproachMeters &&
+                (relativeSpeed >= MinimumCollisionRelativeSpeedMps || strongReporterEvidence);
+            var strongCloseContact = strongReporterEvidence &&
+                                     relativeSpeed >= MinimumCollisionRelativeSpeedMps &&
+                                     horizontalDistance <= 3.8;
+            if (!bothReportedImpact && !trajectoryConfirmed && !strongCloseContact)
                 continue;
             if (horizontalDistance >= nearestHorizontalDistance)
                 continue;
             nearest = candidate;
+            nearestSample = candidateSample;
             nearestHorizontalDistance = horizontalDistance;
             nearestRelativeSpeed = relativeSpeed;
-            nearestIncidentX = candidateX;
-            nearestIncidentY = candidateY;
-            nearestIncidentZ = candidateZ;
+            nearestApproachDistanceReduction = approachDistanceReduction;
+            nearestBothReportedImpact = bothReportedImpact;
         }
 
-        if (nearest is null) return;
+        if (nearest is null || nearestSample is not CollisionPositionSample matchedSample) return;
         var pairKey = CollisionPairKey(participant.Id, nearest.Id);
+        var lapNumber = Math.Max(1, Math.Max(participant.CompletedLaps, nearest.CompletedLaps) + 1);
+        var currentEvidence = new RaceCollisionEvidenceSnapshot(
+            incidentAt,
+            participant.Id,
+            nearest.Id,
+            participant.DisplayName,
+            nearest.DisplayName,
+            participant.ThemeColor,
+            nearest.ThemeColor,
+            telemetry.ImpactWorldX,
+            telemetry.ImpactWorldY,
+            telemetry.ImpactWorldZ,
+            matchedSample.WorldX,
+            matchedSample.WorldY,
+            matchedSample.WorldZ,
+            telemetry.ImpactWorldVelocityX,
+            telemetry.ImpactWorldVelocityZ,
+            matchedSample.WorldVelocityX,
+            matchedSample.WorldVelocityZ,
+            nearestHorizontalDistance,
+            Math.Abs(telemetry.ImpactWorldY - matchedSample.WorldY),
+            nearestRelativeSpeed * 3.6,
+            telemetry.ImpactMagnitudeMps,
+            telemetry.ImpactSpeedLossMps,
+            Math.Max(0, nearestApproachDistanceReduction),
+            nearestBothReportedImpact,
+            1,
+            incidentAt);
+        if (TryMergeCollisionInvestigation(pairKey, currentEvidence, lapNumber))
+        {
+            var groupedUntil = now + CollisionPairCooldown;
+            participant.CollisionPairCooldowns[pairKey] = groupedUntil;
+            nearest.CollisionPairCooldowns[pairKey] = groupedUntil;
+            return;
+        }
+        if (investigations.Count(item => item.CollisionEvidence is not null) >=
+            MaximumCollisionInvestigationsPerSession)
+            return;
         if (participant.CollisionPairCooldowns.TryGetValue(pairKey, out var cooldownUntil) && cooldownUntil > now ||
-            nearest.CollisionPairCooldowns.TryGetValue(pairKey, out cooldownUntil) && cooldownUntil > now ||
-            investigations.Any(item =>
-                item.Status == RaceInvestigationStatus.Pending &&
-                now - item.DetectedAt < CollisionPairCooldown &&
-                item.RelatedParticipantIds?.Contains(participant.Id) == true &&
-                item.RelatedParticipantIds.Contains(nearest.Id)))
+            nearest.CollisionPairCooldowns.TryGetValue(pairKey, out cooldownUntil) && cooldownUntil > now)
             return;
 
         var nextAllowedAt = now + CollisionPairCooldown;
         participant.CollisionPairCooldowns[pairKey] = nextAllowedAt;
         nearest.CollisionPairCooldowns[pairKey] = nextAllowedAt;
         var related = new[] { participant.Id, nearest.Id };
-        var lapNumber = Math.Max(1, Math.Max(participant.CompletedLaps, nearest.CompletedLaps) + 1);
-        var offense =
-            $"疑似车辆接触：{participant.DisplayName} 与 {nearest.DisplayName}；" +
-            $"最近距离 {nearestHorizontalDistance:0.0} m，运动突变 {telemetry.ImpactMagnitudeMps:0.0} m/s，" +
-            $"相对速度 {nearestRelativeSpeed * 3.6:0} km/h。仅供总控结合画面核查，不代表责任判定";
         var investigation = new RaceInvestigationSnapshot(
             Guid.NewGuid(),
             participant.Id,
-            offense,
+            CollisionOffense(currentEvidence),
             now,
             lapNumber,
             RaceInvestigationStatus.Pending,
             RelatedParticipantIds: related,
-            CollisionEvidence: new RaceCollisionEvidenceSnapshot(
-                incidentAt,
-                participant.Id,
-                nearest.Id,
-                participant.DisplayName,
-                nearest.DisplayName,
-                participant.ThemeColor,
-                nearest.ThemeColor,
-                telemetry.ImpactWorldX,
-                telemetry.ImpactWorldY,
-                telemetry.ImpactWorldZ,
-                nearestIncidentX,
-                nearestIncidentY,
-                nearestIncidentZ,
-                telemetry.VelocityX,
-                telemetry.VelocityZ,
-                nearest.VelocityX,
-                nearest.VelocityZ,
-                nearestHorizontalDistance,
-                Math.Abs(telemetry.ImpactWorldY - nearestIncidentY),
-                nearestRelativeSpeed * 3.6,
-                telemetry.ImpactMagnitudeMps,
-                telemetry.ImpactSpeedLossMps));
+            CollisionEvidence: currentEvidence);
         investigations.Add(investigation);
         banner = NewBanner(
             RaceBannerKind.Information,
@@ -2203,6 +2235,142 @@ public sealed class RaceCoordinator
             $"{participant.DisplayName} 与 {nearest.DisplayName} 发生疑似车辆接触，已交由总控调查（第 {lapNumber} 圈）。",
             participant.Id,
             investigation));
+    }
+
+    private bool TryMergeCollisionInvestigation(
+        string pairKey,
+        RaceCollisionEvidenceSnapshot current,
+        int lapNumber)
+    {
+        for (var index = investigations.Count - 1; index >= 0; index--)
+        {
+            var existing = investigations[index];
+            if (existing.Status != RaceInvestigationStatus.Pending ||
+                existing.CollisionEvidence is not RaceCollisionEvidenceSnapshot previous ||
+                CollisionPairKey(previous.ReporterParticipantId, previous.OtherParticipantId) != pairKey)
+                continue;
+            var previousLastAt = previous.LastIncidentAt ?? previous.IncidentAt;
+            if (Math.Abs((current.IncidentAt - previousLastAt).TotalMilliseconds) >
+                CollisionPairCooldown.TotalMilliseconds)
+                continue;
+
+            var useCurrentGeometry =
+                current.ImpactMagnitudeMps > previous.ImpactMagnitudeMps ||
+                current.HorizontalDistanceMeters < previous.HorizontalDistanceMeters;
+            var geometry = useCurrentGeometry ? current : previous;
+            var firstAt = current.IncidentAt < previous.IncidentAt
+                ? current.IncidentAt
+                : previous.IncidentAt;
+            var lastAt = current.IncidentAt > previousLastAt
+                ? current.IncidentAt
+                : previousLastAt;
+            var merged = geometry with
+            {
+                IncidentAt = firstAt,
+                LastIncidentAt = lastAt,
+                ContactCount = Math.Clamp(Math.Max(1, previous.ContactCount) + 1, 1, 99),
+                HorizontalDistanceMeters = Math.Min(
+                    previous.HorizontalDistanceMeters,
+                    current.HorizontalDistanceMeters),
+                VerticalDistanceMeters = Math.Min(
+                    previous.VerticalDistanceMeters,
+                    current.VerticalDistanceMeters),
+                RelativeSpeedKph = Math.Max(previous.RelativeSpeedKph, current.RelativeSpeedKph),
+                ImpactMagnitudeMps = Math.Max(
+                    previous.ImpactMagnitudeMps,
+                    current.ImpactMagnitudeMps),
+                ImpactSpeedLossMps = Math.Max(
+                    previous.ImpactSpeedLossMps,
+                    current.ImpactSpeedLossMps),
+                ApproachDistanceReductionMeters = Math.Max(
+                    previous.ApproachDistanceReductionMeters,
+                    current.ApproachDistanceReductionMeters),
+                BothDriversReportedImpact =
+                    previous.BothDriversReportedImpact || current.BothDriversReportedImpact
+            };
+            investigations[index] = existing with
+            {
+                Offense = CollisionOffense(merged),
+                LapNumber = Math.Min(existing.LapNumber, lapNumber),
+                CollisionEvidence = merged
+            };
+            return true;
+        }
+        return false;
+    }
+
+    private static string CollisionOffense(RaceCollisionEvidenceSnapshot evidence)
+    {
+        var count = Math.Max(1, evidence.ContactCount);
+        var lastAt = evidence.LastIncidentAt ?? evidence.IncidentAt;
+        var durationSeconds = Math.Max(0, (lastAt - evidence.IncidentAt).TotalSeconds);
+        var prefix = count > 1
+            ? $"连续疑似车辆接触（{count} 次，{durationSeconds:0.0} 秒内）"
+            : "疑似车辆接触";
+        return
+            $"{prefix}：{evidence.ReporterName} 与 {evidence.OtherName}；" +
+            $"最近距离 {evidence.HorizontalDistanceMeters:0.0} m，运动突变 " +
+            $"{evidence.ImpactMagnitudeMps:0.0} m/s，相对速度 {evidence.RelativeSpeedKph:0} km/h，" +
+            $"接触前距离收窄 {Math.Max(0, evidence.ApproachDistanceReductionMeters):0.0} m。" +
+            "仅供总控结合画面核查，不代表责任判定";
+    }
+
+    private static void RecordCollisionPositionSample(
+        ParticipantState participant,
+        RaceTelemetryUpdate telemetry,
+        DateTimeOffset now)
+    {
+        if (!telemetry.HasWorldPosition) return;
+        var samples = participant.CollisionPositionSamples;
+        samples.Add(new CollisionPositionSample(
+            now,
+            telemetry.WorldX,
+            telemetry.WorldY,
+            telemetry.WorldZ,
+            telemetry.HasWorldVelocity,
+            telemetry.WorldVelocityX,
+            telemetry.WorldVelocityY,
+            telemetry.WorldVelocityZ));
+        var minimumAt = now - CollisionTrajectoryLifetime;
+        var removeCount = 0;
+        while (removeCount < samples.Count && samples[removeCount].At < minimumAt)
+            removeCount++;
+        if (removeCount > 0) samples.RemoveRange(0, removeCount);
+        if (samples.Count > 32) samples.RemoveRange(0, samples.Count - 32);
+    }
+
+    private static CollisionPositionSample? ClosestCollisionPositionSample(
+        ParticipantState participant,
+        DateTimeOffset target)
+    {
+        CollisionPositionSample? nearest = null;
+        var nearestDifference = double.MaxValue;
+        foreach (var sample in participant.CollisionPositionSamples)
+        {
+            var difference = Math.Abs((sample.At - target).TotalMilliseconds);
+            if (difference >= nearestDifference) continue;
+            nearest = sample;
+            nearestDifference = difference;
+        }
+        return nearestDifference <= CollisionTrajectoryMatchTolerance.TotalMilliseconds ? nearest : null;
+    }
+
+    private static double CollisionApproachDistanceReduction(
+        ParticipantState reporter,
+        ParticipantState other,
+        DateTimeOffset incidentAt,
+        double incidentDistance)
+    {
+        var lookbackAt = incidentAt - CollisionApproachLookback;
+        var reporterBefore = ClosestCollisionPositionSample(reporter, lookbackAt);
+        var otherBefore = ClosestCollisionPositionSample(other, lookbackAt);
+        if (reporterBefore is not CollisionPositionSample left ||
+            otherBefore is not CollisionPositionSample right)
+            return 0;
+        var beforeDistance = Math.Sqrt(
+            Math.Pow(left.WorldX - right.WorldX, 2) +
+            Math.Pow(left.WorldZ - right.WorldZ, 2));
+        return beforeDistance - incidentDistance;
     }
 
     private static bool IsCollisionTerminal(ParticipantState participant) =>
@@ -3361,6 +3529,9 @@ public sealed class RaceCoordinator
         participant.LastImpactAt = null;
         participant.LastImpactMagnitudeMps = 0;
         participant.LastImpactSpeedLossMps = 0;
+        participant.LastImpactSmashableVelDiff = 0;
+        participant.LastImpactSmashableMass = 0;
+        participant.CollisionPositionSamples.Clear();
         participant.CollisionPairCooldowns.Clear();
     }
 
@@ -3729,6 +3900,9 @@ public sealed class RaceCoordinator
         public double LastImpactWorldZ { get; set; }
         public double LastImpactMagnitudeMps { get; set; }
         public double LastImpactSpeedLossMps { get; set; }
+        public double LastImpactSmashableVelDiff { get; set; }
+        public double LastImpactSmashableMass { get; set; }
+        public List<CollisionPositionSample> CollisionPositionSamples { get; } = [];
         public Dictionary<string, DateTimeOffset> CollisionPairCooldowns { get; } = [];
         public double CurrentLapSeconds { get; set; }
         public double? LastLapSeconds { get; set; }
@@ -3793,4 +3967,13 @@ public sealed class RaceCoordinator
     }
 
     private readonly record struct RaceProgressSample(double DistanceLaps, double ElapsedSeconds);
+    private readonly record struct CollisionPositionSample(
+        DateTimeOffset At,
+        double WorldX,
+        double WorldY,
+        double WorldZ,
+        bool HasWorldVelocity,
+        double WorldVelocityX,
+        double WorldVelocityY,
+        double WorldVelocityZ);
 }
