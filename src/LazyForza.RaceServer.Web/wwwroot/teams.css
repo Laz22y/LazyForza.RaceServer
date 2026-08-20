@@ -1,1 +1,16 @@
-:root{--team-panel:#0a0f16}.team-settings{padding:16px;border:1px solid #2b394b;border-radius:8px;background:rgba(7,10,15,.42)}.team-settings-head{display:flex;justify-content:space-between;align-items:end;gap:24px}.team-settings-head strong{font-size:15px}.team-count-fields{display:grid;grid-template-columns:110px 110px;gap:10px}.team-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}.team-row{display:grid;grid-template-columns:42px minmax(0,1fr) 74px;gap:10px;align-items:center;padding:10px;border:1px solid #293649;border-radius:6px;background:var(--team-panel)}.team-number{display:grid;place-items:center;width:32px;height:32px;color:#071014;border-radius:4px;background:var(--cyan);font-size:12px;font-weight:900}.team-row input[type=color]{height:42px;padding:4px;cursor:pointer}.team-row input[type=color]::-webkit-color-swatch-wrapper{padding:0}.team-row input[type=color]::-webkit-color-swatch{border:0;border-radius:3px}@media(max-width:900px){.team-settings-head{align-items:stretch;flex-direction:column}.team-count-fields{grid-template-columns:repeat(2,minmax(0,1fr));width:100%}.team-rows{grid-template-columns:1fr}}
+.team-settings { padding: 14px; border: 1px solid #2b394b; border-radius: 6px; background: #0a1017; }
+.team-settings-head { display: flex; justify-content: space-between; align-items: end; gap: 22px; }
+.team-settings-head strong { font-size: 14px; }
+.team-count-fields { display: grid; grid-template-columns: 110px 110px; gap: 9px; }
+.team-rows { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 9px; margin-top: 12px; }
+.team-row { display: grid; grid-template-columns: 38px minmax(0,1fr) 66px; gap: 9px; align-items: center; padding: 9px; border: 1px solid #293649; border-radius: 5px; background: #080d13; }
+.team-number { width: 30px; height: 30px; display: grid; place-items: center; color: #071014; border-radius: 3px; background: var(--cyan); font-size: 11px; font-weight: 900; }
+.team-row input[type=color] { height: 42px; padding: 4px; cursor: pointer; }
+.team-row input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
+.team-row input[type=color]::-webkit-color-swatch { border: 0; border-radius: 3px; }
+@media (max-width: 1200px) { .team-rows { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+@media (max-width: 760px) {
+  .team-settings-head { align-items: stretch; flex-direction: column; }
+  .team-count-fields { grid-template-columns: repeat(2,minmax(0,1fr)); width: 100%; }
+  .team-rows { grid-template-columns: 1fr; }
+}
