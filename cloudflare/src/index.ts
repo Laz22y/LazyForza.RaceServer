@@ -176,6 +176,8 @@ export class RaceRoom {
       const after = afterText === null ? undefined : Number.parseInt(afterText, 10);
       return json(this.core.events(Number.parseInt(url.searchParams.get("limit") ?? "250", 10), after));
     }
+    if (url.pathname === "/api/admin/results" && request.method === "GET")
+      return json(this.core.results());
     if (url.pathname === "/api/admin/track-package" && request.method === "GET")
       return json({ package: this.hostedTrackPackage, maximumBytes: maximumHostedTrackPackageBytes });
     if (url.pathname === "/api/admin/track-package" && request.method === "POST")

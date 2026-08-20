@@ -426,6 +426,37 @@ public sealed record RaceSessionSnapshot(
     IReadOnlyList<RaceObserverSnapshot>? Observers = null,
     int MinimumRequiredPitStops = 1);
 
+public sealed record RaceStageResultParticipantSnapshot(
+    Guid Id,
+    int Position,
+    string DisplayName,
+    string ThemeColor,
+    string? TeamName,
+    string? TeamColor,
+    RaceParticipantStatus Status,
+    int CompletedLaps,
+    double TrackProgress,
+    double? BestLapSeconds,
+    double? RaceTotalSeconds,
+    double? AdjustedRaceTotalSeconds,
+    double? GapToLeaderSeconds,
+    double TimePenaltySeconds,
+    IReadOnlyList<RacePenaltySnapshot> Penalties);
+
+public sealed record RaceStageResultSnapshot(
+    Guid Id,
+    RaceSessionPhase Phase,
+    string Label,
+    int SessionNumber,
+    int SessionCount,
+    bool IsComplete,
+    DateTimeOffset CompletedAt,
+    string SessionName,
+    string? TrackName,
+    Guid? FastestParticipantId,
+    double? FastestLapSeconds,
+    IReadOnlyList<RaceStageResultParticipantSnapshot> Participants);
+
 public sealed record RaceAdminLoginRequest(string Password);
 
 public sealed record RaceAdminSessionCommand(

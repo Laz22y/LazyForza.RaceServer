@@ -43,6 +43,7 @@ public sealed class RaceCoordinator
     private static readonly TimeSpan CollisionApproachLookback = TimeSpan.FromMilliseconds(280);
     private static readonly TimeSpan CollisionPairCooldown = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan MinimumTelemetrySnapshotInterval = TimeSpan.FromMilliseconds(100);
+    private const int MaximumArchivedStageResults = 24;
     private readonly object sync = new();
     private readonly RaceServerOptions options;
     private readonly IRaceStatePersistence persistence;
@@ -51,6 +52,7 @@ public sealed class RaceCoordinator
     private readonly List<RacePenaltySnapshot> penalties = [];
     private readonly List<RaceInvestigationSnapshot> investigations = [];
     private readonly List<RaceEventSnapshot> events = [];
+    private readonly List<RaceStageResultSnapshot> resultHistory = [];
     private readonly HashSet<Guid> receivedLapEvents = [];
     private readonly HashSet<string> revokedResumeTokens = new(StringComparer.Ordinal);
     private readonly Func<string, bool> playerPasswordMatches;
@@ -101,6 +103,7 @@ public sealed class RaceCoordinator
     private long revision;
     private long eventSequence;
     private long lastTelemetrySnapshotTimestamp;
+    private Guid? activeResultStageId;
 
     public RaceCoordinator(
         RaceServerOptions options,
@@ -167,6 +170,15 @@ public sealed class RaceCoordinator
             return events
                 .Where(item => afterSequence is null || item.Sequence > afterSequence.Value)
                 .TakeLast(Math.Clamp(limit, 20, 500))
+                .Reverse()
+                .ToArray();
+    }
+
+    public IReadOnlyList<RaceStageResultSnapshot> Results()
+    {
+        lock (sync)
+            return resultHistory
+                .AsEnumerable()
                 .Reverse()
                 .ToArray();
     }
@@ -853,6 +865,15 @@ public sealed class RaceCoordinator
             if (command.TotalRaceLaps is int laps)
                 totalRaceLaps = Math.Clamp(laps, 1, 999);
 
+            if (activeResultStageId is not null &&
+                (command.Phase != phase || command.Phase is RaceSessionPhase.Lobby or
+                    RaceSessionPhase.Practice or RaceSessionPhase.Qualifying or
+                    RaceSessionPhase.Grid or RaceSessionPhase.Race))
+            {
+                ArchiveActiveResult(now, CurrentResultIsComplete());
+                activeResultStageId = null;
+            }
+
             switch (command.Phase)
             {
                 case RaceSessionPhase.Lobby:
@@ -860,12 +881,14 @@ public sealed class RaceCoordinator
                     phase = RaceSessionPhase.Lobby;
                     flag = RaceControlFlag.Green;
                     flagMessage = null;
+                    activeResultStageId = null;
                     break;
                 case RaceSessionPhase.Practice:
                     if (TryStartNextPracticeSession(now)) break;
                     ResetCompetitiveState(clearParticipants: false);
                     ConfigurePractice(command);
                     phase = RaceSessionPhase.Practice;
+                    activeResultStageId = Guid.NewGuid();
                     flag = RaceControlFlag.Green;
                     practiceSessionNumber = 1;
                     practiceEndsAt = now.AddMinutes(practiceSessionMinutes[0]);
@@ -891,6 +914,7 @@ public sealed class RaceCoordinator
                     ResetCompetitiveState(clearParticipants: false);
                     ConfigureQualifying(command);
                     phase = RaceSessionPhase.Qualifying;
+                    activeResultStageId = Guid.NewGuid();
                     flag = RaceControlFlag.Green;
                     qualifyingSessionNumber = 1;
                     qualifyingEndsAt = now.AddMinutes(qualifyingSessionMinutes[0]);
@@ -915,6 +939,7 @@ public sealed class RaceCoordinator
                 case RaceSessionPhase.Grid:
                     CaptureCurrentQualifyingResults();
                     phase = RaceSessionPhase.Grid;
+                    activeResultStageId = null;
                     qualifyingEndsAt = null;
                     qualifyingTimeExpired = false;
                     flag = RaceControlFlag.Green;
@@ -968,6 +993,7 @@ public sealed class RaceCoordinator
                 case RaceSessionPhase.Race:
                     if (phase != RaceSessionPhase.Countdown) PrepareRace();
                     phase = RaceSessionPhase.Race;
+                    activeResultStageId = Guid.NewGuid();
                     startsAt = now;
                     raceSuspendedAt = null;
                     raceSuspendedDuration = TimeSpan.Zero;
@@ -1386,6 +1412,7 @@ public sealed class RaceCoordinator
                 if (startsAt is DateTimeOffset scheduled && now >= scheduled)
                 {
                     phase = RaceSessionPhase.Race;
+                    activeResultStageId = Guid.NewGuid();
                     flag = RaceControlFlag.Green;
                     illuminatedStartLights = 0;
                     startLightsOut = true;
@@ -2588,6 +2615,7 @@ public sealed class RaceCoordinator
             return;
 
         CaptureCurrentPracticeResults();
+        ArchiveActiveResult(now, isComplete: true);
         if (practiceSessionNumber < practiceSessionCount)
         {
             practiceEndsAt = null;
@@ -2630,6 +2658,7 @@ public sealed class RaceCoordinator
             return false;
 
         practiceSessionNumber++;
+        activeResultStageId = Guid.NewGuid();
         practiceEndsAt = now.AddMinutes(practiceSessionMinutes[practiceSessionNumber - 1]);
         practiceTimeExpired = false;
         flag = RaceControlFlag.Green;
@@ -2684,6 +2713,7 @@ public sealed class RaceCoordinator
             return;
 
         CaptureCurrentQualifyingResults();
+        ArchiveActiveResult(now, isComplete: true);
         if (qualifyingSessionNumber < qualifyingSessionCount)
         {
             EliminateFromCurrentQualifyingSession();
@@ -2705,6 +2735,7 @@ public sealed class RaceCoordinator
         }
 
         phase = RaceSessionPhase.Grid;
+        activeResultStageId = null;
         flag = RaceControlFlag.Green;
         flagMessage = null;
         qualifyingEndsAt = null;
@@ -2724,6 +2755,7 @@ public sealed class RaceCoordinator
             return false;
 
         qualifyingSessionNumber++;
+        activeResultStageId = Guid.NewGuid();
         qualifyingEndsAt = now.AddMinutes(qualifyingSessionMinutes[qualifyingSessionNumber - 1]);
         qualifyingTimeExpired = false;
         flag = RaceControlFlag.Green;
@@ -2999,7 +3031,80 @@ public sealed class RaceCoordinator
                 $"{winner.DisplayName}  {FormatRaceTime(AdjustedRaceTotalSeconds(winner, now))}",
                 winner.Id,
                 null);
+        ArchiveActiveResult(now, isComplete: true);
         return true;
+    }
+
+    private bool CurrentResultIsComplete() =>
+        phase == RaceSessionPhase.Finished ||
+        phase == RaceSessionPhase.Practice && practiceTimeExpired && practiceEndsAt is null &&
+        participants.All(candidate => !candidate.PracticeFinalLapPending) ||
+        phase == RaceSessionPhase.Qualifying && qualifyingTimeExpired &&
+        participants.All(candidate => !candidate.QualifyingFinalLapPending);
+
+    private void ArchiveActiveResult(DateTimeOffset now, bool isComplete)
+    {
+        if (activeResultStageId is not Guid resultId) return;
+        var resultPhase = phase == RaceSessionPhase.Finished
+            ? RaceSessionPhase.Race
+            : phase == RaceSessionPhase.Suspended
+                ? phaseBeforeSuspension
+                : phase;
+        if (resultPhase is not (RaceSessionPhase.Practice or RaceSessionPhase.Qualifying or RaceSessionPhase.Race))
+            return;
+
+        var snapshot = BuildSnapshot(now);
+        var stageNumber = resultPhase switch
+        {
+            RaceSessionPhase.Practice => Math.Max(1, practiceSessionNumber),
+            RaceSessionPhase.Qualifying => Math.Max(1, qualifyingSessionNumber),
+            _ => 1
+        };
+        var stageCount = resultPhase switch
+        {
+            RaceSessionPhase.Practice => Math.Max(1, practiceSessionCount),
+            RaceSessionPhase.Qualifying => Math.Max(1, qualifyingSessionCount),
+            _ => 1
+        };
+        var label = resultPhase switch
+        {
+            RaceSessionPhase.Practice => stageCount > 1 ? $"FP{stageNumber}" : "练习赛",
+            RaceSessionPhase.Qualifying => stageCount > 1 ? $"Q{stageNumber}" : "排位赛",
+            _ => "正赛"
+        };
+        var archived = new RaceStageResultSnapshot(
+            resultId,
+            resultPhase,
+            label,
+            stageNumber,
+            stageCount,
+            isComplete,
+            now,
+            sessionName,
+            trackName,
+            snapshot.FastestParticipantId,
+            snapshot.FastestLapSeconds,
+            snapshot.Participants.Select(candidate => new RaceStageResultParticipantSnapshot(
+                candidate.Id,
+                candidate.Position,
+                candidate.DisplayName,
+                candidate.ThemeColor,
+                candidate.TeamName,
+                candidate.TeamColor,
+                candidate.Status,
+                candidate.CompletedLaps,
+                candidate.TrackProgress,
+                candidate.BestLapSeconds,
+                candidate.RaceTotalSeconds,
+                candidate.AdjustedRaceTotalSeconds,
+                candidate.GapToLeaderSeconds,
+                candidate.TimePenaltySeconds,
+                candidate.Penalties)).ToArray());
+        var existingIndex = resultHistory.FindIndex(candidate => candidate.Id == resultId);
+        if (existingIndex >= 0) resultHistory[existingIndex] = archived;
+        else resultHistory.Add(archived);
+        if (resultHistory.Count > MaximumArchivedStageResults)
+            resultHistory.RemoveRange(0, resultHistory.Count - MaximumArchivedStageResults);
     }
 
     private double RaceElapsedSeconds(DateTimeOffset now)

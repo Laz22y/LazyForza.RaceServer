@@ -468,6 +468,39 @@ describe("RaceCore", () => {
       .toEqual([70, 69, 67]);
   });
 
+  it("keeps practice qualifying and race results after returning to the lobby", () => {
+    const core = createCore();
+    const driver = connect(core, "甲");
+    const started = new Date("2026-08-12T14:00:00Z");
+
+    core.applySession({ phase: "practice", practiceSessionMinutes: [1] }, started);
+    core.completeLap(driver, lap("archive-fp", 70, true, 1), new Date(started.getTime() + 30_000));
+    core.tick(new Date(Date.parse(core.snapshot().practiceEndsAt!) + 1));
+    expect(core.results()).toMatchObject([{
+      phase: "practice",
+      label: "练习赛",
+      isComplete: true,
+      participants: [{ bestLapSeconds: 70 }]
+    }]);
+    core.applySession({ phase: "lobby" }, new Date(started.getTime() + 120_000));
+    expect(core.results()).toHaveLength(1);
+
+    core.applySession({ phase: "qualifying", qualifyingMinutes: 1 }, new Date(started.getTime() + 180_000));
+    core.completeLap(driver, lap("archive-q", 68, true, 1), new Date(started.getTime() + 210_000));
+    core.tick(new Date(Date.parse(core.snapshot().qualifyingEndsAt!) + 1));
+    expect(core.snapshot().phase).toBe("grid");
+    expect(core.results()[0].phase).toBe("qualifying");
+    core.applySession({ phase: "lobby" }, new Date(started.getTime() + 300_000));
+
+    core.applySession({ phase: "race", totalRaceLaps: 1 }, new Date(started.getTime() + 360_000));
+    core.completeLap(driver, lap("archive-race", 75, true, 1), new Date(started.getTime() + 435_000));
+    expect(core.snapshot().phase).toBe("finished");
+    core.applySession({ phase: "lobby" }, new Date(started.getTime() + 480_000));
+
+    expect(core.results().map(result => result.phase)).toEqual(["race", "qualifying", "practice"]);
+    expect(core.results()[0].participants[0].adjustedRaceTotalSeconds).toBe(75);
+  });
+
   it("allows a solo race and handles red/green flags", () => {
     const core = createCore();
     connect(core, "甲");

@@ -277,6 +277,39 @@ export interface SessionSnapshot {
   automaticCollisionInvestigationsEnabled?: boolean;
 }
 
+export interface StageResultParticipantSnapshot {
+  id: string;
+  position: number;
+  displayName: string;
+  themeColor: string;
+  teamName?: string | null;
+  teamColor?: string | null;
+  status: ParticipantStatus;
+  completedLaps: number;
+  trackProgress: number;
+  bestLapSeconds?: number | null;
+  raceTotalSeconds?: number | null;
+  adjustedRaceTotalSeconds?: number | null;
+  gapToLeaderSeconds?: number | null;
+  timePenaltySeconds: number;
+  penalties: PenaltySnapshot[];
+}
+
+export interface StageResultSnapshot {
+  id: string;
+  phase: "practice" | "qualifying" | "race";
+  label: string;
+  sessionNumber: number;
+  sessionCount: number;
+  isComplete: boolean;
+  completedAt: string;
+  sessionName: string;
+  trackName?: string | null;
+  fastestParticipantId?: string | null;
+  fastestLapSeconds?: number | null;
+  participants: StageResultParticipantSnapshot[];
+}
+
 export interface YellowZoneSnapshot {
   sectorIndex?: number | null;
   isAutomatic: boolean;

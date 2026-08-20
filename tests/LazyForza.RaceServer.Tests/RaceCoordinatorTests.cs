@@ -698,6 +698,56 @@ public sealed class RaceCoordinatorTests
     }
 
     [TestMethod]
+    public void StageResultsRemainAvailableAfterReturningToLobby()
+    {
+        var coordinator = CreateCoordinator();
+        var driver = Join(coordinator, 1).Accepted!;
+        var started = DateTimeOffset.Parse("2026-08-12T14:00:00Z");
+
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Practice, "周末赛事", null, null, null,
+            PracticeSessionMinutes: [1]), started);
+        var practice = coordinator.Snapshot(started);
+        CompleteLap(coordinator, driver.ParticipantId, 1, 70, started.AddSeconds(30));
+        coordinator.Tick(practice.PracticeEndsAt!.Value.AddMilliseconds(1));
+
+        var fp = coordinator.Results().Single();
+        Assert.AreEqual(RaceSessionPhase.Practice, fp.Phase);
+        Assert.AreEqual("练习赛", fp.Label);
+        Assert.IsTrue(fp.IsComplete);
+        Assert.AreEqual(70d, fp.Participants.Single().BestLapSeconds.GetValueOrDefault(), .0001);
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Lobby, null, null, null, null), started.AddMinutes(2));
+        Assert.HasCount(1, coordinator.Results());
+
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Qualifying, null, null, null, 1), started.AddMinutes(3));
+        var qualifying = coordinator.Snapshot(started.AddMinutes(3));
+        CompleteLap(coordinator, driver.ParticipantId, 1, 68, started.AddMinutes(3).AddSeconds(30));
+        coordinator.Tick(qualifying.QualifyingEndsAt!.Value.AddMilliseconds(1));
+        Assert.AreEqual(RaceSessionPhase.Grid, coordinator.Snapshot().Phase);
+        Assert.AreEqual(RaceSessionPhase.Qualifying, coordinator.Results()[0].Phase);
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Lobby, null, null, null, null), started.AddMinutes(5));
+
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Race, null, 1, 0, null), started.AddMinutes(6));
+        CompleteLap(coordinator, driver.ParticipantId, 1, 75,
+            started.AddMinutes(7).AddSeconds(15));
+        Assert.AreEqual(RaceSessionPhase.Finished, coordinator.Snapshot().Phase);
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Lobby, null, null, null, null), started.AddMinutes(8));
+
+        var results = coordinator.Results();
+        Assert.HasCount(3, results);
+        CollectionAssert.AreEqual(
+            new[] { RaceSessionPhase.Race, RaceSessionPhase.Qualifying, RaceSessionPhase.Practice },
+            results.Select(item => item.Phase).ToArray());
+        Assert.AreEqual(75d,
+            results[0].Participants.Single().AdjustedRaceTotalSeconds.GetValueOrDefault(), .0001);
+    }
+
+    [TestMethod]
     public void RaceOrdersProgressAndShowsPitServiceFlagAndPenalty()
     {
         var coordinator = CreateCoordinator();

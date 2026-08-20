@@ -210,6 +210,9 @@ app.MapGet("/api/admin/events", (HttpContext context, AdminSessionStore sessions
         ? Results.Ok(coordinator.Events(Math.Clamp(limit ?? 200, 20, 500), after))
         : Results.Unauthorized());
 
+app.MapGet("/api/admin/results", (HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
+    Authorized(context, sessions) ? Results.Ok(coordinator.Results()) : Results.Unauthorized());
+
 app.MapGet("/api/admin/track-package", (HttpContext context, AdminSessionStore sessions, HostedTrackPackageStore trackPackages) =>
     Authorized(context, sessions) ? Results.Ok(new { package = trackPackages.Current, maximumBytes = HostedTrackPackageStore.MaximumPackageBytes }) : Results.Unauthorized());
 
