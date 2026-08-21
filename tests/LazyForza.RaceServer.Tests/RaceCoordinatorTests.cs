@@ -9,8 +9,50 @@ namespace LazyForza.RaceServer.Tests;
 [TestClass]
 public sealed class RaceCoordinatorTests
 {
+    [DataTestMethod]
+    [DataRow(RaceSessionPhase.Practice)]
+    [DataRow(RaceSessionPhase.Qualifying)]
+    [DataRow(RaceSessionPhase.Race)]
+    public void CollisionInvestigationRunsDuringEveryDrivingSession(RaceSessionPhase phase)
+    {
+        var coordinator = CreateCoordinator();
+        var reporter = Join(coordinator, 1).Accepted!;
+        var other = Join(coordinator, 2).Accepted!;
+        Assert.IsTrue(coordinator.SetAutomaticCollisionInvestigations(true).IsAccepted);
+        var started = DateTimeOffset.Parse("2026-08-21T10:00:00Z");
+        var command = phase switch
+        {
+            RaceSessionPhase.Practice => new RaceAdminSessionCommand(
+                RaceSessionPhase.Practice, null, null, null, null),
+            RaceSessionPhase.Qualifying => new RaceAdminSessionCommand(
+                RaceSessionPhase.Qualifying, null, null, null, 10),
+            _ => new RaceAdminSessionCommand(
+                RaceSessionPhase.Race, null, 5, null, null)
+        };
+        Assert.IsTrue(coordinator.ApplySessionCommand(command, started).IsAccepted);
+
+        coordinator.UpdateTelemetry(reporter.ParticipantId,
+            CollisionTelemetry(1, 100, 20, 0, 0), started.AddMilliseconds(100));
+        coordinator.UpdateTelemetry(other.ParticipantId,
+            CollisionTelemetry(2, 105, 10, 0, 0), started.AddMilliseconds(100));
+        coordinator.UpdateTelemetry(other.ParticipantId,
+            CollisionTelemetry(3, 101.5, 10, 0, 0), started.AddMilliseconds(400));
+        coordinator.UpdateTelemetry(reporter.ParticipantId,
+            CollisionTelemetry(4, 100, 20, 1, 4.4) with
+            {
+                ImpactSpeedLossMps = 2.2,
+                ImpactWorldX = 100,
+                ImpactWorldY = 0,
+                ImpactWorldZ = 50,
+                ImpactAgeMilliseconds = 80
+            }, started.AddMilliseconds(480));
+
+        Assert.HasCount(1, coordinator.Snapshot().Investigations!,
+            $"{phase} 阶段应创建疑似碰撞调查。");
+    }
+
     [TestMethod]
-    public void CollisionInvestigationRequiresRaceToggleFreshNearbyPeerAndPreservesEvidenceForPostRaceReview()
+    public void CollisionInvestigationRequiresEnabledSettingFreshNearbyPeerAndPreservesEvidenceForPostRaceReview()
     {
         var coordinator = CreateCoordinator();
         var reporter = Join(coordinator, 1).Accepted!;
@@ -1035,6 +1077,69 @@ public sealed class RaceCoordinatorTests
     }
 
     [TestMethod]
+    public void EnabledLapRecoveryKeepsRaceOpenAndAcceptsOneDeduplicatedRecoveredLap()
+    {
+        var coordinator = CreateCoordinator();
+        SetDisconnectedLapRecovery(coordinator, true);
+        var leader = Join(coordinator, 1).Accepted!;
+        var trailing = Join(coordinator, 2).Accepted!;
+        var started = DateTimeOffset.UtcNow.AddMinutes(-3);
+        Assert.IsTrue(coordinator.ApplySessionCommand(
+            new RaceAdminSessionCommand(RaceSessionPhase.Race, "断线补传测试", 2, null, null),
+            started).IsAccepted);
+        CompleteLap(coordinator, leader.ParticipantId, 1, 60, started.AddSeconds(60));
+        CompleteLap(coordinator, trailing.ParticipantId, 1, 61, started.AddSeconds(61));
+        CompleteLap(coordinator, leader.ParticipantId, 2, 60, started.AddSeconds(120));
+
+        coordinator.Disconnect(trailing.ParticipantId);
+        Assert.AreEqual(RaceSessionPhase.Race, coordinator.Snapshot().Phase,
+            "总控开启恢复后，方格旗下的短暂断线不能立即冻结比赛。 ");
+        var resumed = coordinator.TryJoin(Login(2) with { ResumeToken = trailing.ResumeToken });
+        Assert.IsTrue(resumed.IsAccepted);
+        Assert.AreEqual(RaceParticipantStatus.OnTrack,
+            coordinator.Snapshot().Participants.Single(item => item.Id == trailing.ParticipantId).Status);
+
+        var eventId = Guid.NewGuid();
+        var recovered = new RaceLapCompleted(
+            eventId, 2, 61, [20, 20, 21], true, null, 180_000, true, true);
+        var result = coordinator.CompleteLap(trailing.ParticipantId, recovered);
+        Assert.IsTrue(result.IsAccepted, result.Error);
+        Assert.AreEqual(RaceSessionPhase.Finished, coordinator.Snapshot().Phase);
+        Assert.AreEqual(2,
+            coordinator.Snapshot().Participants.Single(item => item.Id == trailing.ParticipantId).CompletedLaps);
+
+        Assert.IsTrue(coordinator.CompleteLap(trailing.ParticipantId, recovered).IsAccepted,
+            "相同 EventId 的重试必须幂等确认。 ");
+        Assert.AreEqual(2,
+            coordinator.Snapshot().Participants.Single(item => item.Id == trailing.ParticipantId).CompletedLaps);
+        Assert.IsTrue(coordinator.Snapshot().DisconnectedLapRecoveryEnabled);
+    }
+
+    [TestMethod]
+    public void ExpiredLapRecoveryWindowReleasesRaceCompletion()
+    {
+        var coordinator = CreateCoordinator();
+        SetDisconnectedLapRecovery(coordinator, true);
+        var leader = Join(coordinator, 1).Accepted!;
+        var trailing = Join(coordinator, 2).Accepted!;
+        var started = DateTimeOffset.UtcNow.AddMinutes(-3);
+        coordinator.ApplySessionCommand(
+            new RaceAdminSessionCommand(RaceSessionPhase.Race, "恢复超时测试", 2, null, null),
+            started);
+        CompleteLap(coordinator, leader.ParticipantId, 1, 60, started.AddSeconds(60));
+        CompleteLap(coordinator, trailing.ParticipantId, 1, 61, started.AddSeconds(61));
+        CompleteLap(coordinator, leader.ParticipantId, 2, 60, started.AddSeconds(120));
+        coordinator.Disconnect(trailing.ParticipantId);
+        Assert.AreEqual(RaceSessionPhase.Race, coordinator.Snapshot().Phase);
+
+        coordinator.Tick(DateTimeOffset.UtcNow.AddSeconds(31));
+        var snapshot = coordinator.Snapshot();
+        Assert.AreEqual(RaceSessionPhase.Finished, snapshot.Phase);
+        Assert.AreEqual(RaceParticipantStatus.DidNotFinish,
+            snapshot.Participants.Single(item => item.Id == trailing.ParticipantId).Status);
+    }
+
+    [TestMethod]
     public void RaceControlDisconnectReleasesNameAndSlotWithoutDeletingAuditHistory()
     {
         var coordinator = CreateCoordinator(maximumParticipants: 1);
@@ -2049,6 +2154,33 @@ public sealed class RaceCoordinatorTests
             settings.DriversPerTeam,
             settings.Teams,
             mode));
+        Assert.IsTrue(result.IsAccepted, result.Error);
+    }
+
+    private static void SetDisconnectedLapRecovery(RaceCoordinator coordinator, bool enabled)
+    {
+        var settings = coordinator.RoomSettings();
+        var result = coordinator.ApplyRoomSettings(new RaceAdminRoomSettingsCommand(
+            settings.SessionName,
+            settings.TotalRaceLaps,
+            settings.SectorCount,
+            settings.AutomaticYellowEnabled,
+            settings.SlowSpeedKph,
+            settings.SlowDurationSeconds,
+            settings.SevereLateralOffsetMeters,
+            settings.RecoveryDurationSeconds,
+            settings.AllowTeams,
+            settings.TrackName,
+            settings.TrackId,
+            settings.TrackRevision,
+            settings.TrackPackageHash,
+            settings.TeamCount,
+            settings.DriversPerTeam,
+            settings.Teams,
+            settings.TrackLimitMode,
+            settings.MinimumRequiredPitStops,
+            settings.AutomaticCollisionInvestigationsEnabled,
+            enabled));
         Assert.IsTrue(result.IsAccepted, result.Error);
     }
 

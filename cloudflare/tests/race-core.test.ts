@@ -3,7 +3,37 @@ import { defaultQualifyingEliminations, RaceCore } from "../src/race-core";
 import type { LapCompleted, LoginRequest, SessionCommand, TelemetryUpdate } from "../src/protocol";
 
 describe("RaceCore", () => {
-  it("opens collision investigations only during a race and keeps visual evidence for post-race review", () => {
+  it.each(["practice", "qualifying", "race"] as const)(
+    "opens collision investigations during %s",
+    phase => {
+      const core = createCore();
+      const reporter = connect(core, "甲"), other = connect(core, "乙");
+      expect(core.setAutomaticCollisionInvestigations(true).ok).toBe(true);
+      const started = new Date("2026-08-21T10:00:00Z");
+      const command: SessionCommand = phase === "qualifying"
+        ? { phase, qualifyingMinutes: 10 }
+        : phase === "race" ? { phase, totalRaceLaps: 5 } : { phase };
+      expect(core.applySession(command, started).ok).toBe(true);
+      const motion = { ...telemetry(), hasWorldPosition: true, worldY: 0, worldZ: 50,
+        hasWorldVelocity: true, worldVelocityY: 0, worldVelocityZ: 0 };
+      core.updateTelemetry(reporter,
+        { ...motion, worldX: 100, worldVelocityX: 20 }, new Date(started.getTime() + 100));
+      core.updateTelemetry(other,
+        { ...motion, worldX: 105, worldVelocityX: 10 }, new Date(started.getTime() + 100));
+      core.updateTelemetry(other,
+        { ...motion, worldX: 101.5, worldVelocityX: 10 }, new Date(started.getTime() + 400));
+      core.updateTelemetry(reporter, {
+        ...motion, worldX: 100, worldVelocityX: 20, impactSequence: 1,
+        impactMagnitudeMps: 4.4, impactSpeedLossMps: 2.2,
+        impactWorldX: 100, impactWorldY: 0, impactWorldZ: 50,
+        impactAgeMilliseconds: 80, impactWorldVelocityX: 20,
+        impactWorldVelocityY: 0, impactWorldVelocityZ: 0
+      }, new Date(started.getTime() + 480));
+
+      expect(core.snapshot().investigations).toHaveLength(1);
+    });
+
+  it("requires fresh nearby evidence and keeps collision details for post-race review", () => {
     const core = createCore();
     const reporter = connect(core, "甲");
     const other = connect(core, "乙");
@@ -544,6 +574,67 @@ describe("RaceCore", () => {
     expect(core.snapshot().participants.find(item => item.id === trailingLogin.participantId)?.status)
       .toBe("didNotFinish");
     expect(core.snapshot().phase).toBe("finished");
+  });
+
+  it("keeps the race open and deduplicates a recovered lap when recovery is enabled", () => {
+    const core = createCore();
+    expect(core.applyRoomSettings({
+      ...core.roomSettings(),
+      disconnectedLapRecoveryEnabled: true
+    }).ok).toBe(true);
+    const leaderLogin = core.login(login("甲"));
+    const trailingLogin = core.login(login("乙"));
+    if (!leaderLogin.ok || !trailingLogin.ok) throw new Error("login failed");
+    const started = new Date("2026-08-21T12:00:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 2 }, started);
+    core.completeLap(leaderLogin.participantId, lap("recovery-l1", 64, true, 1),
+      new Date(started.getTime() + 60_000));
+    core.completeLap(trailingLogin.participantId, lap("recovery-s1", 65, true, 1),
+      new Date(started.getTime() + 61_000));
+    core.completeLap(leaderLogin.participantId, lap("recovery-l2", 64, true, 2),
+      new Date(started.getTime() + 120_000));
+
+    const disconnectedAt = new Date(started.getTime() + 121_000);
+    expect(core.disconnect(trailingLogin.participantId, disconnectedAt)).toBe(true);
+    expect(core.snapshot(disconnectedAt).phase).toBe("race");
+    const resumed = core.login(
+      { ...login("乙"), resumeToken: trailingLogin.resumeToken },
+      new Date(started.getTime() + 122_000));
+    expect(resumed.ok).toBe(true);
+    expect(core.snapshot().participants.find(item => item.id === trailingLogin.participantId)?.status)
+      .toBe("onTrack");
+
+    const recovered = {
+      ...lap("recovery-s2", 65, true, 2),
+      isRecoveredAfterDisconnect: true
+    };
+    expect(core.completeLap(trailingLogin.participantId, recovered,
+      new Date(started.getTime() + 123_000)).ok).toBe(true);
+    expect(core.snapshot().phase).toBe("finished");
+    expect(core.completeLap(trailingLogin.participantId, recovered,
+      new Date(started.getTime() + 124_000)).ok).toBe(true);
+    expect(core.snapshot().participants.find(item => item.id === trailingLogin.participantId)?.completedLaps)
+      .toBe(2);
+    expect(core.snapshot().disconnectedLapRecoveryEnabled).toBe(true);
+  });
+
+  it("finishes the race after an enabled recovery window expires", () => {
+    const core = createCore();
+    core.applyRoomSettings({ ...core.roomSettings(), disconnectedLapRecoveryEnabled: true });
+    const leader = connect(core, "甲");
+    const trailing = connect(core, "乙");
+    const started = new Date("2026-08-21T13:00:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 2 }, started);
+    core.completeLap(leader, lap("expiry-l1", 64, true, 1), new Date(started.getTime() + 60_000));
+    core.completeLap(trailing, lap("expiry-s1", 65, true, 1), new Date(started.getTime() + 61_000));
+    core.completeLap(leader, lap("expiry-l2", 64, true, 2), new Date(started.getTime() + 120_000));
+    const disconnectedAt = new Date(started.getTime() + 121_000);
+    core.disconnect(trailing, disconnectedAt);
+    expect(core.snapshot(disconnectedAt).phase).toBe("race");
+
+    expect(core.tick(new Date(disconnectedAt.getTime() + 31_000))).toBe(true);
+    expect(core.snapshot().phase).toBe("finished");
+    expect(core.snapshot().participants.find(item => item.id === trailing)?.status).toBe("didNotFinish");
   });
 
   it("releases a race-control disconnected display name and participant slot", () => {

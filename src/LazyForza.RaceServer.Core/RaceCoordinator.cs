@@ -43,6 +43,7 @@ public sealed class RaceCoordinator
     private static readonly TimeSpan CollisionApproachLookback = TimeSpan.FromMilliseconds(280);
     private static readonly TimeSpan CollisionPairCooldown = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan MinimumTelemetrySnapshotInterval = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan DisconnectedLapRecoveryGrace = TimeSpan.FromSeconds(30);
     private const int MaximumArchivedStageResults = 24;
     private readonly object sync = new();
     private readonly RaceServerOptions options;
@@ -68,6 +69,7 @@ public sealed class RaceCoordinator
     private int sectorCount;
     private bool automaticYellowEnabled;
     private bool automaticCollisionInvestigationsEnabled;
+    private bool disconnectedLapRecoveryEnabled;
     private double slowSpeedKph;
     private double slowDurationSeconds;
     private double severeLateralOffsetMeters;
@@ -118,6 +120,7 @@ public sealed class RaceCoordinator
         sectorCount = this.options.SectorCount;
         automaticYellowEnabled = this.options.AutomaticYellowEnabled;
         automaticCollisionInvestigationsEnabled = this.options.AutomaticCollisionInvestigationsEnabled;
+        disconnectedLapRecoveryEnabled = this.options.DisconnectedLapRecoveryEnabled;
         slowSpeedKph = this.options.SlowSpeedKph;
         slowDurationSeconds = this.options.SlowDurationSeconds;
         severeLateralOffsetMeters = this.options.SevereLateralOffsetMeters;
@@ -161,7 +164,8 @@ public sealed class RaceCoordinator
                 teams,
                 trackLimitMode,
                 minimumRequiredPitStops,
-                automaticCollisionInvestigationsEnabled);
+                automaticCollisionInvestigationsEnabled,
+                disconnectedLapRecoveryEnabled);
     }
 
     public IReadOnlyList<RaceEventSnapshot> Events(int limit = 200, long? afterSequence = null)
@@ -326,7 +330,8 @@ public sealed class RaceCoordinator
                     if (resumed.Status == RaceParticipantStatus.Disconnected)
                     {
                         resumed.Status = flag == RaceControlFlag.Chequered &&
-                                         phase is RaceSessionPhase.Race or RaceSessionPhase.Finished
+                                         phase is RaceSessionPhase.Race or RaceSessionPhase.Finished &&
+                                         !HasActiveDisconnectedLapRecovery(resumed, DateTimeOffset.UtcNow)
                             ? RaceParticipantStatus.DidNotFinish
                             : phase is RaceSessionPhase.Race or RaceSessionPhase.Countdown or
                                 RaceSessionPhase.Practice or RaceSessionPhase.OutLap or
@@ -565,6 +570,14 @@ public sealed class RaceCoordinator
             var now = receivedAt ?? DateTimeOffset.UtcNow;
             var participant = Find(participantId);
             if (participant is null) return RaceCommandResult.Reject("参赛者不存在。");
+            if (receivedLapEvents.Contains(completed.EventId)) return RaceCommandResult.Accepted;
+            if (completed.IsRecoveredAfterDisconnect)
+            {
+                if (!disconnectedLapRecoveryEnabled)
+                    return RaceCommandResult.Reject("服务端未开启断线圈速恢复。");
+                if (!HasActiveDisconnectedLapRecovery(participant, now))
+                    return RaceCommandResult.Reject("断线圈速恢复窗口已结束。");
+            }
             if (participant.Status is RaceParticipantStatus.Finished or RaceParticipantStatus.DidNotFinish or
                 RaceParticipantStatus.Disqualified or RaceParticipantStatus.Disconnected)
                 return RaceCommandResult.Reject("该车手已经结束比赛，不能继续提交圈速。");
@@ -573,17 +586,18 @@ public sealed class RaceCoordinator
             if (phase == RaceSessionPhase.Qualifying && !participant.QualifyingEligible)
                 return RaceCommandResult.Reject("该车手已在本次排位赛中被淘汰。");
             if (phase == RaceSessionPhase.Qualifying && qualifyingTimeExpired &&
-                !participant.QualifyingFinalLapPending)
+                !participant.QualifyingFinalLapPending && !completed.IsRecoveredAfterDisconnect)
                 return RaceCommandResult.Reject("排位赛计时已结束，该车手没有待完成的最后一圈。");
             if (phase == RaceSessionPhase.Practice && practiceTimeExpired &&
-                !participant.PracticeFinalLapPending)
+                !participant.PracticeFinalLapPending && !completed.IsRecoveredAfterDisconnect)
                 return RaceCommandResult.Reject("练习赛计时已结束，该车手没有待完成的最后一圈。");
-            if (!receivedLapEvents.Add(completed.EventId)) return RaceCommandResult.Accepted;
             if (completed.IsValid &&
                 (completed.LapSeconds is < 3 or > 21_600 || !double.IsFinite(completed.LapSeconds)))
                 return RaceCommandResult.Reject("圈速超出允许范围。");
+            receivedLapEvents.Add(completed.EventId);
 
             participant.LastSeenAt = now;
+            participant.DisconnectedLapRecoveryUntil = null;
             var fastestBefore = FastestLap();
             var bestLapEligible = completed.IsValid &&
                                   completed.IsBestLapEligible &&
@@ -719,6 +733,7 @@ public sealed class RaceCoordinator
                 goto Complete;
             }
             if (!participant.IsConnected) return;
+            var now = DateTimeOffset.UtcNow;
             participant.IsConnected = false;
             if (participant.Status is not (RaceParticipantStatus.Finished or
                     RaceParticipantStatus.DidNotFinish or RaceParticipantStatus.Disqualified))
@@ -727,15 +742,25 @@ public sealed class RaceCoordinator
             participant.HazardCandidateStartedAt = null;
             participant.HazardRecoveryStartedAt = null;
             ResetCollisionState(participant);
-            participant.LastSeenAt = DateTimeOffset.UtcNow;
-            participant.QualifyingFinalLapPending = false;
-            participant.PracticeFinalLapPending = false;
-            CompleteQualifyingIfReady(DateTimeOffset.UtcNow);
-            CompletePracticeIfReady(DateTimeOffset.UtcNow);
-            RefreshYellowFlag(DateTimeOffset.UtcNow);
-            TryCompleteRaceIfReady(DateTimeOffset.UtcNow);
+            participant.LastSeenAt = now;
+            var canRecoverLap = disconnectedLapRecoveryEnabled &&
+                                participant.Status == RaceParticipantStatus.Disconnected &&
+                                EffectivePhase() is RaceSessionPhase.Practice or
+                                    RaceSessionPhase.Qualifying or RaceSessionPhase.Race;
+            participant.DisconnectedLapRecoveryUntil = canRecoverLap
+                ? now.Add(DisconnectedLapRecoveryGrace)
+                : null;
+            if (!canRecoverLap)
+            {
+                participant.QualifyingFinalLapPending = false;
+                participant.PracticeFinalLapPending = false;
+            }
+            CompleteQualifyingIfReady(now);
+            CompletePracticeIfReady(now);
+            RefreshYellowFlag(now);
+            TryCompleteRaceIfReady(now);
             IncrementRevision();
-            snapshot = BuildSnapshot(DateTimeOffset.UtcNow);
+            snapshot = BuildSnapshot(now);
             audit = new RaceAuditEntry(snapshot.ServerTime, "participantDisconnected", $"{participant.DisplayName} 断开连接。", participant.Id);
         Complete:;
         }
@@ -797,6 +822,10 @@ public sealed class RaceCoordinator
             sectorCount = Math.Clamp(command.SectorCount, 1, 20);
             automaticYellowEnabled = command.AutomaticYellowEnabled;
             automaticCollisionInvestigationsEnabled = command.AutomaticCollisionInvestigationsEnabled;
+            disconnectedLapRecoveryEnabled = command.DisconnectedLapRecoveryEnabled;
+            if (!disconnectedLapRecoveryEnabled)
+                foreach (var participant in participants)
+                    participant.DisconnectedLapRecoveryUntil = null;
             slowSpeedKph = Math.Clamp(command.SlowSpeedKph, 3, 50);
             slowDurationSeconds = Math.Clamp(command.SlowDurationSeconds, 1, 15);
             severeLateralOffsetMeters = Math.Clamp(command.SevereLateralOffsetMeters, 5, 200);
@@ -1359,6 +1388,7 @@ public sealed class RaceCoordinator
                 participant.AutomaticYellowActive = false;
                 participant.HazardCandidateStartedAt = null;
                 participant.HazardRecoveryStartedAt = null;
+                participant.DisconnectedLapRecoveryUntil = null;
                 participant.QualifyingFinalLapPending = false;
                 participant.PracticeFinalLapPending = false;
                 CompleteQualifyingIfReady(now);
@@ -1398,6 +1428,14 @@ public sealed class RaceCoordinator
         RaceAuditEntry? audit = null;
         lock (sync)
         {
+            if (ExpireDisconnectedLapRecoveries(now))
+            {
+                CompleteQualifyingIfReady(now);
+                CompletePracticeIfReady(now);
+                TryCompleteRaceIfReady(now);
+                IncrementRevision();
+                snapshot = BuildSnapshot(now);
+            }
             if (phase == RaceSessionPhase.Countdown)
             {
                 var nextLights = CalculateIlluminatedStartLights(now);
@@ -2117,7 +2155,8 @@ public sealed class RaceCoordinator
             return;
         participant.LastProcessedImpactSequence = telemetry.ImpactSequence;
 
-        if (phase != RaceSessionPhase.Race || flag == RaceControlFlag.Chequered ||
+        if (phase is not (RaceSessionPhase.Practice or RaceSessionPhase.Qualifying or RaceSessionPhase.Race) ||
+            flag == RaceControlFlag.Chequered ||
             !telemetry.HasWorldPosition ||
             telemetry.ImpactAgeMilliseconds < 0 ||
             telemetry.ImpactAgeMilliseconds > CollisionEvidenceLifetime.TotalMilliseconds ||
@@ -2611,7 +2650,8 @@ public sealed class RaceCoordinator
     {
         if (phase != RaceSessionPhase.Practice || !practiceTimeExpired ||
             practiceEndsAt is null ||
-            participants.Any(participant => participant.PracticeFinalLapPending))
+            participants.Any(participant => participant.PracticeFinalLapPending ||
+                                            HasActiveDisconnectedLapRecovery(participant, now)))
             return;
 
         CaptureCurrentPracticeResults();
@@ -2709,7 +2749,8 @@ public sealed class RaceCoordinator
     {
         if (phase != RaceSessionPhase.Qualifying || !qualifyingTimeExpired ||
             qualifyingEndsAt is null ||
-            participants.Any(participant => participant.QualifyingFinalLapPending))
+            participants.Any(participant => participant.QualifyingFinalLapPending ||
+                                            HasActiveDisconnectedLapRecovery(participant, now)))
             return;
 
         CaptureCurrentQualifyingResults();
@@ -2865,6 +2906,7 @@ public sealed class RaceCoordinator
         participant.BestLapSectorSeconds.Clear();
         participant.LastLapCompletedAt = null;
         participant.QualifyingFinalLapPending = false;
+        participant.DisconnectedLapRecoveryUntil = null;
         participant.LapHasTrackLimitIncident = false;
         participant.ProgressContinuityReady = false;
         participant.LastTelemetryMonotonicMilliseconds = 0;
@@ -3010,14 +3052,44 @@ public sealed class RaceCoordinator
         value is RaceSessionPhase.Race or RaceSessionPhase.Finished ||
         value == RaceSessionPhase.Suspended && phaseBeforeSuspension == RaceSessionPhase.Race;
 
+    private RaceSessionPhase EffectivePhase() =>
+        phase == RaceSessionPhase.Suspended ? phaseBeforeSuspension : phase;
+
+    private static bool HasActiveDisconnectedLapRecovery(
+        ParticipantState participant,
+        DateTimeOffset now) =>
+        participant.DisconnectedLapRecoveryUntil is DateTimeOffset until && until > now;
+
+    private bool ExpireDisconnectedLapRecoveries(DateTimeOffset now)
+    {
+        var changed = false;
+        foreach (var participant in participants.Where(candidate =>
+                     candidate.DisconnectedLapRecoveryUntil is DateTimeOffset until && until <= now))
+        {
+            participant.DisconnectedLapRecoveryUntil = null;
+            changed = true;
+            if (participant.IsConnected) continue;
+            participant.QualifyingFinalLapPending = false;
+            participant.PracticeFinalLapPending = false;
+            if (EffectivePhase() == RaceSessionPhase.Race && flag == RaceControlFlag.Chequered &&
+                participant.Status == RaceParticipantStatus.Disconnected)
+            {
+                participant.Status = RaceParticipantStatus.DidNotFinish;
+                participant.FinishedAt ??= now;
+            }
+        }
+        return changed;
+    }
+
     private bool TryCompleteRaceIfReady(DateTimeOffset now)
     {
         if (phase != RaceSessionPhase.Race || flag != RaceControlFlag.Chequered) return false;
         var awaitingFinish = participants.Any(candidate =>
-            candidate.IsConnected &&
-            candidate.Status is not (RaceParticipantStatus.Finished or
-                RaceParticipantStatus.DidNotFinish or RaceParticipantStatus.Disqualified or
-                RaceParticipantStatus.Disconnected));
+            (candidate.IsConnected &&
+             candidate.Status is not (RaceParticipantStatus.Finished or
+                 RaceParticipantStatus.DidNotFinish or RaceParticipantStatus.Disqualified or
+                 RaceParticipantStatus.Disconnected)) ||
+            HasActiveDisconnectedLapRecovery(candidate, now));
         if (awaitingFinish) return false;
 
         phase = RaceSessionPhase.Finished;
@@ -3399,7 +3471,8 @@ public sealed class RaceCoordinator
                     candidate.DisplayName,
                     candidate.ConnectedAt))
                 .ToArray(),
-            minimumRequiredPitStops);
+            minimumRequiredPitStops,
+            disconnectedLapRecoveryEnabled);
     }
 
     private List<ParticipantState> OrderParticipants(DateTimeOffset now)
@@ -3494,6 +3567,7 @@ public sealed class RaceCoordinator
             participant.BestSectorSeconds.Clear();
             participant.BestLapSectorSeconds.Clear();
             participant.LastLapCompletedAt = null;
+            participant.DisconnectedLapRecoveryUntil = null;
             participant.RaceProgressSamples.Clear();
             participant.RaceTotalSeconds = null;
             participant.TrackLimitWarnings = 0;
@@ -3570,6 +3644,7 @@ public sealed class RaceCoordinator
             participant.BestSectorSeconds.Clear();
             participant.BestLapSectorSeconds.Clear();
             participant.LastLapCompletedAt = null;
+            participant.DisconnectedLapRecoveryUntil = null;
             participant.RaceProgressSamples.Clear();
             participant.RaceTotalSeconds = null;
             participant.TrackLimitWarnings = 0;
@@ -4013,6 +4088,7 @@ public sealed class RaceCoordinator
         public double? LastLapSeconds { get; set; }
         public double? BestLapSeconds { get; set; }
         public DateTimeOffset? LastLapCompletedAt { get; set; }
+        public DateTimeOffset? DisconnectedLapRecoveryUntil { get; set; }
         public List<RaceProgressSample> RaceProgressSamples { get; } = [];
         public double? RaceTotalSeconds { get; set; }
         public double TrackToleranceMeters { get; set; } = 18;

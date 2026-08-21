@@ -140,8 +140,13 @@ public sealed class RaceWebSocketHandler(
                     return SendRegisteredErrorAsync(
                         participantId, socket, "observerReadOnly", "OB 不能提交圈速。", cancellationToken);
                 var completed = RaceProtocolJson.DeserializePayload<RaceLapCompleted>(envelope);
-                return ReplyToResult(
-                    participantId, socket, coordinator.CompleteLap(participantId, completed), cancellationToken);
+                var result = coordinator.CompleteLap(participantId, completed);
+                return SendRegisteredAsync(
+                    participantId,
+                    socket,
+                    RaceMessageTypes.LapAcknowledged,
+                    new RaceLapAcknowledgement(completed.EventId, result.IsAccepted, result.Error),
+                    cancellationToken);
             }
             case RaceMessageTypes.Ping:
             {

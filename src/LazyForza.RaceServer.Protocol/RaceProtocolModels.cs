@@ -102,6 +102,7 @@ public static class RaceMessageTypes
     public const string Ready = "ready";
     public const string Telemetry = "telemetry";
     public const string LapCompleted = "lapCompleted";
+    public const string LapAcknowledged = "lapAcknowledged";
     public const string Snapshot = "snapshot";
     public const string Ping = "ping";
     public const string Pong = "pong";
@@ -233,7 +234,13 @@ public sealed record RaceLapCompleted(
     bool IsValid,
     string? InvalidReason,
     long ClientMonotonicMilliseconds,
-    bool IsBestLapEligible = true);
+    bool IsBestLapEligible = true,
+    bool IsRecoveredAfterDisconnect = false);
+
+public sealed record RaceLapAcknowledgement(
+    Guid EventId,
+    bool IsAccepted,
+    string? Message = null);
 
 public sealed record RacePenaltySnapshot(
     Guid Id,
@@ -424,7 +431,8 @@ public sealed record RaceSessionSnapshot(
     int PracticeSessionCount = 1,
     IReadOnlyList<int>? PracticeSessionMinutes = null,
     IReadOnlyList<RaceObserverSnapshot>? Observers = null,
-    int MinimumRequiredPitStops = 1);
+    int MinimumRequiredPitStops = 1,
+    bool DisconnectedLapRecoveryEnabled = false);
 
 public sealed record RaceStageResultParticipantSnapshot(
     Guid Id,
@@ -495,7 +503,8 @@ public sealed record RaceAdminRoomSettingsCommand(
     IReadOnlyList<RaceTeamDefinition>? Teams = null,
     TrackLimitEnforcementMode TrackLimitMode = TrackLimitEnforcementMode.WarningsOnly,
     int MinimumRequiredPitStops = 1,
-    bool AutomaticCollisionInvestigationsEnabled = false);
+    bool AutomaticCollisionInvestigationsEnabled = false,
+    bool DisconnectedLapRecoveryEnabled = false);
 
 public sealed record RaceRoomSettingsSnapshot(
     string SessionName,
@@ -516,7 +525,8 @@ public sealed record RaceRoomSettingsSnapshot(
     IReadOnlyList<RaceTeamDefinition>? Teams = null,
     TrackLimitEnforcementMode TrackLimitMode = TrackLimitEnforcementMode.WarningsOnly,
     int MinimumRequiredPitStops = 1,
-    bool AutomaticCollisionInvestigationsEnabled = false);
+    bool AutomaticCollisionInvestigationsEnabled = false,
+    bool DisconnectedLapRecoveryEnabled = false);
 
 public sealed record RaceAdminPenaltyCommand(
     Guid ParticipantId,

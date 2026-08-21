@@ -254,6 +254,7 @@ export class RaceRoom {
       }
 
       let result: CommandResult;
+      let lapAcknowledgement: { eventId: string; isAccepted: boolean; message?: string | null } | null = null;
       // Durable Object alarms may be delivered late. Active client traffic also
       // advances the race clock, but doing so once per telemetry packet makes
       // all 12 drivers pay for the same clock transition checks. Ten checks per
@@ -270,14 +271,28 @@ export class RaceRoom {
       } else if (envelope.type === "telemetry") {
         result = this.core.updateTelemetry(attachment.participantId, envelope.payload as TelemetryUpdate);
       } else if (envelope.type === "lapCompleted") {
-        result = this.core.completeLap(attachment.participantId, envelope.payload as LapCompleted);
+        const completed = envelope.payload as LapCompleted;
+        result = this.core.completeLap(attachment.participantId, completed);
+        lapAcknowledgement = {
+          eventId: completed.eventId,
+          isAccepted: result.ok,
+          message: result.ok ? null : result.error
+        };
         important = true;
       } else {
         result = { ok: false, error: "未知消息类型。" };
       }
 
       if (!result.ok) {
-        this.send(webSocket, "error", { code: "commandRejected", message: result.error });
+        if (important) {
+          await this.persist();
+          await this.scheduleAlarm();
+          this.broadcastSnapshot(true);
+        }
+        if (lapAcknowledgement)
+          this.send(webSocket, "lapAcknowledged", lapAcknowledgement);
+        else
+          this.send(webSocket, "error", { code: "commandRejected", message: result.error });
         return;
       }
       if (important) {
@@ -288,6 +303,8 @@ export class RaceRoom {
         await this.persistTelemetryPeriodically();
         this.broadcastSnapshot(false);
       }
+      if (lapAcknowledgement)
+        this.send(webSocket, "lapAcknowledged", lapAcknowledgement);
     } catch (error) {
       this.send(webSocket, "error", {
         code: "invalidMessage",
@@ -302,6 +319,7 @@ export class RaceRoom {
     try { webSocket.close(code, reason); } catch { /* already closed */ }
     if (participantId && !this.hasAnotherSocket(participantId, webSocket) && this.core.disconnect(participantId)) {
       await this.persist();
+      await this.scheduleAlarm();
       this.broadcastSnapshot(true);
     }
   }

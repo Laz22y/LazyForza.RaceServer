@@ -162,9 +162,10 @@
           <details class="room-submenu">
             <summary><span>判定与自动化</span><small>黄旗、边界、碰撞调查与恢复阈值</small></summary>
             <div class="room-submenu-body">
-              <label class="toggle"><input id="automaticCollisionInvestigations" type="checkbox"><span>启用疑似碰撞自动调查</span></label>
+              <label class="toggle"><input id="automaticCollisionInvestigations" type="checkbox"><span>启用疑似碰撞自动调查（练习、排位与正赛）</span></label>
+              <label class="toggle"><input id="disconnectedLapRecovery" type="checkbox"><span>允许断线后补交本地计圈（30 秒）</span></label>
               <div class="field-grid hazard-fields"><label>赛道边界处理<select id="trackLimitMode"><option value="warningsOnly">仅记录警告，交总控核查</option><option value="automatic">自动警告与罚时</option><option value="disabled">关闭判定</option></select></label><label>极低速阈值 km/h<input id="slowSpeedKph" type="number" min="3" max="50" step="1"></label><label>低速持续秒数<input id="slowDurationSeconds" type="number" min="1" max="15" step="0.5"></label><label>严重偏离/严重切弯距离 m<input id="severeLateralOffsetMeters" type="number" min="5" max="200" step="1"></label><label>恢复确认秒数<input id="recoveryDurationSeconds" type="number" min="1" max="15" step="0.5"></label></div>
-              <p class="muted compact">疑似碰撞调查使用双方轨迹、相对运动、冲击证据与官方可破坏物字段排除误报，只生成待审证据，不自动认定责任。</p>
+              <p class="muted compact">练习、排位与正赛均会使用双方轨迹、相对运动、冲击证据与官方可破坏物字段生成待审调查，不自动认定责任。</p>
               <p class="muted compact">边界模式会结合路线进度、车速与驶离期间路程估算是否获利；“仅记录警告”留给总控核查，“自动警告与罚时”才会自动下发处罚。</p>
             </div>
           </details>

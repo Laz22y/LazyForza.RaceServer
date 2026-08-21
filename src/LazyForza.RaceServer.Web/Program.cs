@@ -23,6 +23,7 @@ serverOptions = serverOptions with
     SectorCount = initialRoom.SectorCount,
     AutomaticYellowEnabled = initialRoom.AutomaticYellowEnabled,
     AutomaticCollisionInvestigationsEnabled = initialRoom.AutomaticCollisionInvestigationsEnabled,
+    DisconnectedLapRecoveryEnabled = initialRoom.DisconnectedLapRecoveryEnabled,
     SlowSpeedKph = initialRoom.SlowSpeedKph,
     SlowDurationSeconds = initialRoom.SlowDurationSeconds,
     SevereLateralOffsetMeters = initialRoom.SevereLateralOffsetMeters,
@@ -172,7 +173,8 @@ app.MapPost("/api/setup", (
         room.Teams,
         room.TrackLimitMode,
         room.MinimumRequiredPitStops,
-        room.AutomaticCollisionInvestigationsEnabled));
+        room.AutomaticCollisionInvestigationsEnabled,
+        room.DisconnectedLapRecoveryEnabled));
     return applied.IsAccepted ? Results.Ok(new { ok = true }) : Results.BadRequest(new { error = applied.Error });
 });
 
@@ -303,7 +305,8 @@ app.MapPost("/api/admin/track-package", async (
             current.Teams,
             current.TrackLimitMode,
             current.MinimumRequiredPitStops,
-            current.AutomaticCollisionInvestigationsEnabled));
+            current.AutomaticCollisionInvestigationsEnabled,
+            current.DisconnectedLapRecoveryEnabled));
         if (!result.IsAccepted) return Results.BadRequest(new { error = result.Error });
         settings.SaveRoomSettings(coordinator.RoomSettings());
         return Results.Ok(new { package = metadata, room = coordinator.RoomSettings() });

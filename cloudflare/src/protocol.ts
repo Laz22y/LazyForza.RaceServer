@@ -95,6 +95,13 @@ export interface LapCompleted {
   invalidReason?: string | null;
   clientMonotonicMilliseconds: number;
   isBestLapEligible?: boolean;
+  isRecoveredAfterDisconnect?: boolean;
+}
+
+export interface LapAcknowledgement {
+  eventId: string;
+  isAccepted: boolean;
+  message?: string | null;
 }
 
 export interface PenaltySnapshot {
@@ -275,6 +282,7 @@ export interface SessionSnapshot {
   observers?: ObserverSnapshot[];
   minimumRequiredPitStops?: number;
   automaticCollisionInvestigationsEnabled?: boolean;
+  disconnectedLapRecoveryEnabled?: boolean;
 }
 
 export interface StageResultParticipantSnapshot {
@@ -339,6 +347,7 @@ export interface RoomSettings {
   sectorCount: number;
   automaticYellowEnabled: boolean;
   automaticCollisionInvestigationsEnabled?: boolean;
+  disconnectedLapRecoveryEnabled?: boolean;
   slowSpeedKph: number;
   slowDurationSeconds: number;
   severeLateralOffsetMeters: number;

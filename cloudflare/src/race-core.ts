@@ -46,6 +46,7 @@ export interface RaceConfiguration {
   sectorCount?: number;
   automaticYellowEnabled?: boolean;
   automaticCollisionInvestigationsEnabled?: boolean;
+  disconnectedLapRecoveryEnabled?: boolean;
   slowSpeedKph?: number;
   slowDurationSeconds?: number;
   severeLateralOffsetMeters?: number;
@@ -104,6 +105,7 @@ interface ParticipantState {
   lastLapSeconds?: number | null;
   bestLapSeconds?: number | null;
   lastLapCompletedAt?: string | null;
+  disconnectedLapRecoveryUntil?: string | null;
   raceTotalSeconds?: number | null;
   trackToleranceMeters?: number;
   trackLimitWarnings?: number;
@@ -220,6 +222,7 @@ export interface StoredRaceState {
   sectorCount: number;
   automaticYellowEnabled: boolean;
   automaticCollisionInvestigationsEnabled: boolean;
+  disconnectedLapRecoveryEnabled: boolean;
   slowSpeedKph: number;
   slowDurationSeconds: number;
   severeLateralOffsetMeters: number;
@@ -354,6 +357,7 @@ export class RaceCore {
       ,sectorCount: clampInteger(configuration.sectorCount ?? 3, 1, 20)
       ,automaticYellowEnabled: configuration.automaticYellowEnabled ?? true
       ,automaticCollisionInvestigationsEnabled: configuration.automaticCollisionInvestigationsEnabled ?? false
+      ,disconnectedLapRecoveryEnabled: configuration.disconnectedLapRecoveryEnabled ?? false
       ,slowSpeedKph: clamp(configuration.slowSpeedKph ?? 12, 3, 50)
       ,slowDurationSeconds: clamp(configuration.slowDurationSeconds ?? 3, 1, 15)
       ,severeLateralOffsetMeters: clamp(configuration.severeLateralOffsetMeters ?? 25, 5, 200)
@@ -477,7 +481,8 @@ export class RaceCore {
       resumed.teamColor = team?.themeColor ?? null;
       resumed.isConnected = true;
       resumed.status = this.state.flag === "chequered" &&
-                       (this.state.phase === "race" || this.state.phase === "finished")
+                       (this.state.phase === "race" || this.state.phase === "finished") &&
+                       !this.hasActiveDisconnectedLapRecovery(resumed, now)
         ? "didNotFinish"
         : ["race", "countdown", "practice", "outLap", "formationLap"].includes(this.state.phase)
           ? "onTrack"
@@ -524,6 +529,7 @@ export class RaceCore {
       lastLapSeconds: null,
       bestLapSeconds: null,
       lastLapCompletedAt: null,
+      disconnectedLapRecoveryUntil: null,
       raceTotalSeconds: null,
       trackToleranceMeters: 18,
       trackLimitWarnings: 0,
@@ -591,8 +597,19 @@ export class RaceCore {
     participant.hazardCandidateStartedAt = null;
     participant.hazardRecoveryStartedAt = null;
     participant.lastSeenAt = now.toISOString();
-    participant.qualifyingFinalLapPending = false;
-    participant.practiceFinalLapPending = false;
+    const effectivePhase = this.state.phase === "suspended"
+      ? this.state.phaseBeforeSuspension
+      : this.state.phase;
+    const canRecoverLap = this.state.disconnectedLapRecoveryEnabled &&
+      participant.status === "disconnected" &&
+      (effectivePhase === "practice" || effectivePhase === "qualifying" || effectivePhase === "race");
+    participant.disconnectedLapRecoveryUntil = canRecoverLap
+      ? new Date(now.getTime() + 30_000).toISOString()
+      : null;
+    if (!canRecoverLap) {
+      participant.qualifyingFinalLapPending = false;
+      participant.practiceFinalLapPending = false;
+    }
     this.recordEvent("participantDisconnected", `${participant.displayName} 离开房间。`, participant.id, now);
     this.completeQualifyingIfReady(now);
     this.completePracticeIfReady(now);
@@ -703,23 +720,35 @@ export class RaceCore {
   completeLap(participantId: string, completed: LapCompleted, now = new Date()): CommandResult {
     const participant = this.find(participantId);
     if (!participant) return rejected("车手不存在。");
+    const eventId = cleanText(completed.eventId, 80);
+    if (!eventId) return rejected("圈速事件编号无效。");
+    if (this.state.receivedLapEvents.includes(eventId)) return accepted();
+    if (completed.isRecoveredAfterDisconnect) {
+      if (!this.state.disconnectedLapRecoveryEnabled)
+        return rejected("服务端未开启断线圈速恢复。");
+      if (!this.hasActiveDisconnectedLapRecovery(participant, now))
+        return rejected("断线圈速恢复窗口已结束。");
+    }
     if (terminal(participant.status) || participant.status === "disconnected")
       return rejected("该车手已经结束比赛，不能继续提交圈速。");
     if (this.state.phase !== "practice" && this.state.phase !== "qualifying" && this.state.phase !== "race")
       return rejected("当前阶段不接收圈速成绩。");
     if (this.state.phase === "qualifying" && participant.qualifyingEligible === false)
       return rejected("该车手已在本次排位赛中被淘汰。");
-    if (this.state.phase === "qualifying" && this.state.qualifyingTimeExpired && !participant.qualifyingFinalLapPending)
+    if (this.state.phase === "qualifying" && this.state.qualifyingTimeExpired &&
+        !participant.qualifyingFinalLapPending && !completed.isRecoveredAfterDisconnect)
       return rejected("排位赛计时已结束，该车手没有待完成的最后一圈。");
-    if (this.state.phase === "practice" && this.state.practiceTimeExpired && !participant.practiceFinalLapPending)
+    if (this.state.phase === "practice" && this.state.practiceTimeExpired &&
+        !participant.practiceFinalLapPending && !completed.isRecoveredAfterDisconnect)
       return rejected("练习赛计时已结束，该车手没有待完成的最后一圈。");
-    const eventId = cleanText(completed.eventId, 80);
-    if (!eventId) return rejected("圈速事件编号无效。");
-    if (this.state.receivedLapEvents.includes(eventId)) return accepted();
+    if (completed.isValid &&
+        (!Number.isFinite(completed.lapSeconds) || completed.lapSeconds < 3 || completed.lapSeconds > 21_600))
+      return rejected("圈速数值超出有效范围。");
     this.state.receivedLapEvents.push(eventId);
     if (this.state.receivedLapEvents.length > 20_000)
       this.state.receivedLapEvents.splice(0, this.state.receivedLapEvents.length - 10_000);
     if (!completed.isValid) {
+      participant.disconnectedLapRecoveryUntil = null;
       this.recordEvent("lapInvalid", `${participant.displayName} 的本圈无效：${cleanText(completed.invalidReason, 120) ?? "客户端判定无效"}。`, participant.id, now);
       if (this.state.phase === "race")
         this.updateDriveThroughDeadline(participant, now, false);
@@ -730,9 +759,6 @@ export class RaceCore {
       this.touch();
       return accepted();
     }
-    if (!Number.isFinite(completed.lapSeconds) || completed.lapSeconds < 3 || completed.lapSeconds > 21_600)
-      return rejected("圈速数值超出有效范围。");
-
     const priorFastest = this.fastestLap();
     const bestLapEligible = completed.isBestLapEligible !== false && !participant.lapHasTrackLimitIncident;
     const improvesPersonalBest = bestLapEligible &&
@@ -762,6 +788,7 @@ export class RaceCore {
     participant.shortcutPenaltyIssued = false;
     participant.progressContinuityReady = false;
     participant.lastSeenAt = now.toISOString();
+    participant.disconnectedLapRecoveryUntil = null;
     if (bestLapEligible) this.updateBestSectors(participant, completed.sectorSeconds);
     participant.lapHasTrackLimitIncident = false;
     participant.qualifyingFinalLapPending = false;
@@ -817,6 +844,7 @@ export class RaceCore {
       sectorCount: this.state.sectorCount,
       automaticYellowEnabled: this.state.automaticYellowEnabled,
       automaticCollisionInvestigationsEnabled: this.state.automaticCollisionInvestigationsEnabled,
+      disconnectedLapRecoveryEnabled: this.state.disconnectedLapRecoveryEnabled,
       slowSpeedKph: this.state.slowSpeedKph,
       slowDurationSeconds: this.state.slowDurationSeconds,
       severeLateralOffsetMeters: this.state.severeLateralOffsetMeters,
@@ -869,6 +897,10 @@ export class RaceCore {
     this.state.sectorCount = clampInteger(command.sectorCount, 1, 20);
     this.state.automaticYellowEnabled = Boolean(command.automaticYellowEnabled);
     this.state.automaticCollisionInvestigationsEnabled = command.automaticCollisionInvestigationsEnabled === true;
+    this.state.disconnectedLapRecoveryEnabled = command.disconnectedLapRecoveryEnabled === true;
+    if (!this.state.disconnectedLapRecoveryEnabled)
+      for (const participant of this.state.participants)
+        participant.disconnectedLapRecoveryUntil = null;
     this.state.slowSpeedKph = clamp(command.slowSpeedKph, 3, 50);
     this.state.slowDurationSeconds = clamp(command.slowDurationSeconds, 1, 15);
     this.state.severeLateralOffsetMeters = clamp(command.severeLateralOffsetMeters, 5, 200);
@@ -1243,6 +1275,7 @@ export class RaceCore {
       participant.automaticYellowActive = false;
       participant.hazardCandidateStartedAt = null;
       participant.hazardRecoveryStartedAt = null;
+      participant.disconnectedLapRecoveryUntil = null;
       participant.qualifyingFinalLapPending = false;
       participant.practiceFinalLapPending = false;
       this.completeQualifyingIfReady(now);
@@ -1263,7 +1296,7 @@ export class RaceCore {
   }
 
   tick(now = new Date()): boolean {
-    let changed = false;
+    let changed = this.expireDisconnectedLapRecoveries(now);
     if (this.state.phase === "countdown" && this.state.startsAt && this.state.startSequenceAt) {
       if (now.getTime() >= Date.parse(this.state.startsAt)) {
         this.state.phase = "race";
@@ -1332,6 +1365,11 @@ export class RaceCore {
       .filter((value): value is string => Boolean(value))
       .map(value => Date.parse(value))
       .filter(Number.isFinite);
+    values.push(...this.state.participants
+      .map(participant => participant.disconnectedLapRecoveryUntil
+        ? Date.parse(participant.disconnectedLapRecoveryUntil)
+        : Number.NaN)
+      .filter(Number.isFinite));
     if (this.state.phase === "countdown" && this.state.startSequenceAt && this.state.illuminatedStartLights < 5) {
       const sequenceAt = Date.parse(this.state.startSequenceAt);
       values.push(sequenceAt + this.state.illuminatedStartLights * 1_000);
@@ -1481,6 +1519,7 @@ export class RaceCore {
       practiceSessionCount: this.state.practiceSessionCount ?? 1,
       practiceSessionMinutes: [...(this.state.practiceSessionMinutes ?? [60])]
       ,minimumRequiredPitStops: this.state.minimumRequiredPitStops
+      ,disconnectedLapRecoveryEnabled: this.state.disconnectedLapRecoveryEnabled
     };
   }
 
@@ -1535,6 +1574,7 @@ export class RaceCore {
         falseStartMovementStartedAt: participant.falseStartMovementStartedAt ?? null,
         falseStartPenalized: participant.falseStartPenalized ?? false,
         lastLapCompletedAt: participant.lastLapCompletedAt ?? null,
+        disconnectedLapRecoveryUntil: participant.disconnectedLapRecoveryUntil ?? null,
         raceTotalSeconds: participant.raceTotalSeconds ?? null,
         trackToleranceMeters: clamp(participant.trackToleranceMeters ?? 18, 4, 50),
         trackLimitWarnings: clampInteger(participant.trackLimitWarnings ?? 0, 0, 999),
@@ -1612,6 +1652,7 @@ export class RaceCore {
       ,sectorCount: clampInteger(stored.sectorCount ?? 3, 1, 20)
       ,automaticYellowEnabled: stored.automaticYellowEnabled ?? true
       ,automaticCollisionInvestigationsEnabled: stored.automaticCollisionInvestigationsEnabled ?? false
+      ,disconnectedLapRecoveryEnabled: stored.disconnectedLapRecoveryEnabled ?? false
       ,slowSpeedKph: clamp(stored.slowSpeedKph ?? 12, 3, 50)
       ,slowDurationSeconds: clamp(stored.slowDurationSeconds ?? 3, 1, 15)
       ,severeLateralOffsetMeters: clamp(stored.severeLateralOffsetMeters ?? 25, 5, 200)
@@ -1785,7 +1826,10 @@ export class RaceCore {
     const impactAge = clampInteger(update.impactAgeMilliseconds ?? 0, 0, 2_000);
     const impactMagnitude = clamp(update.impactMagnitudeMps ?? 0, 0, 200);
     const impactSpeedLoss = clamp(update.impactSpeedLossMps ?? 0, 0, 200);
-    if (this.state.phase !== "race" || this.state.flag === "chequered" ||
+    const collisionSessionActive = this.state.phase === "practice" ||
+      this.state.phase === "qualifying" || this.state.phase === "race";
+    if (!collisionSessionActive ||
+        this.state.flag === "chequered" ||
         update.hasWorldPosition !== true || impactAge > 1_000 ||
         impactMagnitude < 1.4 ||
         clamp(update.impactSmashableVelDiff ?? 0, 0, 200) >= .2 ||
@@ -2406,7 +2450,8 @@ export class RaceCore {
   private completePracticeIfReady(now: Date): void {
     if (this.state.phase !== "practice" || !this.state.practiceTimeExpired ||
         !this.state.practiceEndsAt ||
-        this.state.participants.some(participant => participant.practiceFinalLapPending)) return;
+        this.state.participants.some(participant => participant.practiceFinalLapPending ||
+          this.hasActiveDisconnectedLapRecovery(participant, now))) return;
     this.captureCurrentPracticeResults();
     this.archiveActiveResult(now, true);
     if ((this.state.practiceSessionNumber ?? 1) < (this.state.practiceSessionCount ?? 1)) {
@@ -2484,7 +2529,8 @@ export class RaceCore {
   private completeQualifyingIfReady(now: Date): void {
     if (this.state.phase !== "qualifying" || !this.state.qualifyingTimeExpired ||
         !this.state.qualifyingEndsAt ||
-        this.state.participants.some(participant => participant.qualifyingFinalLapPending)) return;
+        this.state.participants.some(participant => participant.qualifyingFinalLapPending ||
+          this.hasActiveDisconnectedLapRecovery(participant, now))) return;
     this.captureCurrentQualifyingResults();
     this.archiveActiveResult(now, true);
     if ((this.state.qualifyingSessionNumber ?? 1) < (this.state.qualifyingSessionCount ?? 1)) {
@@ -2610,6 +2656,7 @@ export class RaceCore {
     participant.bestSectorSeconds = [];
     participant.bestLapSectorSeconds = [];
     participant.lastLapCompletedAt = null;
+    participant.disconnectedLapRecoveryUntil = null;
     participant.qualifyingFinalLapPending = false;
     participant.lapHasTrackLimitIncident = false;
     participant.progressContinuityReady = false;
@@ -2696,6 +2743,7 @@ export class RaceCore {
     participant.lastLapSeconds = null;
     participant.bestLapSeconds = null;
     participant.lastLapCompletedAt = null;
+    participant.disconnectedLapRecoveryUntil = null;
     participant.raceTotalSeconds = null;
     participant.trackToleranceMeters = 18;
     participant.trackLimitWarnings = 0;
@@ -3141,11 +3189,43 @@ export class RaceCore {
       this.state.phase === "suspended" && this.state.phaseBeforeSuspension === "race";
   }
 
+  private hasActiveDisconnectedLapRecovery(participant: ParticipantState, now: Date): boolean {
+    return Boolean(participant.disconnectedLapRecoveryUntil) &&
+      Date.parse(participant.disconnectedLapRecoveryUntil!) > now.getTime();
+  }
+
+  private expireDisconnectedLapRecoveries(now: Date): boolean {
+    let changed = false;
+    for (const participant of this.state.participants) {
+      if (!participant.disconnectedLapRecoveryUntil ||
+          Date.parse(participant.disconnectedLapRecoveryUntil) > now.getTime()) continue;
+      participant.disconnectedLapRecoveryUntil = null;
+      changed = true;
+      if (participant.isConnected) continue;
+      participant.qualifyingFinalLapPending = false;
+      participant.practiceFinalLapPending = false;
+      const effectivePhase = this.state.phase === "suspended"
+        ? this.state.phaseBeforeSuspension
+        : this.state.phase;
+      if (effectivePhase === "race" && this.state.flag === "chequered" && participant.status === "disconnected") {
+        participant.status = "didNotFinish";
+        participant.finishedAt ??= now.toISOString();
+      }
+    }
+    if (changed) {
+      this.completeQualifyingIfReady(now);
+      this.completePracticeIfReady(now);
+      this.tryCompleteRaceIfReady(now);
+    }
+    return changed;
+  }
+
   private tryCompleteRaceIfReady(now: Date): boolean {
     if (this.state.phase !== "race" || this.state.flag !== "chequered") return false;
     const awaitingFinish = this.state.participants.some(participant =>
-      participant.reservationActive !== false && participant.isConnected &&
-      !terminal(participant.status) && participant.status !== "disconnected");
+      participant.reservationActive !== false &&
+      ((participant.isConnected && !terminal(participant.status) && participant.status !== "disconnected") ||
+       this.hasActiveDisconnectedLapRecovery(participant, now)));
     if (awaitingFinish) return false;
     this.state.phase = "finished";
     this.state.raceEndedAt = now.toISOString();
