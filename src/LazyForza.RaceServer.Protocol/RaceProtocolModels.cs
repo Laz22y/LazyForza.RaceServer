@@ -224,7 +224,23 @@ public sealed record RaceTelemetryUpdate(
     double ImpactWorldVelocityY = 0,
     double ImpactWorldVelocityZ = 0,
     double ImpactSmashableVelDiff = 0,
-    double ImpactSmashableMass = 0);
+    double ImpactSmashableMass = 0,
+    RaceShortcutEvidence? ShortcutEvidence = null);
+
+public sealed record RaceShortcutEvidence(
+    Guid Id,
+    long DetectedAtMonotonicMilliseconds,
+    double StartProgress,
+    double EndProgress,
+    double RouteDistanceMeters,
+    double WorldDistanceMeters,
+    double GainMeters,
+    double MaximumLateralOffsetMeters,
+    double ProtectedRouteMeters,
+    double TheoreticalSavingMeters,
+    int MissedCriticalGates,
+    double Confidence,
+    int Flags);
 
 public sealed record RaceLapCompleted(
     Guid EventId,
@@ -627,8 +643,27 @@ public static partial class RaceProtocolValidation
         ImpactWorldVelocityY = FiniteClamp(value.ImpactWorldVelocityY, -500, 500),
         ImpactWorldVelocityZ = FiniteClamp(value.ImpactWorldVelocityZ, -500, 500),
         ImpactSmashableVelDiff = FiniteClamp(value.ImpactSmashableVelDiff, 0, 200),
-        ImpactSmashableMass = FiniteClamp(value.ImpactSmashableMass, 0, 100_000)
+        ImpactSmashableMass = FiniteClamp(value.ImpactSmashableMass, 0, 100_000),
+        ShortcutEvidence = NormalizeShortcutEvidence(value.ShortcutEvidence)
     };
+
+    private static RaceShortcutEvidence? NormalizeShortcutEvidence(RaceShortcutEvidence? value) => value is null
+        ? null
+        : value with
+        {
+            DetectedAtMonotonicMilliseconds = Math.Max(0, value.DetectedAtMonotonicMilliseconds),
+            StartProgress = FiniteClamp(value.StartProgress, 0, 1),
+            EndProgress = FiniteClamp(value.EndProgress, 0, 1),
+            RouteDistanceMeters = FiniteClamp(value.RouteDistanceMeters, 0, 1_000),
+            WorldDistanceMeters = FiniteClamp(value.WorldDistanceMeters, 0, 1_000),
+            GainMeters = FiniteClamp(value.GainMeters, 0, 1_000),
+            MaximumLateralOffsetMeters = FiniteClamp(value.MaximumLateralOffsetMeters, 0, 1_000),
+            ProtectedRouteMeters = FiniteClamp(value.ProtectedRouteMeters, 0, 1_000),
+            TheoreticalSavingMeters = FiniteClamp(value.TheoreticalSavingMeters, 0, 1_000),
+            MissedCriticalGates = Math.Clamp(value.MissedCriticalGates, 0, 32),
+            Confidence = FiniteClamp(value.Confidence, 0, 1),
+            Flags = Math.Clamp(value.Flags, 0, 255)
+        };
 
     private static string NormalizeSingleLine(string? value, int maximumLength)
     {

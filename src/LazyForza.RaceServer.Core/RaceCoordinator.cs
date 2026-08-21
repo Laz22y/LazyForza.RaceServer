@@ -44,6 +44,10 @@ public sealed class RaceCoordinator
     private static readonly TimeSpan CollisionPairCooldown = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan MinimumTelemetrySnapshotInterval = TimeSpan.FromMilliseconds(100);
     private static readonly TimeSpan DisconnectedLapRecoveryGrace = TimeSpan.FromSeconds(30);
+    private const int ShortcutDistanceGainFlag = 1;
+    private const int ShortcutProtectedArcFlag = 2;
+    private const int ShortcutMissedGateFlag = 4;
+    private const int ShortcutAmbiguousProjectionFlag = 8;
     private const int MaximumArchivedStageResults = 24;
     private readonly object sync = new();
     private readonly RaceServerOptions options;
@@ -2054,8 +2058,8 @@ public sealed class RaceCoordinator
         RaceTelemetryUpdate telemetry,
         DateTimeOffset now)
     {
-        TrackLimitDecision? decision = null;
-        if (participant.ProgressContinuityReady &&
+        var decision = EvaluateClientShortcutEvidence(participant, telemetry, now);
+        if (decision is null && participant.ProgressContinuityReady &&
             telemetry.TrackLengthMeters >= 50 &&
             telemetry.ClientMonotonicMilliseconds > participant.LastTelemetryMonotonicMilliseconds)
         {
@@ -2091,6 +2095,55 @@ public sealed class RaceCoordinator
         participant.LastContinuityProgress = telemetry.TrackProgress;
         participant.ProgressContinuityReady = telemetry.ClientMonotonicMilliseconds > 0;
         return decision;
+    }
+
+    private TrackLimitDecision? EvaluateClientShortcutEvidence(
+        ParticipantState participant,
+        RaceTelemetryUpdate telemetry,
+        DateTimeOffset now)
+    {
+        var evidence = telemetry.ShortcutEvidence;
+        if (evidence is null || evidence.Id == Guid.Empty || evidence.Id == participant.LastShortcutEvidenceId)
+            return null;
+        participant.LastShortcutEvidenceId = evidence.Id;
+
+        var eligible = phase is RaceSessionPhase.Race or RaceSessionPhase.Practice or RaceSessionPhase.Qualifying &&
+                       (phase != RaceSessionPhase.Qualifying || participant.QualifyingEligible) &&
+                       !telemetry.IsInPitLane && !telemetry.IsInServiceZone && !telemetry.IsApproachingPit &&
+                       !telemetry.IsOnPitRoute &&
+                       participant.Status is not (RaceParticipantStatus.Finished or
+                           RaceParticipantStatus.DidNotFinish or RaceParticipantStatus.Disqualified or
+                           RaceParticipantStatus.Disconnected);
+        var ageMilliseconds = telemetry.ClientMonotonicMilliseconds - evidence.DetectedAtMonotonicMilliseconds;
+        var calculatedGain = evidence.RouteDistanceMeters - evidence.WorldDistanceMeters;
+        var gainTolerance = Math.Max(3, evidence.GainMeters * 0.25);
+        var minimumGain = Math.Max(5, telemetry.TrackToleranceMeters * 0.3);
+        var hasDistanceGain = (evidence.Flags & ShortcutDistanceGainFlag) != 0;
+        var hasRouteSupport = (evidence.Flags & (ShortcutProtectedArcFlag | ShortcutMissedGateFlag)) != 0;
+        if (!eligible || ageMilliseconds is < 0 or > 10_000 ||
+            evidence.Confidence < 0.72 || !hasDistanceGain || !hasRouteSupport ||
+            evidence.RouteDistanceMeters < 8 || evidence.WorldDistanceMeters < 0 ||
+            calculatedGain < minimumGain || evidence.GainMeters < minimumGain ||
+            Math.Abs(calculatedGain - evidence.GainMeters) > gainTolerance ||
+            evidence.ProtectedRouteMeters > evidence.RouteDistanceMeters + 2)
+            return null;
+
+        var missedGate = (evidence.Flags & ShortcutMissedGateFlag) != 0 &&
+                         evidence.MissedCriticalGates > 0;
+        var ambiguous = (evidence.Flags & ShortcutAmbiguousProjectionFlag) != 0;
+        var severe = (!ambiguous && evidence.Confidence >= 0.85 && missedGate &&
+                      evidence.GainMeters >= Math.Max(10, telemetry.TrackToleranceMeters * 0.45)) ||
+                     (evidence.Confidence >= 0.8 && evidence.GainMeters >= 25);
+        if (participant.TrackLimitExcursionStartedAt is not null)
+            participant.TrackLimitSeverePenaltyIssued = true;
+        return RegisterTrackLimitIncident(
+            participant,
+            severe,
+            evidence.GainMeters,
+            $"绕过约 {evidence.ProtectedRouteMeters:0} 米弯道路程，实走 {evidence.WorldDistanceMeters:0.0} 米，" +
+            $"获得约 {evidence.GainMeters:0.0} 米距离优势" +
+            (missedGate ? $"，未通过 {evidence.MissedCriticalGates} 个关键门" : string.Empty),
+            now);
     }
 
     private RacePenaltySnapshot? EvaluatePitSpeeding(
@@ -4105,6 +4158,7 @@ public sealed class RaceCoordinator
         public long LastTelemetryMonotonicMilliseconds { get; set; }
         public double LastContinuityProgress { get; set; }
         public bool ShortcutPenaltyIssued { get; set; }
+        public Guid LastShortcutEvidenceId { get; set; }
         public List<double?> BestSectorSeconds { get; } = [];
         public List<double?> BestLapSectorSeconds { get; } = [];
         public bool IsInPitLane { get; set; }

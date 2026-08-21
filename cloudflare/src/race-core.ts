@@ -146,6 +146,7 @@ interface ParticipantState {
   lastTelemetryMonotonicMilliseconds?: number;
   lastContinuityProgress?: number;
   shortcutPenaltyIssued?: boolean;
+  lastShortcutEvidenceId?: string | null;
   pitSpeedCandidateStartedAt?: string | null;
   pitSpeedPenaltyIssued?: boolean;
   penaltyServiceActive?: boolean;
@@ -541,6 +542,7 @@ export class RaceCore {
       trackLimitTravelDistanceMeters: 0,
       trackLimitLastMonotonicMilliseconds: 0,
       lapHasTrackLimitIncident: false,
+      lastShortcutEvidenceId: null,
       bestSectorSeconds: [],
       bestLapSectorSeconds: [],
       isInPitLane: false,
@@ -1586,6 +1588,7 @@ export class RaceCore {
         trackLimitTravelDistanceMeters: clamp(participant.trackLimitTravelDistanceMeters ?? 0, 0, 1_000_000),
         trackLimitLastMonotonicMilliseconds: clamp(participant.trackLimitLastMonotonicMilliseconds ?? 0, 0, Number.MAX_SAFE_INTEGER),
         lapHasTrackLimitIncident: participant.lapHasTrackLimitIncident ?? false,
+        lastShortcutEvidenceId: participant.lastShortcutEvidenceId ?? null,
         bestLapSectorSeconds: Array.isArray(participant.bestLapSectorSeconds)
           ? participant.bestLapSectorSeconds.slice(0, 20) : [],
         penaltyServiceActive: participant.penaltyServiceActive ?? false,
@@ -2245,11 +2248,12 @@ export class RaceCore {
   }
 
   private evaluateShortcut(participant: ParticipantState, update: TelemetryUpdate, now: Date): void {
+    const clientEvidenceHandled = this.evaluateClientShortcutEvidence(participant, update, now);
     const monotonic = Number.isFinite(update.clientMonotonicMilliseconds)
       ? update.clientMonotonicMilliseconds : 0;
     const trackLength = update.trackLengthMeters && update.trackLengthMeters > 0
       ? clamp(update.trackLengthMeters, 50, 100_000) : 0;
-    if (participant.progressContinuityReady && trackLength >= 50 &&
+    if (!clientEvidenceHandled && participant.progressContinuityReady && trackLength >= 50 &&
         monotonic > (participant.lastTelemetryMonotonicMilliseconds ?? 0)) {
       const elapsedSeconds = (monotonic - (participant.lastTelemetryMonotonicMilliseconds ?? 0)) / 1_000;
       let progressDelta = clamp(update.trackProgress, 0, 1) - (participant.lastContinuityProgress ?? 0);
@@ -2273,6 +2277,61 @@ export class RaceCore {
     participant.lastTelemetryMonotonicMilliseconds = monotonic;
     participant.lastContinuityProgress = clamp(update.trackProgress, 0, 1);
     participant.progressContinuityReady = monotonic > 0;
+  }
+
+  private evaluateClientShortcutEvidence(
+    participant: ParticipantState,
+    update: TelemetryUpdate,
+    now: Date): boolean {
+    const evidence = update.shortcutEvidence;
+    if (!evidence || typeof evidence.id !== "string" || evidence.id.length < 32 ||
+        evidence.id === participant.lastShortcutEvidenceId)
+      return false;
+    participant.lastShortcutEvidenceId = evidence.id.slice(0, 64);
+
+    const eligible = (this.state.phase === "race" || this.state.phase === "practice" ||
+        this.state.phase === "qualifying") &&
+      (this.state.phase !== "qualifying" || participant.qualifyingEligible !== false) &&
+      !participant.isInPitLane && !participant.isInServiceZone &&
+      update.isApproachingPit !== true && update.isOnPitRoute !== true &&
+      !terminal(participant.status) && participant.status !== "disconnected";
+    const detectedAt = clamp(evidence.detectedAtMonotonicMilliseconds, 0, Number.MAX_SAFE_INTEGER);
+    const ageMilliseconds = clamp(update.clientMonotonicMilliseconds, 0, Number.MAX_SAFE_INTEGER) - detectedAt;
+    const routeDistance = clamp(evidence.routeDistanceMeters, 0, 1_000);
+    const worldDistance = clamp(evidence.worldDistanceMeters, 0, 1_000);
+    const reportedGain = clamp(evidence.gainMeters, 0, 1_000);
+    const calculatedGain = routeDistance - worldDistance;
+    const confidence = clamp(evidence.confidence, 0, 1);
+    const protectedRoute = clamp(evidence.protectedRouteMeters, 0, 1_000);
+    const missedGates = clampInteger(evidence.missedCriticalGates, 0, 32);
+    const flags = clampInteger(evidence.flags, 0, 255);
+    const trackTolerance = update.trackToleranceMeters && update.trackToleranceMeters > 0
+      ? clamp(update.trackToleranceMeters, 4, 50) : 18;
+    const minimumGain = Math.max(5, trackTolerance * .3);
+    const gainTolerance = Math.max(3, reportedGain * .25);
+    const hasDistanceGain = (flags & 1) !== 0;
+    const hasRouteSupport = (flags & (2 | 4)) !== 0;
+    if (!eligible || ageMilliseconds < 0 || ageMilliseconds > 10_000 || confidence < .72 ||
+        !hasDistanceGain || !hasRouteSupport || routeDistance < 8 || calculatedGain < minimumGain ||
+        reportedGain < minimumGain || Math.abs(calculatedGain - reportedGain) > gainTolerance ||
+        protectedRoute > routeDistance + 2)
+      return false;
+
+    const missedGate = (flags & 4) !== 0 && missedGates > 0;
+    const ambiguous = (flags & 8) !== 0;
+    const severe = (!ambiguous && confidence >= .85 && missedGate &&
+        reportedGain >= Math.max(10, trackTolerance * .45)) ||
+      (confidence >= .8 && reportedGain >= 25);
+    if (participant.trackLimitExcursionStartedAt)
+      participant.trackLimitSeverePenaltyIssued = true;
+    this.registerTrackLimitIncident(
+      participant,
+      severe,
+      `绕过约 ${protectedRoute.toFixed(0)} 米弯道路程，实走 ${worldDistance.toFixed(1)} 米，` +
+      `获得约 ${reportedGain.toFixed(1)} 米距离优势` +
+      (missedGate ? `，未通过 ${missedGates} 个关键门` : ""),
+      now);
+    return true;
   }
 
   private evaluatePitSpeeding(participant: ParticipantState, update: TelemetryUpdate, now: Date): void {

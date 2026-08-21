@@ -84,6 +84,23 @@ export interface TelemetryUpdate {
   impactWorldVelocityZ?: number;
   impactSmashableVelDiff?: number;
   impactSmashableMass?: number;
+  shortcutEvidence?: ShortcutEvidence | null;
+}
+
+export interface ShortcutEvidence {
+  id: string;
+  detectedAtMonotonicMilliseconds: number;
+  startProgress: number;
+  endProgress: number;
+  routeDistanceMeters: number;
+  worldDistanceMeters: number;
+  gainMeters: number;
+  maximumLateralOffsetMeters: number;
+  protectedRouteMeters: number;
+  theoreticalSavingMeters: number;
+  missedCriticalGates: number;
+  confidence: number;
+  flags: number;
 }
 
 export interface LapCompleted {

@@ -1599,6 +1599,68 @@ public sealed class RaceCoordinatorTests
     }
 
     [TestMethod]
+    public void ClientRouteEvidenceDetectsCornerCutWithoutLateralExcursionAndDeduplicatesIt()
+    {
+        var coordinator = CreateCoordinator();
+        SetTrackLimitMode(coordinator, TrackLimitEnforcementMode.Automatic);
+        var participant = Join(coordinator, 1).Accepted!;
+        var started = DateTimeOffset.Parse("2026-08-09T12:35:00Z");
+        coordinator.ApplySessionCommand(
+            new RaceAdminSessionCommand(RaceSessionPhase.Race, null, 5, null, null), started);
+        var evidenceId = Guid.NewGuid();
+        var evidence = new RaceShortcutEvidence(
+            evidenceId,
+            11_900,
+            .20,
+            .27,
+            70,
+            35,
+            35,
+            12,
+            55,
+            28,
+            2,
+            .93,
+            1 | 2 | 4);
+        var update = Telemetry(0, .27) with
+        {
+            ClientMonotonicMilliseconds = 12_000,
+            TrackLengthMeters = 1_000,
+            LateralOffsetMeters = 0,
+            ShortcutEvidence = evidence
+        };
+
+        coordinator.UpdateTelemetry(participant.ParticipantId, update, started.AddSeconds(1));
+        var detected = coordinator.Snapshot().Participants.Single();
+        Assert.AreEqual(1, detected.Penalties.Count(item => item.Kind == RacePenaltyKind.Time));
+        StringAssert.Contains(detected.Penalties.Single().Reason, "弯道路程");
+        Assert.AreEqual(1, detected.TrackLimitWarnings);
+
+        coordinator.UpdateTelemetry(
+            participant.ParticipantId,
+            update with { ClientMonotonicMilliseconds = 12_100 },
+            started.AddSeconds(1.1));
+        Assert.AreEqual(1, coordinator.Snapshot().Participants.Single().Penalties.Count,
+            "相同证据 ID 的重复上传不能再次处罚。 ");
+
+        coordinator.UpdateTelemetry(
+            participant.ParticipantId,
+            update with
+            {
+                ClientMonotonicMilliseconds = 12_200,
+                IsOnPitRoute = true,
+                ShortcutEvidence = evidence with
+                {
+                    Id = Guid.NewGuid(),
+                    DetectedAtMonotonicMilliseconds = 12_150
+                }
+            },
+            started.AddSeconds(1.2));
+        Assert.AreEqual(1, coordinator.Snapshot().Participants.Single().Penalties.Count,
+            "维修区合法分支必须排除客户端捷径证据。 ");
+    }
+
+    [TestMethod]
     public void TrackLimitModesRequireAdvantageAndNeverTreatPitApproachAsCutting()
     {
         var coordinator = CreateCoordinator();

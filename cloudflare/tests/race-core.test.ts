@@ -1232,6 +1232,54 @@ describe("RaceCore", () => {
     expect(core.snapshot().participants[0].penalties.filter(item => item.reason.includes("维修区超速"))).toHaveLength(1);
   });
 
+  it("uses client route evidence to detect a corner cut without lateral excursion", () => {
+    const core = createCore();
+    expect(core.applyRoomSettings({ ...core.roomSettings(), trackLimitMode: "automatic" }).ok).toBe(true);
+    const participantId = connect(core, "甲");
+    const started = new Date("2026-08-09T12:35:00Z");
+    core.applySession({ phase: "race" }, started);
+    const evidence = {
+      id: "11111111-2222-4333-8444-555555555555",
+      detectedAtMonotonicMilliseconds: 11_900,
+      startProgress: .20,
+      endProgress: .27,
+      routeDistanceMeters: 70,
+      worldDistanceMeters: 35,
+      gainMeters: 35,
+      maximumLateralOffsetMeters: 12,
+      protectedRouteMeters: 55,
+      theoreticalSavingMeters: 28,
+      missedCriticalGates: 2,
+      confidence: .93,
+      flags: 1 | 2 | 4
+    };
+    const update = {
+      ...telemetry(), clientMonotonicMilliseconds: 12_000, trackProgress: .27,
+      lateralOffsetMeters: 0, trackLengthMeters: 1_000, shortcutEvidence: evidence
+    };
+
+    core.updateTelemetry(participantId, update, new Date(started.getTime() + 1_000));
+    expect(core.snapshot().participants[0].penalties.filter(item => item.kind === "time")).toHaveLength(1);
+    expect(core.snapshot().participants[0].penalties[0].reason).toContain("弯道路程");
+
+    core.updateTelemetry(participantId,
+      { ...update, clientMonotonicMilliseconds: 12_100 },
+      new Date(started.getTime() + 1_100));
+    expect(core.snapshot().participants[0].penalties).toHaveLength(1);
+
+    core.updateTelemetry(participantId, {
+      ...update,
+      clientMonotonicMilliseconds: 12_200,
+      isOnPitRoute: true,
+      shortcutEvidence: {
+        ...evidence,
+        id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        detectedAtMonotonicMilliseconds: 12_150
+      }
+    }, new Date(started.getTime() + 1_200));
+    expect(core.snapshot().participants[0].penalties).toHaveLength(1);
+  });
+
   it("keeps an automatic-yellow candidate across one invalid telemetry update", () => {
     const core = createCore();
     const participantId = connect(core, "甲");
