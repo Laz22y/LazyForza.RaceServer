@@ -175,7 +175,7 @@ function renderPenaltyControl(state){
   for(const item of investigations){
     const relatedIds=Array.isArray(item.relatedParticipantIds)&&item.relatedParticipantIds.length>0?item.relatedParticipantIds:[item.participantId];
     const relatedNames=relatedIds.map(id=>drivers.get(id)??'未知车手');
-    const entry=document.createElement('article');entry.className=`penalty-entry ${item.status==='pending'?'pending':''}`;
+    const entry=document.createElement('article');entry.className=`penalty-entry ${item.status==='pending'?'pending':''} ${item.collisionEvidence?'collision-investigation':''}`;
     const main=document.createElement('div');main.className='penalty-entry-main';
     const title=document.createElement('div');title.className='penalty-entry-title';title.append(document.createTextNode(relatedNames.join(' ↔ ')),chip(item.status==='pending'?'正在调查':item.status==='penalized'?'已判罚':'不予处罚','review'));
     const detail=document.createElement('div');detail.className='penalty-entry-detail';detail.textContent=item.offense;
