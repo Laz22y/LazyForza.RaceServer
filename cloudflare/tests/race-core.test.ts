@@ -197,6 +197,64 @@ describe("RaceCore", () => {
     expect(core.snapshot().investigations).toHaveLength(0);
   });
 
+  it("matches delayed multiplayer contact from both drivers by their impact anchors", () => {
+    const core = createCore();
+    const reporter = connect(core, "甲"), other = connect(core, "乙");
+    core.applyRoomSettings({
+      ...core.roomSettings(), automaticCollisionInvestigationsEnabled: true
+    });
+    const started = new Date("2026-08-21T15:00:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 5 }, started);
+    const motion = { ...telemetry(), hasWorldPosition: true, worldY: 0, worldZ: 50,
+      hasWorldVelocity: true, worldVelocityY: 0, worldVelocityZ: 0 };
+    core.updateTelemetry(reporter, { ...motion, worldX: 100, worldVelocityX: 20 },
+      new Date(started.getTime() + 100));
+    core.updateTelemetry(other, {
+      ...motion, worldX: 110, worldVelocityX: 10, impactSequence: 1,
+      impactMagnitudeMps: 4.8, impactWorldX: 105.4, impactWorldY: 0, impactWorldZ: 50,
+      impactWorldVelocityX: 10, impactWorldVelocityY: 0, impactWorldVelocityZ: 0,
+      impactAgeMilliseconds: 50
+    }, new Date(started.getTime() + 1_000));
+    core.updateTelemetry(other, {
+      ...motion, worldX: 115, worldVelocityX: 10, impactSequence: 1, impactMagnitudeMps: 4.8
+    }, new Date(started.getTime() + 1_500));
+    core.updateTelemetry(reporter, {
+      ...motion, worldX: 100, worldVelocityX: 20, impactSequence: 1,
+      impactMagnitudeMps: 4.5, impactWorldX: 100, impactWorldY: 0, impactWorldZ: 50,
+      impactWorldVelocityX: 20, impactWorldVelocityY: 0, impactWorldVelocityZ: 0,
+      impactAgeMilliseconds: 50
+    }, new Date(started.getTime() + 1_600));
+
+    const evidence = core.snapshot().investigations?.[0].collisionEvidence;
+    expect(evidence?.bothDriversReportedImpact).toBe(true);
+    expect(evidence?.horizontalDistanceMeters).toBeCloseTo(5.4, 3);
+  });
+
+  it("rejects paired braking reports without relative motion", () => {
+    const core = createCore();
+    const reporter = connect(core, "甲"), other = connect(core, "乙");
+    core.applyRoomSettings({
+      ...core.roomSettings(), automaticCollisionInvestigationsEnabled: true
+    });
+    const started = new Date("2026-08-21T15:10:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 5 }, started);
+    const motion = { ...telemetry(), hasWorldPosition: true, worldY: 0, worldZ: 50,
+      hasWorldVelocity: true, worldVelocityX: 20, worldVelocityY: 0, worldVelocityZ: 0 };
+    core.updateTelemetry(other, {
+      ...motion, worldX: 102, impactSequence: 1, impactMagnitudeMps: 4,
+      impactSpeedLossMps: 2, impactWorldX: 102, impactWorldY: 0, impactWorldZ: 50,
+      impactWorldVelocityX: 20, impactWorldVelocityY: 0, impactWorldVelocityZ: 0
+    }, new Date(started.getTime() + 1_000));
+    core.updateTelemetry(reporter, {
+      ...motion, worldX: 100, impactSequence: 1, impactMagnitudeMps: 4,
+      impactSpeedLossMps: 2, impactWorldX: 100, impactWorldY: 0, impactWorldZ: 50,
+      impactWorldVelocityX: 20, impactWorldVelocityY: 0, impactWorldVelocityZ: 0,
+      impactAgeMilliseconds: 50
+    }, new Date(started.getTime() + 1_050));
+
+    expect(core.snapshot().investigations).toHaveLength(0);
+  });
+
   it("supports exactly twelve participants and rejects the thirteenth", () => {
     const core = createCore();
     for (let index = 1; index <= 12; index++) {

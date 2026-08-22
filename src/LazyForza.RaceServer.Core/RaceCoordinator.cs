@@ -28,12 +28,13 @@ public sealed class RaceCoordinator
     private const double LiveGapHistoryLaps = 1.25;
     private const double LiveGapProgressJitter = 0.002;
     private const double MaximumLiveGapDistanceLaps = 0.999;
-    private const double MinimumCollisionImpactMagnitudeMps = 1.4;
+    private const double MinimumCollisionImpactMagnitudeMps = 2.3;
     private const double StrongCollisionImpactMagnitudeMps = 2.8;
-    private const double MinimumCollisionRelativeSpeedMps = .8;
+    private const double MinimumCollisionRelativeSpeedMps = 1.5;
     private const double MinimumCollisionSpeedLossMps = 1.25;
-    private const double MinimumCollisionApproachMeters = .2;
+    private const double MinimumCollisionApproachMeters = .75;
     private const double MaximumCollisionHorizontalDistanceMeters = 5.2;
+    private const double MaximumPairedImpactDistanceMeters = 6;
     private const double MaximumCollisionVerticalDistanceMeters = 2.5;
     private const int MaximumCollisionInvestigationsPerSession = 24;
     private static readonly TimeSpan CollisionEvidenceLifetime = TimeSpan.FromMilliseconds(1_000);
@@ -2242,13 +2243,47 @@ public sealed class RaceCoordinator
                 now - candidate.LastTelemetryReceivedAt > CollisionPeerFreshness)
                 continue;
 
-            if (ClosestCollisionPositionSample(candidate, incidentAt) is not CollisionPositionSample candidateSample)
-                continue;
-            var deltaX = telemetry.ImpactWorldX - candidateSample.WorldX;
-            var deltaY = telemetry.ImpactWorldY - candidateSample.WorldY;
-            var deltaZ = telemetry.ImpactWorldZ - candidateSample.WorldZ;
+            var candidateImpactAt = candidate.LastImpactAt;
+            var pairedImpactCandidate = candidateImpactAt is DateTimeOffset pairedAt &&
+                                        Math.Abs((pairedAt - incidentAt).TotalMilliseconds) <=
+                                        CollisionEvidenceLifetime.TotalMilliseconds &&
+                                        candidate.LastImpactMagnitudeMps >= MinimumCollisionImpactMagnitudeMps &&
+                                        candidate.LastImpactSmashableVelDiff < .2 &&
+                                        candidate.LastImpactSmashableMass < .5;
+            CollisionPositionSample candidateSample;
+            double deltaX;
+            double deltaY;
+            double deltaZ;
+            if (pairedImpactCandidate)
+            {
+                if (ClosestCollisionPositionSample(candidate, candidateImpactAt!.Value) is not
+                    CollisionPositionSample candidateImpactSample)
+                    continue;
+                candidateSample = candidateImpactSample with
+                {
+                    WorldX = candidate.LastImpactWorldX,
+                    WorldY = candidate.LastImpactWorldY,
+                    WorldZ = candidate.LastImpactWorldZ
+                };
+                deltaX = telemetry.ImpactWorldX - candidate.LastImpactWorldX;
+                deltaY = telemetry.ImpactWorldY - candidate.LastImpactWorldY;
+                deltaZ = telemetry.ImpactWorldZ - candidate.LastImpactWorldZ;
+            }
+            else
+            {
+                if (ClosestCollisionPositionSample(candidate, incidentAt) is not
+                    CollisionPositionSample candidateTrajectorySample)
+                    continue;
+                candidateSample = candidateTrajectorySample;
+                deltaX = telemetry.ImpactWorldX - candidateSample.WorldX;
+                deltaY = telemetry.ImpactWorldY - candidateSample.WorldY;
+                deltaZ = telemetry.ImpactWorldZ - candidateSample.WorldZ;
+            }
             var horizontalDistance = Math.Sqrt(deltaX * deltaX + deltaZ * deltaZ);
-            if (horizontalDistance > MaximumCollisionHorizontalDistanceMeters ||
+            var maximumHorizontalDistance = pairedImpactCandidate
+                ? MaximumPairedImpactDistanceMeters
+                : MaximumCollisionHorizontalDistanceMeters;
+            if (horizontalDistance > maximumHorizontalDistance ||
                 Math.Abs(deltaY) > MaximumCollisionVerticalDistanceMeters)
                 continue;
 
@@ -2257,27 +2292,24 @@ public sealed class RaceCoordinator
                     Math.Pow(telemetry.ImpactWorldVelocityX - candidateSample.WorldVelocityX, 2) +
                     Math.Pow(telemetry.ImpactWorldVelocityZ - candidateSample.WorldVelocityZ, 2))
                 : 0;
-            var bothReportedImpact = candidate.LastImpactAt is DateTimeOffset candidateImpactAt &&
-                                     Math.Abs((candidateImpactAt - incidentAt).TotalMilliseconds) <=
-                                         CollisionEvidenceLifetime.TotalMilliseconds &&
-                                     candidate.LastImpactMagnitudeMps >= MinimumCollisionImpactMagnitudeMps &&
-                                     candidate.LastImpactSmashableVelDiff < .2 &&
-                                     candidate.LastImpactSmashableMass < .5;
-            var approachDistanceReduction = CollisionApproachDistanceReduction(
-                participant,
-                candidate,
-                incidentAt,
-                horizontalDistance);
+            var approachDistanceReduction = pairedImpactCandidate
+                ? 0
+                : CollisionApproachDistanceReduction(
+                    participant,
+                    candidate,
+                    incidentAt,
+                    horizontalDistance);
             var strongReporterEvidence =
                 telemetry.ImpactMagnitudeMps >= StrongCollisionImpactMagnitudeMps ||
                 telemetry.ImpactSpeedLossMps >= MinimumCollisionSpeedLossMps;
-            var trajectoryConfirmed =
+            var pairedImpactConfirmed = pairedImpactCandidate &&
+                                        relativeSpeed >= MinimumCollisionRelativeSpeedMps;
+            var singleReporterTrajectoryConfirmed =
+                !pairedImpactCandidate &&
                 approachDistanceReduction >= MinimumCollisionApproachMeters &&
-                (relativeSpeed >= MinimumCollisionRelativeSpeedMps || strongReporterEvidence);
-            var strongCloseContact = strongReporterEvidence &&
-                                     relativeSpeed >= MinimumCollisionRelativeSpeedMps &&
-                                     horizontalDistance <= 3.8;
-            if (!bothReportedImpact && !trajectoryConfirmed && !strongCloseContact)
+                relativeSpeed >= MinimumCollisionRelativeSpeedMps &&
+                strongReporterEvidence;
+            if (!pairedImpactConfirmed && !singleReporterTrajectoryConfirmed)
                 continue;
             if (horizontalDistance >= nearestHorizontalDistance)
                 continue;
@@ -2286,7 +2318,7 @@ public sealed class RaceCoordinator
             nearestHorizontalDistance = horizontalDistance;
             nearestRelativeSpeed = relativeSpeed;
             nearestApproachDistanceReduction = approachDistanceReduction;
-            nearestBothReportedImpact = bothReportedImpact;
+            nearestBothReportedImpact = pairedImpactConfirmed;
         }
 
         if (nearest is null || nearestSample is not CollisionPositionSample matchedSample) return;

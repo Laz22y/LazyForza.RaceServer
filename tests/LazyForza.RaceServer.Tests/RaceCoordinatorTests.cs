@@ -295,6 +295,67 @@ public sealed class RaceCoordinatorTests
     }
 
     [TestMethod]
+    public void PairedImpactAnchorsSurviveMultiplayerContactDelay()
+    {
+        var coordinator = CreateCoordinator();
+        var reporter = Join(coordinator, 1).Accepted!;
+        var other = Join(coordinator, 2).Accepted!;
+        Assert.IsTrue(coordinator.SetAutomaticCollisionInvestigations(true).IsAccepted);
+        var started = DateTimeOffset.Parse("2026-08-21T15:00:00Z");
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Race, null, 5, null, null), started);
+
+        coordinator.UpdateTelemetry(reporter.ParticipantId,
+            CollisionTelemetry(1, 100, 20, 0, 0), started.AddMilliseconds(100));
+        coordinator.UpdateTelemetry(other.ParticipantId,
+            CollisionTelemetry(2, 110, 10, 1, 4.8) with
+            {
+                ImpactWorldX = 105.4,
+                ImpactWorldVelocityX = 10,
+                ImpactAgeMilliseconds = 50
+            }, started.AddSeconds(1));
+        coordinator.UpdateTelemetry(other.ParticipantId,
+            CollisionTelemetry(3, 115, 10, 1, 4.8), started.AddMilliseconds(1_500));
+        coordinator.UpdateTelemetry(reporter.ParticipantId,
+            CollisionTelemetry(4, 100, 20, 1, 4.5) with
+            {
+                ImpactWorldX = 100,
+                ImpactWorldVelocityX = 20,
+                ImpactAgeMilliseconds = 50
+            }, started.AddMilliseconds(1_600));
+
+        var evidence = coordinator.Snapshot().Investigations!.Single().CollisionEvidence!;
+        Assert.IsTrue(evidence.BothDriversReportedImpact);
+        Assert.AreEqual(5.4, evidence.HorizontalDistanceMeters, .05,
+            "双方约 600 ms 的接触感知偏移应使用各自冲击位置，而不是同一服务器时刻的位置。");
+    }
+
+    [TestMethod]
+    public void PairedParallelBrakingDoesNotBecomeContactWithoutRelativeMotion()
+    {
+        var coordinator = CreateCoordinator();
+        var reporter = Join(coordinator, 1).Accepted!;
+        var other = Join(coordinator, 2).Accepted!;
+        Assert.IsTrue(coordinator.SetAutomaticCollisionInvestigations(true).IsAccepted);
+        var started = DateTimeOffset.Parse("2026-08-21T15:10:00Z");
+        coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Race, null, 5, null, null), started);
+
+        coordinator.UpdateTelemetry(other.ParticipantId,
+            CollisionTelemetry(1, 102, 20, 1, 4) with { ImpactSpeedLossMps = 2 },
+            started.AddSeconds(1));
+        coordinator.UpdateTelemetry(reporter.ParticipantId,
+            CollisionTelemetry(2, 100, 20, 1, 4) with
+            {
+                ImpactSpeedLossMps = 2,
+                ImpactAgeMilliseconds = 50
+            }, started.AddMilliseconds(1_050));
+
+        Assert.IsEmpty(coordinator.Snapshot().Investigations!,
+            "两车同时制动即使都被旧客户端上报，也不能在没有相对运动时构成接触。");
+    }
+
+    [TestMethod]
     public void TwelveDriverSnapshotFitsQuarterSecondBroadcastBudget()
     {
         var coordinator = CreateCoordinator();

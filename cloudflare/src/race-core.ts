@@ -318,6 +318,13 @@ export class RaceCore {
   private static readonly collisionTrajectoryLifetimeMilliseconds = 2_000;
   private static readonly collisionTrajectoryMatchToleranceMilliseconds = 650;
   private static readonly collisionApproachLookbackMilliseconds = 280;
+  private static readonly minimumCollisionImpactMagnitudeMps = 2.3;
+  private static readonly strongCollisionImpactMagnitudeMps = 2.8;
+  private static readonly minimumCollisionRelativeSpeedMps = 1.5;
+  private static readonly minimumCollisionSpeedLossMps = 1.25;
+  private static readonly minimumCollisionApproachMeters = .75;
+  private static readonly maximumCollisionHorizontalDistanceMeters = 5.2;
+  private static readonly maximumPairedImpactDistanceMeters = 6;
   private readonly maximumParticipants: number;
   private readonly liveProgressSamples = new Map<string, RaceProgressSample[]>();
   private readonly liveProgressTrackers = new Map<string, RaceProgressTracker>();
@@ -1846,7 +1853,7 @@ export class RaceCore {
     if (!collisionSessionActive ||
         this.state.flag === "chequered" ||
         update.hasWorldPosition !== true || impactAge > 1_000 ||
-        impactMagnitude < 1.4 ||
+        impactMagnitude < RaceCore.minimumCollisionImpactMagnitudeMps ||
         clamp(update.impactSmashableVelDiff ?? 0, 0, 200) >= .2 ||
         clamp(update.impactSmashableMass ?? 0, 0, 100_000) >= .5 ||
         participant.isInPitLane || participant.isInServiceZone ||
@@ -1868,32 +1875,55 @@ export class RaceCore {
       if (candidate.id === participant.id || candidate.reservationActive === false || !candidate.isConnected ||
           candidate.telemetryValid !== true || candidate.hasWorldPosition !== true || candidate.isInPitLane ||
           candidate.isInServiceZone || candidate.isApproachingPit || candidate.isOnPitRoute || terminal(candidate.status) ||
-          !candidate.lastTelemetryReceivedAt || now.getTime() - Date.parse(candidate.lastTelemetryReceivedAt) > 500) continue;
-      const candidateSample = this.closestCollisionPositionSample(candidate.id, incidentAt.getTime());
-      if (!candidateSample) continue;
-      const candidateX = candidateSample.worldX;
-      const candidateY = candidateSample.worldY;
-      const candidateZ = candidateSample.worldZ;
+          !candidate.lastTelemetryReceivedAt || now.getTime() - Date.parse(candidate.lastTelemetryReceivedAt) > 750) continue;
+      const candidateImpactAt = candidate.lastImpactAt ? Date.parse(candidate.lastImpactAt) : Number.NaN;
+      const pairedImpactCandidate = Number.isFinite(candidateImpactAt) &&
+        Math.abs(candidateImpactAt - incidentAt.getTime()) <= 1_000 &&
+        (candidate.lastImpactMagnitudeMps ?? 0) >= RaceCore.minimumCollisionImpactMagnitudeMps &&
+        (candidate.lastImpactSmashableVelDiff ?? 0) < .2 &&
+        (candidate.lastImpactSmashableMass ?? 0) < .5 &&
+        Number.isFinite(candidate.lastImpactWorldX) &&
+        Number.isFinite(candidate.lastImpactWorldY) &&
+        Number.isFinite(candidate.lastImpactWorldZ);
+      let candidateSample: CollisionPositionSample | null;
+      let candidateX: number, candidateY: number, candidateZ: number;
+      if (pairedImpactCandidate) {
+        candidateSample = this.closestCollisionPositionSample(candidate.id, candidateImpactAt);
+        if (!candidateSample) continue;
+        candidateX = candidate.lastImpactWorldX!;
+        candidateY = candidate.lastImpactWorldY!;
+        candidateZ = candidate.lastImpactWorldZ!;
+      } else {
+        candidateSample = this.closestCollisionPositionSample(candidate.id, incidentAt.getTime());
+        if (!candidateSample) continue;
+        candidateX = candidateSample.worldX;
+        candidateY = candidateSample.worldY;
+        candidateZ = candidateSample.worldZ;
+      }
       const horizontalDistance = Math.hypot(impactX - candidateX, impactZ - candidateZ);
       const verticalDistance = Math.abs(impactY - candidateY);
-      if (horizontalDistance > 5.2 || verticalDistance > 2.5) continue;
+      const maximumHorizontalDistance = pairedImpactCandidate
+        ? RaceCore.maximumPairedImpactDistanceMeters
+        : RaceCore.maximumCollisionHorizontalDistanceMeters;
+      if (horizontalDistance > maximumHorizontalDistance || verticalDistance > 2.5) continue;
       const relativeSpeed = update.hasWorldVelocity === true && candidateSample.hasWorldVelocity
         ? Math.hypot(
           clamp(update.impactWorldVelocityX, -500, 500) - candidateSample.worldVelocityX,
           clamp(update.impactWorldVelocityZ, -500, 500) - candidateSample.worldVelocityZ)
         : 0;
-      const bothReportedImpact = Boolean(candidate.lastImpactAt) &&
-        Math.abs(Date.parse(candidate.lastImpactAt!) - incidentAt.getTime()) <= 1_000 &&
-        (candidate.lastImpactMagnitudeMps ?? 0) >= 1.4 &&
-        (candidate.lastImpactSmashableVelDiff ?? 0) < .2 &&
-        (candidate.lastImpactSmashableMass ?? 0) < .5;
-      const approachDistanceReduction = this.collisionApproachDistanceReduction(
-        participant.id, candidate.id, incidentAt.getTime(), horizontalDistance);
-      const strongReporterEvidence = impactMagnitude >= 2.8 || impactSpeedLoss >= 1.25;
-      const trajectoryConfirmed = approachDistanceReduction >= .2 &&
-        (relativeSpeed >= .8 || strongReporterEvidence);
-      const strongCloseContact = strongReporterEvidence && relativeSpeed >= .8 && horizontalDistance <= 3.8;
-      if (!bothReportedImpact && !trajectoryConfirmed && !strongCloseContact ||
+      const approachDistanceReduction = pairedImpactCandidate
+        ? 0
+        : this.collisionApproachDistanceReduction(
+          participant.id, candidate.id, incidentAt.getTime(), horizontalDistance);
+      const strongReporterEvidence = impactMagnitude >= RaceCore.strongCollisionImpactMagnitudeMps ||
+        impactSpeedLoss >= RaceCore.minimumCollisionSpeedLossMps;
+      const pairedImpactConfirmed = pairedImpactCandidate &&
+        relativeSpeed >= RaceCore.minimumCollisionRelativeSpeedMps;
+      const singleReporterTrajectoryConfirmed = !pairedImpactCandidate &&
+        approachDistanceReduction >= RaceCore.minimumCollisionApproachMeters &&
+        relativeSpeed >= RaceCore.minimumCollisionRelativeSpeedMps &&
+        strongReporterEvidence;
+      if (!pairedImpactConfirmed && !singleReporterTrajectoryConfirmed ||
           horizontalDistance >= nearestDistance) continue;
       nearest = candidate;
       nearestDistance = horizontalDistance;
@@ -1903,7 +1933,7 @@ export class RaceCore {
       nearestIncidentY = candidateY;
       nearestIncidentZ = candidateZ;
       nearestApproachDistanceReduction = approachDistanceReduction;
-      nearestBothReportedImpact = bothReportedImpact;
+      nearestBothReportedImpact = pairedImpactConfirmed;
       nearestWorldVelocityX = candidateSample.worldVelocityX;
       nearestWorldVelocityZ = candidateSample.worldVelocityZ;
     }
