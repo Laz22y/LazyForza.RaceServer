@@ -177,6 +177,12 @@ interface RaceProgressSample {
   elapsedSeconds: number;
 }
 
+interface RaceProgressTracker {
+  lastProgress: number;
+  lapOffset: number;
+  ready: boolean;
+}
+
 interface CollisionPositionSample {
   at: number;
   worldX: number;
@@ -314,6 +320,7 @@ export class RaceCore {
   private static readonly collisionApproachLookbackMilliseconds = 280;
   private readonly maximumParticipants: number;
   private readonly liveProgressSamples = new Map<string, RaceProgressSample[]>();
+  private readonly liveProgressTrackers = new Map<string, RaceProgressTracker>();
   private readonly collisionPairCooldowns = new Map<string, number>();
   private readonly collisionTrajectories = new Map<string, CollisionPositionSample[]>();
   private state: StoredRaceState;
@@ -655,6 +662,8 @@ export class RaceCore {
       this.recordEvent("pitExited", `${participant.displayName} 离开维修区。`, participant.id, now);
     if (!update.isTelemetryValid || update.isPausedOrRewinding) {
       participant.progressContinuityReady = false;
+      const raceProgress = this.liveProgressTrackers.get(participant.id);
+      if (raceProgress) raceProgress.ready = false;
       participant.telemetryValid = false;
       participant.lastReportedImpactSequence = Math.max(participant.lastReportedImpactSequence ?? 0, update.impactSequence ?? 0);
       participant.lastProcessedImpactSequence = participant.lastReportedImpactSequence;
@@ -691,7 +700,10 @@ export class RaceCore {
       ? clamp(update.trackToleranceMeters, 4, 50)
       : 18;
     participant.gripCondition = allowedGrip.has(update.gripCondition) ? update.gripCondition : "unknown";
-    if (this.state.phase === "race") this.recordRaceProgressSample(participant, now);
+    if (this.state.phase === "race")
+      this.recordRaceProgressSample(participant, now,
+        participant.isInPitLane || participant.isInServiceZone ||
+        update.isApproachingPit === true || update.isOnPitRoute === true);
     if (!terminal(participant.status)) {
       participant.status = participant.isInServiceZone
         ? "inService"
@@ -770,7 +782,7 @@ export class RaceCore {
     participant.lastLapSeconds = completed.lapSeconds;
     participant.lastLapCompletedAt = now.toISOString();
     if (this.state.phase === "race")
-      this.recordRaceProgressSample(participant, now, participant.completedLaps);
+      this.reconcileRaceProgressAtCompletedLap(participant, now);
     if (improvesPersonalBest) {
       participant.bestLapSeconds = completed.lapSeconds;
       participant.bestLapSectorSeconds = this.sanitizeLapSectors(completed.sectorSeconds);
@@ -2765,6 +2777,7 @@ export class RaceCore {
     this.state.banner = null;
     this.state.receivedLapEvents = [];
     this.liveProgressSamples.clear();
+    this.liveProgressTrackers.clear();
     for (const participant of this.state.participants) this.resetParticipant(participant, true);
   }
 
@@ -2790,6 +2803,7 @@ export class RaceCore {
     this.state.practiceSessionMinutes = [60];
     this.state.banner = null;
     this.liveProgressSamples.clear();
+    this.liveProgressTrackers.clear();
     for (const participant of this.state.participants) this.resetParticipant(participant, false);
   }
 
@@ -3127,22 +3141,53 @@ export class RaceCore {
   private recordRaceProgressSample(
     participant: ParticipantState,
     now: Date,
-    exactDistanceLaps?: number): void {
-    const distanceLaps = exactDistanceLaps ?? participant.completedLaps + participant.trackProgress;
+    isPitRoute: boolean): void {
+    const tracker = this.liveProgressTrackers.get(participant.id) ?? {
+      lastProgress: 0,
+      lapOffset: 0,
+      ready: false
+    };
+    if (isPitRoute) {
+      tracker.ready = false;
+      this.liveProgressTrackers.set(participant.id, tracker);
+      return;
+    }
+
+    const progress = clamp(participant.trackProgress, 0, 1);
+    if (tracker.ready && progress < tracker.lastProgress - .75) tracker.lapOffset++;
+    tracker.lastProgress = progress;
+    tracker.ready = true;
+    this.liveProgressTrackers.set(participant.id, tracker);
+    const distanceLaps = tracker.lapOffset + progress;
     if (!Number.isFinite(distanceLaps) || distanceLaps < 0) return;
     const elapsedSeconds = this.raceElapsedSeconds(now);
-    const samples = this.liveProgressSamples.get(participant.id) ?? [];
+    this.appendRaceProgressSample(participant.id, distanceLaps, elapsedSeconds);
+  }
+
+  private reconcileRaceProgressAtCompletedLap(participant: ParticipantState, now: Date): void {
+    const tracker = this.liveProgressTrackers.get(participant.id) ?? {
+      lastProgress: 0,
+      lapOffset: 0,
+      ready: false
+    };
+    const crossingAlreadyObserved = tracker.lastProgress <= .25;
+    const eventOffset = tracker.lapOffset + (crossingAlreadyObserved ? 0 : 1);
+    tracker.lapOffset = Math.max(eventOffset, participant.completedLaps);
+    const finishDistance = tracker.lapOffset;
+    tracker.lastProgress = 0;
+    tracker.ready = false;
+    this.liveProgressTrackers.set(participant.id, tracker);
+    this.appendRaceProgressSample(participant.id, finishDistance, this.raceElapsedSeconds(now));
+  }
+
+  private appendRaceProgressSample(participantId: string, distanceLaps: number, elapsedSeconds: number): void {
+    const samples = this.liveProgressSamples.get(participantId) ?? [];
     const last = samples.at(-1);
     if (last) {
       if (distanceLaps < last.distanceLaps - RaceCore.liveGapProgressJitter) return;
-      if (distanceLaps <= last.distanceLaps + RaceCore.liveGapProgressJitter) {
-        samples[samples.length - 1] = {
-          distanceLaps: Math.max(distanceLaps, last.distanceLaps),
-          elapsedSeconds
-        };
-        this.liveProgressSamples.set(participant.id, samples);
-        return;
-      }
+      // Keep the first passage time. Replacing it for every sub-jitter forward
+      // sample collapses a whole lap into one moving point and stretches Delta.
+      if (distanceLaps <= last.distanceLaps) return;
     }
 
     samples.push({ distanceLaps, elapsedSeconds });
@@ -3153,7 +3198,7 @@ export class RaceCore {
     if (removeCount > 0) samples.splice(0, removeCount);
     if (samples.length > RaceCore.maximumLiveGapSamples)
       samples.splice(0, samples.length - RaceCore.maximumLiveGapSamples);
-    this.liveProgressSamples.set(participant.id, samples);
+    this.liveProgressSamples.set(participantId, samples);
   }
 
   private static estimatePassageTime(samples: RaceProgressSample[], distanceLaps: number): number | null {
@@ -3168,7 +3213,7 @@ export class RaceCore {
       else upper = middle;
     }
     const next = samples[lower];
-    if (Math.abs(next.distanceLaps - distanceLaps) <= RaceCore.liveGapProgressJitter)
+    if (Math.abs(next.distanceLaps - distanceLaps) <= 1e-9)
       return next.elapsedSeconds;
     if (lower === 0) return null;
     const previous = samples[lower - 1];

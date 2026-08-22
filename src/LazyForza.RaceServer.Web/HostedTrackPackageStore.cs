@@ -165,6 +165,7 @@ public sealed class HostedTrackPackageStore
                 !string.Equals(RequiredString(payloadTrack, "name"), trackName, StringComparison.Ordinal) ||
                 !string.Equals(RequiredString(payloadDefinition, "mapRevision"), trackRevision, StringComparison.Ordinal))
                 throw new InvalidDataException("赛道包清单与 track.json 内容不一致。");
+            ValidatePitCenterLine(payloadDefinition);
             ValidateIdentity(trackId, trackName, fingerprint);
             return new HostedTrackIdentity(trackId, trackName, trackRevision, fingerprint);
         }
@@ -196,6 +197,37 @@ public sealed class HostedTrackPackageStore
             throw new InvalidDataException("赛道名称不能为空且不能超过 128 个字符。");
         if (trackPackageHash.Length != 64 || !trackPackageHash.All(Uri.IsHexDigit))
             throw new InvalidDataException("赛道数据 SHA-256 必须是 64 位十六进制字符。");
+    }
+
+    private static void ValidatePitCenterLine(JsonElement definition)
+    {
+        if (!definition.TryGetProperty("pit", out var pit) || pit.ValueKind == JsonValueKind.Null)
+            return;
+        if (pit.ValueKind != JsonValueKind.Object ||
+            !pit.TryGetProperty("centerLine", out var centerLine) ||
+            centerLine.ValueKind != JsonValueKind.Array || centerLine.GetArrayLength() < 2)
+            throw new InvalidDataException("赛道包中的维修区通道无效。");
+
+        (double X, double Y, double Z)? previous = null;
+        foreach (var value in centerLine.EnumerateArray())
+        {
+            if (value.ValueKind != JsonValueKind.Object ||
+                !value.TryGetProperty("x", out var xValue) || !xValue.TryGetDouble(out var x) ||
+                !value.TryGetProperty("y", out var yValue) || !yValue.TryGetDouble(out var y) ||
+                !value.TryGetProperty("z", out var zValue) || !zValue.TryGetDouble(out var z) ||
+                !double.IsFinite(x) || !double.IsFinite(y) || !double.IsFinite(z))
+                throw new InvalidDataException("赛道包中的维修区通道坐标无效。");
+            if (previous is { } prior)
+            {
+                var dx = x - prior.X;
+                var dy = y - prior.Y;
+                var dz = z - prior.Z;
+                if (Math.Sqrt(dx * dx + dy * dy + dz * dz) > 25)
+                    throw new InvalidDataException(
+                        "赛道包中的维修区通道存在大段遥测缺口，请在客户端重新录入维修区通道。");
+            }
+            previous = (x, y, z);
+        }
     }
 
     private static string SafeFileName(string fileName, string trackName)

@@ -70,6 +70,29 @@ public sealed class HostedTrackPackageStoreTests
         }
     }
 
+    [TestMethod]
+    public async Task RejectsPackageWithADiscontinuousPitCenterLine()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "LazyForza-RaceServer-Test-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var trackId = Guid.NewGuid();
+            var trackBytes = TrackPayload(trackId, "Broken Pit", "1", discontinuousPit: true);
+            var payloadHash = Convert.ToHexString(SHA256.HashData(trackBytes));
+            var package = Package(trackId, "Broken Pit", "1", payloadHash, trackBytes);
+            var store = new HostedTrackPackageStore(new RaceServerOptions { DataDirectory = root });
+            await using var source = new MemoryStream(package);
+
+            var exception = await Assert.ThrowsExactlyAsync<InvalidDataException>(() =>
+                store.SaveAsync(source, "broken-pit.lfzestate", CancellationToken.None));
+            StringAssert.Contains(exception.Message, "遥测缺口");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static byte[] Package(
         Guid trackId,
         string trackName,
@@ -102,11 +125,32 @@ public sealed class HostedTrackPackageStoreTests
         return output.ToArray();
     }
 
-    private static byte[] TrackPayload(Guid trackId, string trackName, string revision) =>
-        JsonSerializer.SerializeToUtf8Bytes(new
+    private static byte[] TrackPayload(
+        Guid trackId,
+        string trackName,
+        string revision,
+        bool discontinuousPit = false)
+    {
+        object definition = discontinuousPit
+            ? new
+            {
+                trackId,
+                mapRevision = revision,
+                pit = new
+                {
+                    centerLine = new[]
+                    {
+                        new { x = 0, y = 0, z = 0 },
+                        new { x = 0, y = 0, z = 80 }
+                    }
+                }
+            }
+            : new { trackId, mapRevision = revision };
+        return JsonSerializer.SerializeToUtf8Bytes(new
         {
             track = new { id = trackId, name = trackName },
             sectors = Array.Empty<object>(),
-            definition = new { trackId, mapRevision = revision }
+            definition
         });
+    }
 }

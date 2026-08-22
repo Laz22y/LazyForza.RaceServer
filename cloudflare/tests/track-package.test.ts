@@ -25,18 +25,30 @@ describe("estate track package inspection", () => {
     const packageBytes = await estatePackage("清单名称", "1", null, "数据名称");
     await expect(inspectEstateTrackPackage(packageBytes)).rejects.toThrow("清单与 track.json");
   });
+
+  it("rejects a pit center line with a large telemetry gap", async () => {
+    const packageBytes = await estatePackage("断点维修区", "1", null, "断点维修区", true);
+    await expect(inspectEstateTrackPackage(packageBytes)).rejects.toThrow("遥测缺口");
+  });
 });
 
 async function estatePackage(
   manifestName: string,
   revision: string,
   fingerprint: string | null,
-  payloadName = manifestName): Promise<ArrayBuffer> {
+  payloadName = manifestName,
+  discontinuousPit = false): Promise<ArrayBuffer> {
   const encoder = new TextEncoder();
   const payload = encoder.encode(JSON.stringify({
     track: { id: trackId, name: payloadName },
     sectors: [],
-    definition: { trackId, mapRevision: revision }
+    definition: {
+      trackId,
+      mapRevision: revision,
+      pit: discontinuousPit ? {
+        centerLine: [{ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 80 }]
+      } : undefined
+    }
   }));
   const payloadSha256 = await sha256(payload);
   const manifest = encoder.encode(JSON.stringify({

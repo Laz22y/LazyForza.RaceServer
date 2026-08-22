@@ -1413,6 +1413,67 @@ public sealed class RaceCoordinatorTests
     }
 
     [TestMethod]
+    public void RaceDeltaStartsOnTheFirstLapAndSurvivesSmallSamplesOvertakesAndPitTransit()
+    {
+        var coordinator = CreateCoordinator();
+        var first = Join(coordinator, 1).Accepted!;
+        var second = Join(coordinator, 2).Accepted!;
+        var started = DateTimeOffset.Parse("2026-08-09T10:40:00Z");
+        Assert.IsTrue(coordinator.ApplySessionCommand(
+            new RaceAdminSessionCommand(RaceSessionPhase.Race, "连续正赛秒差", 5, null, null),
+            started).IsAccepted);
+
+        // The grid is before the finish line. Its first crossing arms estate
+        // timing, so no completed-lap event exists for this wrap.
+        coordinator.UpdateTelemetry(first.ParticipantId, Telemetry(0, .98), started.AddSeconds(1));
+        coordinator.UpdateTelemetry(second.ParticipantId, Telemetry(0, .97), started.AddSeconds(2));
+        coordinator.UpdateTelemetry(first.ParticipantId, Telemetry(0, .01), started.AddSeconds(3));
+        coordinator.UpdateTelemetry(second.ParticipantId, Telemetry(0, .01), started.AddSeconds(4));
+        var firstLap = coordinator.Snapshot(started.AddSeconds(4));
+        Assert.AreEqual(1,
+            firstLap.Participants.Single(item => item.Id == second.ParticipantId)
+                .GapToLeaderSeconds.GetValueOrDefault(),
+            .001,
+            "首次过线只开始计时，但正赛首圈仍必须显示实时秒差。");
+
+        // Normal 10 Hz telemetry advances less than the old .002 jitter window
+        // per sample. Every forward passage must be retained instead of replacing
+        // one moving sample and stretching Delta toward a complete lap.
+        for (var index = 1; index <= 100; index++)
+        {
+            var progress = .01 + index * .0015;
+            var at = started.AddSeconds(4 + index * .1);
+            coordinator.UpdateTelemetry(first.ParticipantId, Telemetry(0, progress), at);
+            coordinator.UpdateTelemetry(second.ParticipantId, Telemetry(0, progress), at.AddSeconds(1));
+        }
+        var dense = coordinator.Snapshot(started.AddSeconds(15));
+        Assert.AreEqual(1,
+            dense.Participants.Single(item => item.Id == second.ParticipantId)
+                .GapToLeaderSeconds.GetValueOrDefault(),
+            .02,
+            "高频小步进遥测不能把秒差逐渐放大成接近一圈。");
+
+        coordinator.UpdateTelemetry(second.ParticipantId, Telemetry(0, .35), started.AddSeconds(20));
+        coordinator.UpdateTelemetry(first.ParticipantId, Telemetry(0, .34), started.AddSeconds(20.5));
+        var afterPass = coordinator.Snapshot(started.AddSeconds(20.5));
+        var passedDriver = afterPass.Participants.Single(item => item.Id == first.ParticipantId);
+        Assert.IsTrue(passedDriver.GapToLeaderSeconds is > 0 and < 5,
+            $"换位后的秒差应保持在实际量级，当前为 {passedDriver.GapToLeaderSeconds}。");
+
+        coordinator.UpdateTelemetry(second.ParticipantId, Telemetry(0, .85) with
+        {
+            IsInPitLane = true,
+            IsOnPitRoute = true
+        }, started.AddSeconds(22));
+        CompleteLap(coordinator, second.ParticipantId, 1, 60, started.AddSeconds(25));
+        coordinator.UpdateTelemetry(second.ParticipantId, Telemetry(1, .10), started.AddSeconds(30));
+        var afterPit = coordinator.Snapshot(started.AddSeconds(30));
+        var nonPitting = afterPit.Participants.Single(item => item.Id == first.ParticipantId);
+        Assert.IsTrue(nonPitting.GapToLeaderSeconds is >= 0 and < 10,
+            $"维修支路投影不能污染实时秒差，当前为 {nonPitting.GapToLeaderSeconds}。");
+    }
+
+    [TestMethod]
     public void LeaderCrossingTheLineDoesNotImmediatelyTurnASecondsGapIntoOneLap()
     {
         var coordinator = CreateCoordinator();

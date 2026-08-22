@@ -898,6 +898,54 @@ describe("RaceCore", () => {
     expect(refreshed.completedLaps).toBe(0);
   });
 
+  it("keeps first-lap Delta stable through small samples, overtakes and pit transit", () => {
+    const core = createCore();
+    const first = connect(core, "甲"), second = connect(core, "乙");
+    const started = new Date("2026-08-09T10:40:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 5 }, started);
+
+    core.updateTelemetry(first, { ...telemetry(), trackProgress: .98 },
+      new Date(started.getTime() + 1_000));
+    core.updateTelemetry(second, { ...telemetry(), trackProgress: .97 },
+      new Date(started.getTime() + 2_000));
+    core.updateTelemetry(first, { ...telemetry(), trackProgress: .01 },
+      new Date(started.getTime() + 3_000));
+    core.updateTelemetry(second, { ...telemetry(), trackProgress: .01 },
+      new Date(started.getTime() + 4_000));
+    expect(core.snapshot(new Date(started.getTime() + 4_000)).participants
+      .find(item => item.id === second)?.gapToLeaderSeconds).toBeCloseTo(1, 3);
+
+    for (let index = 1; index <= 100; index++) {
+      const progress = .01 + index * .0015;
+      const at = started.getTime() + (4 + index * .1) * 1_000;
+      core.updateTelemetry(first, { ...telemetry(), trackProgress: progress }, new Date(at));
+      core.updateTelemetry(second, { ...telemetry(), trackProgress: progress }, new Date(at + 1_000));
+    }
+    expect(core.snapshot(new Date(started.getTime() + 15_000)).participants
+      .find(item => item.id === second)?.gapToLeaderSeconds).toBeCloseTo(1, 2);
+
+    core.updateTelemetry(second, { ...telemetry(), trackProgress: .35 },
+      new Date(started.getTime() + 20_000));
+    core.updateTelemetry(first, { ...telemetry(), trackProgress: .34 },
+      new Date(started.getTime() + 20_500));
+    const afterPass = core.snapshot(new Date(started.getTime() + 20_500)).participants
+      .find(item => item.id === first)?.gapToLeaderSeconds;
+    expect(afterPass).toBeGreaterThan(0);
+    expect(afterPass).toBeLessThan(5);
+
+    core.updateTelemetry(second, {
+      ...telemetry(), trackProgress: .85, isInPitLane: true, isOnPitRoute: true
+    }, new Date(started.getTime() + 22_000));
+    core.completeLap(second, lap("pit-lap", 60, true, 1),
+      new Date(started.getTime() + 25_000));
+    core.updateTelemetry(second, { ...telemetry(), completedLaps: 1, trackProgress: .10 },
+      new Date(started.getTime() + 30_000));
+    const afterPit = core.snapshot(new Date(started.getTime() + 30_000)).participants
+      .find(item => item.id === first)?.gapToLeaderSeconds;
+    expect(afterPit).toBeGreaterThanOrEqual(0);
+    expect(afterPit).toBeLessThan(10);
+  });
+
   it("keeps a seconds gap when the leader crosses before the trailing driver", () => {
     const core = createCore();
     const leader = connect(core, "甲"), trailing = connect(core, "乙");

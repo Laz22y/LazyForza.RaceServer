@@ -54,7 +54,28 @@ export async function inspectEstateTrackPackage(bytes: ArrayBuffer): Promise<Est
       requiredString(payloadTrack.name, "track.name") !== packageTrackName ||
       requiredString(definition.mapRevision, "definition.mapRevision") !== trackRevision)
     throw new Error("赛道包清单与 track.json 内容不一致。");
+  validatePitCenterLine(definition);
   return { trackId, trackName: packageTrackName, trackRevision, trackPackageHash: fingerprint, payloadSha256 };
+}
+
+function validatePitCenterLine(definition: Record<string, unknown>): void {
+  if (definition.pit === null || definition.pit === undefined) return;
+  const pit = objectValue(definition.pit, "definition.pit");
+  if (!Array.isArray(pit.centerLine) || pit.centerLine.length < 2)
+    throw new Error("赛道包中的维修区通道无效。");
+  let previous: [number, number, number] | null = null;
+  for (const value of pit.centerLine) {
+    const point = objectValue(value, "definition.pit.centerLine");
+    const current: [number, number, number] = [
+      finiteNumber(point.x, "definition.pit.centerLine.x"),
+      finiteNumber(point.y, "definition.pit.centerLine.y"),
+      finiteNumber(point.z, "definition.pit.centerLine.z")
+    ];
+    if (previous && Math.hypot(
+      current[0] - previous[0], current[1] - previous[1], current[2] - previous[2]) > 25)
+      throw new Error("赛道包中的维修区通道存在大段遥测缺口，请在客户端重新录入维修区通道。");
+    previous = current;
+  }
 }
 
 function readCentralDirectory(bytes: Uint8Array): Map<string, ZipEntry> {
@@ -128,6 +149,11 @@ function requiredSha256(value: unknown, name: string): string {
 function objectValue(value: unknown, name: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`赛道包缺少 ${name}。`);
   return value as Record<string, unknown>;
+}
+
+function finiteNumber(value: unknown, name: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`赛道包中的 ${name} 无效。`);
+  return value;
 }
 
 function uint16(view: DataView, offset: number): number {

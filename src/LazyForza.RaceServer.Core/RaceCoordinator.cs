@@ -468,6 +468,7 @@ public sealed class RaceCoordinator
             {
                 participant.TelemetryValid = false;
                 participant.ProgressContinuityReady = false;
+                participant.RaceProgressContinuityReady = false;
                 participant.LastReportedImpactSequence = Math.Max(
                     participant.LastReportedImpactSequence,
                     normalized.ImpactSequence);
@@ -505,7 +506,11 @@ public sealed class RaceCoordinator
             participant.IsOnPitRoute = normalized.IsOnPitRoute;
             participant.GripCondition = normalized.GripCondition;
             if (phase == RaceSessionPhase.Race)
-                RecordRaceProgressSample(participant, now);
+                RecordRaceProgressSample(
+                    participant,
+                    now,
+                    participant.IsInPitLane || participant.IsInServiceZone ||
+                    normalized.IsApproachingPit || normalized.IsOnPitRoute);
             if (participant.Status is not (RaceParticipantStatus.Finished or RaceParticipantStatus.DidNotFinish or
                     RaceParticipantStatus.Disqualified or RaceParticipantStatus.Disconnected))
                 participant.Status = normalized.IsInServiceZone
@@ -615,7 +620,7 @@ public sealed class RaceCoordinator
                 participant.LastLapSeconds = completed.LapSeconds;
                 participant.LastLapCompletedAt = now;
                 if (phase == RaceSessionPhase.Race)
-                    RecordRaceProgressSample(participant, now, participant.CompletedLaps);
+                    ReconcileRaceProgressAtCompletedLap(participant, now);
                 participant.CurrentLapSeconds = 0;
                 participant.ShortcutPenaltyIssued = false;
                 participant.ProgressContinuityReady = false;
@@ -3274,24 +3279,56 @@ public sealed class RaceCoordinator
     private void RecordRaceProgressSample(
         ParticipantState participant,
         DateTimeOffset now,
-        double? exactDistanceLaps = null)
+        bool isPitRoute)
     {
-        var distance = exactDistanceLaps ?? participant.CompletedLaps + participant.TrackProgress;
+        if (isPitRoute)
+        {
+            participant.RaceProgressContinuityReady = false;
+            return;
+        }
+
+        var progress = Math.Clamp(participant.TrackProgress, 0, 1);
+        if (participant.RaceProgressContinuityReady &&
+            progress < participant.LastRaceProgress - 0.75)
+            participant.RaceProgressLapOffset++;
+        participant.LastRaceProgress = progress;
+        participant.RaceProgressContinuityReady = true;
+        var distance = participant.RaceProgressLapOffset + progress;
         if (!double.IsFinite(distance) || distance < 0) return;
-        var elapsedSeconds = RaceElapsedSeconds(now);
+        AppendRaceProgressSample(participant, distance, RaceElapsedSeconds(now));
+    }
+
+    private void ReconcileRaceProgressAtCompletedLap(
+        ParticipantState participant,
+        DateTimeOffset now)
+    {
+        // If telemetry has already wrapped to the start of the route, the
+        // crossing is already reflected in the offset. Otherwise the lap event
+        // supplies the missing wrap (including a finish reached through pit lane).
+        var crossingAlreadyObserved = participant.LastRaceProgress <= 0.25;
+        var eventOffset = participant.RaceProgressLapOffset + (crossingAlreadyObserved ? 0 : 1);
+        participant.RaceProgressLapOffset = Math.Max(eventOffset, participant.CompletedLaps);
+        var finishDistance = (double)participant.RaceProgressLapOffset;
+        participant.LastRaceProgress = 0;
+        participant.RaceProgressContinuityReady = false;
+        AppendRaceProgressSample(participant, finishDistance, RaceElapsedSeconds(now));
+    }
+
+    private static void AppendRaceProgressSample(
+        ParticipantState participant,
+        double distance,
+        double elapsedSeconds)
+    {
         var samples = participant.RaceProgressSamples;
         if (samples.Count > 0)
         {
             var last = samples[^1];
             if (distance < last.DistanceLaps - LiveGapProgressJitter)
                 return;
-            if (distance <= last.DistanceLaps + LiveGapProgressJitter)
-            {
-                samples[^1] = new RaceProgressSample(
-                    Math.Max(distance, last.DistanceLaps),
-                    elapsedSeconds);
-                return;
-            }
+            // A passage time belongs to the first instant the distance was
+            // reached. Replacing it while progress is unchanged makes the gap
+            // grow toward an entire lap at normal 10 Hz telemetry rates.
+            if (distance <= last.DistanceLaps) return;
         }
 
         samples.Add(new RaceProgressSample(distance, elapsedSeconds));
@@ -3323,7 +3360,7 @@ public sealed class RaceCoordinator
         }
 
         var next = samples[lower];
-        if (Math.Abs(next.DistanceLaps - distanceLaps) <= LiveGapProgressJitter)
+        if (Math.Abs(next.DistanceLaps - distanceLaps) <= 1e-9)
             return next.ElapsedSeconds;
         if (lower == 0) return null;
         var previous = samples[lower - 1];
@@ -3622,6 +3659,9 @@ public sealed class RaceCoordinator
             participant.LastLapCompletedAt = null;
             participant.DisconnectedLapRecoveryUntil = null;
             participant.RaceProgressSamples.Clear();
+            participant.RaceProgressLapOffset = 0;
+            participant.LastRaceProgress = 0;
+            participant.RaceProgressContinuityReady = false;
             participant.RaceTotalSeconds = null;
             participant.TrackLimitWarnings = 0;
             ResetTrackLimitExcursion(participant);
@@ -3699,6 +3739,9 @@ public sealed class RaceCoordinator
             participant.LastLapCompletedAt = null;
             participant.DisconnectedLapRecoveryUntil = null;
             participant.RaceProgressSamples.Clear();
+            participant.RaceProgressLapOffset = 0;
+            participant.LastRaceProgress = 0;
+            participant.RaceProgressContinuityReady = false;
             participant.RaceTotalSeconds = null;
             participant.TrackLimitWarnings = 0;
             ResetTrackLimitExcursion(participant);
@@ -4143,6 +4186,9 @@ public sealed class RaceCoordinator
         public DateTimeOffset? LastLapCompletedAt { get; set; }
         public DateTimeOffset? DisconnectedLapRecoveryUntil { get; set; }
         public List<RaceProgressSample> RaceProgressSamples { get; } = [];
+        public int RaceProgressLapOffset { get; set; }
+        public double LastRaceProgress { get; set; }
+        public bool RaceProgressContinuityReady { get; set; }
         public double? RaceTotalSeconds { get; set; }
         public double TrackToleranceMeters { get; set; } = 18;
         public int TrackLimitWarnings { get; set; }
