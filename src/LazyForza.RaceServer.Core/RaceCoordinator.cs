@@ -60,6 +60,7 @@ public sealed class RaceCoordinator
     private readonly List<RaceEventSnapshot> events = [];
     private readonly List<RaceStageResultSnapshot> resultHistory = [];
     private readonly HashSet<Guid> receivedLapEvents = [];
+    private readonly HashSet<Guid> receivedPitServiceEvents = [];
     private readonly HashSet<string> revokedResumeTokens = new(StringComparer.Ordinal);
     private readonly Func<string, bool> playerPasswordMatches;
     private readonly Dictionary<int, string> manualSectorYellows = [];
@@ -460,7 +461,7 @@ public sealed class RaceCoordinator
                 UpdatePenaltyServiceState(participant, normalized, now, audits);
             else
                 ResetLivePenaltyServiceState(participant);
-            UpdatePitServiceState(participant, normalized);
+            UpdatePitServiceState(participant, normalized, now);
             if (!wasInPitLane && participant.IsInPitLane)
                 audits.Add(new RaceAuditEntry(now, "pitEntered", $"{participant.DisplayName} 进入维修区。", participant.Id));
             if (!wasInServiceZone && participant.IsInServiceZone)
@@ -721,6 +722,94 @@ public sealed class RaceCoordinator
                     : $"{participant.DisplayName} 完成无效圈：{completed.InvalidReason ?? "未说明"}。",
                 participant.Id,
                 completed));
+        }
+        Publish(snapshot, important: true, audits);
+        return RaceCommandResult.Accepted;
+    }
+
+    public RaceCommandResult CompletePitService(
+        Guid participantId,
+        RacePitServiceCompleted completed,
+        DateTimeOffset? receivedAt = null)
+    {
+        RaceSessionSnapshot snapshot;
+        var audits = new List<RaceAuditEntry>();
+        lock (sync)
+        {
+            var now = receivedAt ?? DateTimeOffset.UtcNow;
+            var participant = Find(participantId);
+            if (participant is null) return RaceCommandResult.Reject("参赛者不存在。");
+            if (completed.EventId == Guid.Empty || completed.VisitId == Guid.Empty)
+                return RaceCommandResult.Reject("维修停留事件编号无效。");
+            if (receivedPitServiceEvents.Contains(completed.EventId)) return RaceCommandResult.Accepted;
+
+            var effectivePhase = phase == RaceSessionPhase.Suspended ? phaseBeforeSuspension : phase;
+            if (effectivePhase != RaceSessionPhase.Race && phase != RaceSessionPhase.Finished)
+                return RaceCommandResult.Reject("当前阶段不接收维修停留记录。");
+            if (startsAt is not DateTimeOffset raceStartedAt ||
+                raceStartedAt.ToUnixTimeMilliseconds() != completed.RaceStartedAtUnixMilliseconds)
+                return RaceCommandResult.Reject("维修停留记录不属于当前正赛。");
+            if (!double.IsFinite(completed.RequiredSeconds) || completed.RequiredSeconds is < .1 or > 3_600 ||
+                !double.IsFinite(completed.ElapsedSeconds) ||
+                completed.ElapsedSeconds + .001 < completed.RequiredSeconds)
+                return RaceCommandResult.Reject("维修停留时间无效。");
+
+            participant.PitServiceVisitFirstSeenAt.TryGetValue(completed.VisitId, out var visitFirstSeenAt);
+            var recoveredWithoutObservedVisit = completed.IsRecoveredAfterDisconnect &&
+                                                visitFirstSeenAt == default;
+            if (recoveredWithoutObservedVisit)
+            {
+                if (!disconnectedLapRecoveryEnabled)
+                    return RaceCommandResult.Reject("服务端未开启断线圈速恢复。");
+                if (!HasActiveDisconnectedLapRecovery(participant, now))
+                    return RaceCommandResult.Reject("断线恢复窗口已结束。");
+            }
+            else if (visitFirstSeenAt == default)
+            {
+                return RaceCommandResult.Reject("服务端未收到对应的换胎区访问记录。");
+            }
+
+            var finishedAt = participant.FinishedAt;
+            var completedAfterFinish = finishedAt.HasValue;
+            if (finishedAt is DateTimeOffset completedAt &&
+                visitFirstSeenAt != default && visitFirstSeenAt > completedAt)
+                return RaceCommandResult.Reject("该换胎区访问发生在完赛之后。");
+            if (participant.Status is RaceParticipantStatus.DidNotFinish or RaceParticipantStatus.Disconnected &&
+                !recoveredWithoutObservedVisit)
+                return RaceCommandResult.Reject("该车手已经结束比赛，不能继续提交维修停留。");
+
+            if (participant.CompletedPitServiceVisitIds.Contains(completed.VisitId))
+            {
+                receivedPitServiceEvents.Add(completed.EventId);
+                return RaceCommandResult.Accepted;
+            }
+            if (completed.CompletedPitServices != participant.CompletedPitServices + 1)
+                return RaceCommandResult.Reject("维修停留次数与服务端记录不连续。");
+
+            receivedPitServiceEvents.Add(completed.EventId);
+            participant.CompletedPitServiceVisitIds.Add(completed.VisitId);
+            participant.CompletedPitServices++;
+            participant.PitServiceRequirementMet = true;
+            participant.PitServiceElapsedSeconds = Math.Max(
+                participant.PitServiceElapsedSeconds,
+                completed.ElapsedSeconds);
+            participant.LastSeenAt = now;
+
+            var delayed = completed.IsRecoveredAfterDisconnect || completedAfterFinish;
+            audits.Add(new RaceAuditEntry(
+                now,
+                delayed ? "pitServiceCompletedRecovered" : "pitServiceCompleted",
+                delayed
+                    ? $"{participant.DisplayName} 的换胎停留已补传确认（第 {participant.CompletedPitServices} 次）。"
+                    : $"{participant.DisplayName} 完成第 {participant.CompletedPitServices} 次换胎停留。",
+                participant.Id,
+                completed));
+            if (RevokeRecoveredMinimumPitStopDisqualification(participant, now, audits) &&
+                phase == RaceSessionPhase.Finished)
+                ArchiveActiveResult(now, isComplete: true);
+
+            IncrementRevision();
+            snapshot = BuildSnapshot(now);
         }
         Publish(snapshot, important: true, audits);
         return RaceCommandResult.Accepted;
@@ -1757,10 +1846,15 @@ public sealed class RaceCoordinator
         participant.PitVisitPaused = false;
     }
 
-    private void UpdatePitServiceState(ParticipantState participant, RaceTelemetryUpdate telemetry)
+    private void UpdatePitServiceState(
+        ParticipantState participant,
+        RaceTelemetryUpdate telemetry,
+        DateTimeOffset now)
     {
         participant.IsInPitLane = telemetry.IsInPitLane;
         participant.IsInServiceZone = telemetry.IsInServiceZone;
+        if (telemetry.IsInServiceZone && telemetry.PitServiceVisitId is Guid visitId && visitId != Guid.Empty)
+            participant.PitServiceVisitFirstSeenAt.TryAdd(visitId, now);
         var serviceBlocked = CanExecutePenalties(participant) &&
                              (PendingTimePenaltySeconds(participant.Id) > 0 ||
                               participant.PenaltyServiceActive);
@@ -1771,7 +1865,8 @@ public sealed class RaceCoordinator
         participant.PitServiceRequirementMet = telemetry.IsInServiceZone &&
                                                 !serviceBlocked &&
                                                 telemetry.PitServiceRequirementMet;
-        if (participant.PitServiceRequirementMet &&
+        if (telemetry.PitServiceVisitId is null &&
+            participant.PitServiceRequirementMet &&
             telemetry.CompletedPitServices == participant.CompletedPitServices + 1)
             participant.CompletedPitServices++;
     }
@@ -1919,6 +2014,43 @@ public sealed class RaceCoordinator
             $"{participant.DisplayName} 完赛时只完成 {participant.CompletedPitServices}/{minimumRequiredPitStops} 次有效维修停留，判定未满足完赛条件。",
             participant.Id,
             penalty));
+    }
+
+    private bool RevokeRecoveredMinimumPitStopDisqualification(
+        ParticipantState participant,
+        DateTimeOffset now,
+        ICollection<RaceAuditEntry> audits)
+    {
+        if (minimumRequiredPitStops <= 0 ||
+            participant.CompletedPitServices < minimumRequiredPitStops)
+            return false;
+
+        var revokedAny = false;
+        for (var index = 0; index < penalties.Count; index++)
+        {
+            var penalty = penalties[index];
+            if (penalty.ParticipantId != participant.Id || penalty.IsRevoked ||
+                penalty.Kind != RacePenaltyKind.Disqualification || !penalty.IsAutomatic ||
+                !penalty.Reason.StartsWith("未完成规定的最少有效维修停留次数", StringComparison.Ordinal))
+                continue;
+            penalties[index] = penalty with { IsRevoked = true };
+            revokedAny = true;
+        }
+        if (!revokedAny) return false;
+
+        var hasOtherDisqualification = penalties.Any(candidate =>
+            candidate.ParticipantId == participant.Id && !candidate.IsRevoked &&
+            candidate.Kind == RacePenaltyKind.Disqualification);
+        if (!hasOtherDisqualification && participant.Status == RaceParticipantStatus.Disqualified)
+            participant.Status = participant.FinishedAt is null
+                ? RaceParticipantStatus.OnTrack
+                : RaceParticipantStatus.Finished;
+        audits.Add(new RaceAuditEntry(
+            now,
+            "minimumPitStopsRecovered",
+            $"{participant.DisplayName} 的补传换胎停留已确认，最低进站要求恢复为已完成。",
+            participant.Id));
+        return true;
     }
 
     private void UpdateDriveThroughDeadline(
@@ -2803,6 +2935,7 @@ public sealed class RaceCoordinator
         flag = RaceControlFlag.Green;
         flagMessage = null;
         receivedLapEvents.Clear();
+        receivedPitServiceEvents.Clear();
         foreach (var participant in participants)
             ResetForNextPracticeSession(participant);
         banner = NewBanner(
@@ -2901,6 +3034,7 @@ public sealed class RaceCoordinator
         flag = RaceControlFlag.Green;
         flagMessage = null;
         receivedLapEvents.Clear();
+        receivedPitServiceEvents.Clear();
         foreach (var participant in participants.Where(candidate => candidate.QualifyingEligible))
             ResetForNextQualifyingSession(participant);
         var eliminationText = qualifyingSessionNumber < qualifyingSessionCount
@@ -3716,6 +3850,7 @@ public sealed class RaceCoordinator
         practiceTimeExpired = false;
         banner = null;
         receivedLapEvents.Clear();
+        receivedPitServiceEvents.Clear();
         foreach (var participant in participants)
         {
             participant.CompletedLaps = 0;
@@ -3741,6 +3876,8 @@ public sealed class RaceCoordinator
             participant.PitServiceElapsedSeconds = 0;
             participant.PitServiceRequirementMet = false;
             participant.CompletedPitServices = 0;
+            participant.PitServiceVisitFirstSeenAt.Clear();
+            participant.CompletedPitServiceVisitIds.Clear();
             participant.PitLaneElapsedSeconds = 0;
             participant.QualifyingFinalLapPending = false;
             participant.QualifyingEligible = true;
@@ -3771,6 +3908,7 @@ public sealed class RaceCoordinator
         penalties.Clear();
         investigations.Clear();
         receivedLapEvents.Clear();
+        receivedPitServiceEvents.Clear();
         startsAt = null;
         startSequenceAt = null;
         raceSuspendedAt = null;
@@ -3821,6 +3959,8 @@ public sealed class RaceCoordinator
             participant.PitServiceElapsedSeconds = 0;
             participant.PitServiceRequirementMet = false;
             participant.CompletedPitServices = 0;
+            participant.PitServiceVisitFirstSeenAt.Clear();
+            participant.CompletedPitServiceVisitIds.Clear();
             participant.PitLaneElapsedSeconds = 0;
             participant.AutomaticYellowActive = false;
             participant.HazardCandidateStartedAt = null;
@@ -4283,6 +4423,8 @@ public sealed class RaceCoordinator
         public double PitServiceElapsedSeconds { get; set; }
         public bool PitServiceRequirementMet { get; set; }
         public int CompletedPitServices { get; set; }
+        public Dictionary<Guid, DateTimeOffset> PitServiceVisitFirstSeenAt { get; } = [];
+        public HashSet<Guid> CompletedPitServiceVisitIds { get; } = [];
         public double PitLaneElapsedSeconds { get; set; }
         public DateTimeOffset? PitSpeedCandidateStartedAt { get; set; }
         public bool PitSpeedPenaltyIssued { get; set; }

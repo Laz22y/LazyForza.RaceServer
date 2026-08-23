@@ -103,6 +103,8 @@ public static class RaceMessageTypes
     public const string Telemetry = "telemetry";
     public const string LapCompleted = "lapCompleted";
     public const string LapAcknowledged = "lapAcknowledged";
+    public const string PitServiceCompleted = "pitServiceCompleted";
+    public const string PitServiceAcknowledged = "pitServiceAcknowledged";
     public const string Snapshot = "snapshot";
     public const string Ping = "ping";
     public const string Pong = "pong";
@@ -225,7 +227,8 @@ public sealed record RaceTelemetryUpdate(
     double ImpactWorldVelocityZ = 0,
     double ImpactSmashableVelDiff = 0,
     double ImpactSmashableMass = 0,
-    RaceShortcutEvidence? ShortcutEvidence = null);
+    RaceShortcutEvidence? ShortcutEvidence = null,
+    Guid? PitServiceVisitId = null);
 
 public sealed record RaceShortcutEvidence(
     Guid Id,
@@ -254,6 +257,21 @@ public sealed record RaceLapCompleted(
     bool IsRecoveredAfterDisconnect = false);
 
 public sealed record RaceLapAcknowledgement(
+    Guid EventId,
+    bool IsAccepted,
+    string? Message = null);
+
+public sealed record RacePitServiceCompleted(
+    Guid EventId,
+    Guid VisitId,
+    int CompletedPitServices,
+    double RequiredSeconds,
+    double ElapsedSeconds,
+    long ClientMonotonicMilliseconds,
+    long RaceStartedAtUnixMilliseconds,
+    bool IsRecoveredAfterDisconnect = false);
+
+public sealed record RacePitServiceAcknowledgement(
     Guid EventId,
     bool IsAccepted,
     string? Message = null);

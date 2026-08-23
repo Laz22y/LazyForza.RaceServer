@@ -85,6 +85,7 @@ export interface TelemetryUpdate {
   impactSmashableVelDiff?: number;
   impactSmashableMass?: number;
   shortcutEvidence?: ShortcutEvidence | null;
+  pitServiceVisitId?: string | null;
 }
 
 export interface ShortcutEvidence {
@@ -116,6 +117,23 @@ export interface LapCompleted {
 }
 
 export interface LapAcknowledgement {
+  eventId: string;
+  isAccepted: boolean;
+  message?: string | null;
+}
+
+export interface PitServiceCompleted {
+  eventId: string;
+  visitId: string;
+  completedPitServices: number;
+  requiredSeconds: number;
+  elapsedSeconds: number;
+  clientMonotonicMilliseconds: number;
+  raceStartedAtUnixMilliseconds: number;
+  isRecoveredAfterDisconnect?: boolean;
+}
+
+export interface PitServiceAcknowledgement {
   eventId: string;
   isAccepted: boolean;
   message?: string | null;

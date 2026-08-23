@@ -2,6 +2,7 @@ import { RaceCore, type CommandResult, type StoredRaceState } from "./race-core"
 import {
   type FlagCommand,
   type LapCompleted,
+  type PitServiceCompleted,
   type LoginRequest,
   maximumMessageBytes,
   maximumObservers,
@@ -255,6 +256,7 @@ export class RaceRoom {
 
       let result: CommandResult;
       let lapAcknowledgement: { eventId: string; isAccepted: boolean; message?: string | null } | null = null;
+      let pitServiceAcknowledgement: { eventId: string; isAccepted: boolean; message?: string | null } | null = null;
       // Durable Object alarms may be delivered late. Active client traffic also
       // advances the race clock, but doing so once per telemetry packet makes
       // all 12 drivers pay for the same clock transition checks. Ten checks per
@@ -279,6 +281,15 @@ export class RaceRoom {
           message: result.ok ? null : result.error
         };
         important = true;
+      } else if (envelope.type === "pitServiceCompleted") {
+        const completed = envelope.payload as PitServiceCompleted;
+        result = this.core.completePitService(attachment.participantId, completed);
+        pitServiceAcknowledgement = {
+          eventId: completed.eventId,
+          isAccepted: result.ok,
+          message: result.ok ? null : result.error
+        };
+        important = true;
       } else {
         result = { ok: false, error: "未知消息类型。" };
       }
@@ -291,6 +302,8 @@ export class RaceRoom {
         }
         if (lapAcknowledgement)
           this.send(webSocket, "lapAcknowledged", lapAcknowledgement);
+        else if (pitServiceAcknowledgement)
+          this.send(webSocket, "pitServiceAcknowledged", pitServiceAcknowledgement);
         else
           this.send(webSocket, "error", { code: "commandRejected", message: result.error });
         return;
@@ -305,6 +318,8 @@ export class RaceRoom {
       }
       if (lapAcknowledgement)
         this.send(webSocket, "lapAcknowledged", lapAcknowledgement);
+      else if (pitServiceAcknowledgement)
+        this.send(webSocket, "pitServiceAcknowledged", pitServiceAcknowledgement);
     } catch (error) {
       this.send(webSocket, "error", {
         code: "invalidMessage",

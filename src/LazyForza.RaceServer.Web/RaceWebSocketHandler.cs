@@ -148,6 +148,20 @@ public sealed class RaceWebSocketHandler(
                     new RaceLapAcknowledgement(completed.EventId, result.IsAccepted, result.Error),
                     cancellationToken);
             }
+            case RaceMessageTypes.PitServiceCompleted:
+            {
+                if (isObserver)
+                    return SendRegisteredErrorAsync(
+                        participantId, socket, "observerReadOnly", "OB 不能提交维修停留。", cancellationToken);
+                var completed = RaceProtocolJson.DeserializePayload<RacePitServiceCompleted>(envelope);
+                var result = coordinator.CompletePitService(participantId, completed);
+                return SendRegisteredAsync(
+                    participantId,
+                    socket,
+                    RaceMessageTypes.PitServiceAcknowledged,
+                    new RacePitServiceAcknowledgement(completed.EventId, result.IsAccepted, result.Error),
+                    cancellationToken);
+            }
             case RaceMessageTypes.Ping:
             {
                 var ping = RaceProtocolJson.DeserializePayload<RaceClockPing>(envelope);

@@ -15,6 +15,7 @@ import {
   type ParticipantCommand,
   type ParticipantSnapshot,
   type ParticipantStatus,
+  type PitServiceCompleted,
   type PenaltyCommand,
   type PenaltyUpdateCommand,
   type PenaltyKind,
@@ -125,6 +126,8 @@ interface ParticipantState {
   pitServiceElapsedSeconds: number;
   pitServiceRequirementMet: boolean;
   completedPitServices: number;
+  pitServiceVisitFirstSeenAt?: Record<string, string>;
+  completedPitServiceVisitIds?: string[];
   pitLaneElapsedSeconds?: number;
   gripCondition: GripCondition;
   hazardCandidateReason?: string | null;
@@ -227,6 +230,7 @@ export interface StoredRaceState {
   penalties: PenaltySnapshot[];
   investigations?: InvestigationSnapshot[];
   receivedLapEvents: string[];
+  receivedPitServiceEvents?: string[];
   sectorCount: number;
   automaticYellowEnabled: boolean;
   automaticCollisionInvestigationsEnabled: boolean;
@@ -368,6 +372,7 @@ export class RaceCore {
       penalties: [],
       investigations: [],
       receivedLapEvents: []
+      ,receivedPitServiceEvents: []
       ,activeResultStageId: null
       ,resultHistory: []
       ,sectorCount: clampInteger(configuration.sectorCount ?? 3, 1, 20)
@@ -568,6 +573,8 @@ export class RaceCore {
       pitServiceElapsedSeconds: 0,
       pitServiceRequirementMet: false,
       completedPitServices: 0,
+      pitServiceVisitFirstSeenAt: {},
+      completedPitServiceVisitIds: [],
       gripCondition: "unknown",
       qualifyingFinalLapPending: false,
       qualifyingEligible: true,
@@ -663,7 +670,7 @@ export class RaceCore {
     const priorServices = participant.completedPitServices;
     if (this.canExecutePenalties(participant)) this.updatePenaltyServiceState(participant, update, now);
     else this.resetLivePenaltyServiceState(participant);
-    this.updatePitServiceState(participant, update);
+    this.updatePitServiceState(participant, update, now);
     if (!wasInPitLane && participant.isInPitLane)
       this.recordEvent("pitEntered", `${participant.displayName} 进入维修区。`, participant.id, now);
     if (!wasInServiceZone && participant.isInServiceZone)
@@ -860,6 +867,90 @@ export class RaceCore {
     }
     this.completeQualifyingIfReady(now);
     this.completePracticeIfReady(now);
+    this.touch();
+    return accepted();
+  }
+
+  completePitService(
+    participantId: string,
+    completed: PitServiceCompleted,
+    now = new Date()): CommandResult {
+    const participant = this.find(participantId);
+    if (!participant) return rejected("车手不存在。");
+    const eventId = cleanText(completed.eventId, 80);
+    const visitId = cleanText(completed.visitId, 80);
+    if (!eventId || !visitId) return rejected("维修停留事件编号无效。");
+    this.state.receivedPitServiceEvents ??= [];
+    if (this.state.receivedPitServiceEvents.includes(eventId)) return accepted();
+
+    const effectivePhase = this.state.phase === "suspended"
+      ? this.state.phaseBeforeSuspension
+      : this.state.phase;
+    if (effectivePhase !== "race" && this.state.phase !== "finished")
+      return rejected("当前阶段不接收维修停留记录。");
+    if (!this.state.startsAt ||
+        Date.parse(this.state.startsAt) !== completed.raceStartedAtUnixMilliseconds)
+      return rejected("维修停留记录不属于当前正赛。");
+    if (!Number.isFinite(completed.requiredSeconds) || completed.requiredSeconds < .1 ||
+        completed.requiredSeconds > 3_600 || !Number.isFinite(completed.elapsedSeconds) ||
+        completed.elapsedSeconds + .001 < completed.requiredSeconds)
+      return rejected("维修停留时间无效。");
+
+    participant.pitServiceVisitFirstSeenAt ??= {};
+    participant.completedPitServiceVisitIds ??= [];
+    const visitFirstSeenText = participant.pitServiceVisitFirstSeenAt[visitId];
+    const visitFirstSeen = visitFirstSeenText ? Date.parse(visitFirstSeenText) : Number.NaN;
+    const recoveredWithoutObservedVisit = completed.isRecoveredAfterDisconnect === true &&
+      !Number.isFinite(visitFirstSeen);
+    if (recoveredWithoutObservedVisit) {
+      if (!this.state.disconnectedLapRecoveryEnabled)
+        return rejected("服务端未开启断线圈速恢复。");
+      if (!this.hasActiveDisconnectedLapRecovery(participant, now))
+        return rejected("断线恢复窗口已结束。");
+    } else if (!Number.isFinite(visitFirstSeen)) {
+      return rejected("服务端未收到对应的换胎区访问记录。");
+    }
+
+    const finishedAt = participant.finishedAt ? Date.parse(participant.finishedAt) : Number.NaN;
+    const completedAfterFinish = Number.isFinite(finishedAt);
+    if (completedAfterFinish && Number.isFinite(visitFirstSeen) && visitFirstSeen > finishedAt)
+      return rejected("该换胎区访问发生在完赛之后。");
+    if ((participant.status === "didNotFinish" || participant.status === "disconnected") &&
+        !recoveredWithoutObservedVisit)
+      return rejected("该车手已经结束比赛，不能继续提交维修停留。");
+
+    if (participant.completedPitServiceVisitIds.includes(visitId)) {
+      this.state.receivedPitServiceEvents.push(eventId);
+      return accepted();
+    }
+    const reportedServices = clampInteger(completed.completedPitServices, 0, 999);
+    if (reportedServices !== participant.completedPitServices + 1)
+      return rejected("维修停留次数与服务端记录不连续。");
+
+    this.state.receivedPitServiceEvents.push(eventId);
+    if (this.state.receivedPitServiceEvents.length > 20_000)
+      this.state.receivedPitServiceEvents.splice(0, this.state.receivedPitServiceEvents.length - 10_000);
+    participant.completedPitServiceVisitIds.push(visitId);
+    if (participant.completedPitServiceVisitIds.length > 1_000)
+      participant.completedPitServiceVisitIds.splice(0, participant.completedPitServiceVisitIds.length - 500);
+    participant.completedPitServices++;
+    participant.pitServiceRequirementMet = true;
+    participant.pitServiceElapsedSeconds = Math.max(
+      participant.pitServiceElapsedSeconds,
+      completed.elapsedSeconds);
+    participant.lastSeenAt = now.toISOString();
+
+    const delayed = completed.isRecoveredAfterDisconnect === true || completedAfterFinish;
+    this.recordEvent(
+      delayed ? "pitServiceCompletedRecovered" : "pitServiceCompleted",
+      delayed
+        ? `${participant.displayName} 的换胎停留已补传确认（第 ${participant.completedPitServices} 次）。`
+        : `${participant.displayName} 完成第 ${participant.completedPitServices} 次换胎停留。`,
+      participant.id,
+      now);
+    if (this.revokeRecoveredMinimumPitStopDisqualification(participant, now) &&
+        this.state.phase === "finished")
+      this.archiveActiveResult(now, true);
     this.touch();
     return accepted();
   }
@@ -1631,6 +1722,19 @@ export class RaceCore {
         driveThroughStopCandidateStartedAt: participant.driveThroughStopCandidateStartedAt ?? null,
         pitVisitHadServiceStop: participant.pitVisitHadServiceStop ?? false,
         pitVisitPaused: participant.pitVisitPaused ?? false,
+        pitServiceVisitFirstSeenAt: participant.pitServiceVisitFirstSeenAt &&
+          typeof participant.pitServiceVisitFirstSeenAt === "object"
+          ? Object.fromEntries(Object.entries(participant.pitServiceVisitFirstSeenAt)
+            .map(([visitId, seenAt]) => [cleanText(visitId, 80), cleanText(seenAt, 80)] as const)
+            .filter((entry): entry is [string, string] => Boolean(entry[0]) &&
+              Boolean(entry[1]) && Number.isFinite(Date.parse(entry[1] ?? ""))))
+          : {},
+        completedPitServiceVisitIds: Array.isArray(participant.completedPitServiceVisitIds)
+          ? participant.completedPitServiceVisitIds
+            .map(visitId => cleanText(visitId, 80))
+            .filter((visitId): visitId is string => Boolean(visitId))
+            .slice(-1_000)
+          : [],
         telemetryValid: participant.telemetryValid ?? false,
         awaitingFreshTelemetryAfterResume: participant.awaitingFreshTelemetryAfterResume ?? false,
         hasWorldPosition: participant.hasWorldPosition ?? false,
@@ -1680,6 +1784,8 @@ export class RaceCore {
         }))
         : [],
       receivedLapEvents: Array.isArray(stored.receivedLapEvents) ? stored.receivedLapEvents.slice(-10_000) : []
+      ,receivedPitServiceEvents: Array.isArray(stored.receivedPitServiceEvents)
+        ? stored.receivedPitServiceEvents.slice(-10_000) : []
       ,sectorCount: clampInteger(stored.sectorCount ?? 3, 1, 20)
       ,automaticYellowEnabled: stored.automaticYellowEnabled ?? true
       ,automaticCollisionInvestigationsEnabled: stored.automaticCollisionInvestigationsEnabled ?? false
@@ -2174,9 +2280,17 @@ export class RaceCore {
     this.touch();
   }
 
-  private updatePitServiceState(participant: ParticipantState, update: TelemetryUpdate): void {
+  private updatePitServiceState(
+    participant: ParticipantState,
+    update: TelemetryUpdate,
+    now: Date): void {
     participant.isInPitLane = Boolean(update.isInPitLane);
     participant.isInServiceZone = participant.isInPitLane && Boolean(update.isInServiceZone);
+    const visitId = cleanText(update.pitServiceVisitId, 80);
+    if (participant.isInServiceZone && visitId) {
+      participant.pitServiceVisitFirstSeenAt ??= {};
+      participant.pitServiceVisitFirstSeenAt[visitId] ??= now.toISOString();
+    }
     const serviceBlocked = this.canExecutePenalties(participant) &&
       (this.pendingTimePenaltySeconds(participant.id) > 0 || Boolean(participant.penaltyServiceActive));
     participant.pitServiceElapsedSeconds = participant.isInServiceZone && !serviceBlocked
@@ -2186,7 +2300,8 @@ export class RaceCore {
     participant.pitServiceRequirementMet = participant.isInServiceZone && !serviceBlocked &&
       Boolean(update.pitServiceRequirementMet);
     const reportedServices = clampInteger(update.completedPitServices, 0, 999);
-    if (participant.pitServiceRequirementMet && reportedServices === participant.completedPitServices + 1)
+    if (!visitId && participant.pitServiceRequirementMet &&
+        reportedServices === participant.completedPitServices + 1)
       participant.completedPitServices++;
   }
 
@@ -2602,6 +2717,7 @@ export class RaceCore {
     this.state.flag = "green";
     this.state.flagMessage = null;
     this.state.receivedLapEvents = [];
+    this.state.receivedPitServiceEvents = [];
     for (const participant of this.state.participants) this.resetForNextPracticeSession(participant);
     this.state.banner = this.newBanner(
       "information", `${this.practiceSessionLabel()} 开始`,
@@ -2687,6 +2803,7 @@ export class RaceCore {
     this.state.flag = "green";
     this.state.flagMessage = null;
     this.state.receivedLapEvents = [];
+    this.state.receivedPitServiceEvents = [];
     for (const participant of this.state.participants.filter(candidate => candidate.qualifyingEligible !== false))
       this.resetForNextQualifyingSession(participant);
     const eliminationText = this.state.qualifyingSessionNumber < (this.state.qualifyingSessionCount ?? 1)
@@ -2815,6 +2932,7 @@ export class RaceCore {
     this.state.practiceSessionMinutes = [60];
     this.state.banner = null;
     this.state.receivedLapEvents = [];
+    this.state.receivedPitServiceEvents = [];
     this.liveProgressSamples.clear();
     this.liveProgressTrackers.clear();
     for (const participant of this.state.participants) this.resetParticipant(participant, true);
@@ -2826,6 +2944,7 @@ export class RaceCore {
     this.state.penalties = [];
     this.state.investigations = [];
     this.state.receivedLapEvents = [];
+    this.state.receivedPitServiceEvents = [];
     this.state.startsAt = null;
     this.state.startSequenceAt = null;
     this.state.raceSuspendedAt = null;
@@ -2869,6 +2988,8 @@ export class RaceCore {
     participant.pitServiceElapsedSeconds = 0;
     participant.pitServiceRequirementMet = false;
     participant.completedPitServices = 0;
+    participant.pitServiceVisitFirstSeenAt = {};
+    participant.completedPitServiceVisitIds = [];
     participant.pitLaneElapsedSeconds = 0;
     participant.automaticYellowActive = false;
     participant.hazardCandidateStartedAt = null;
@@ -3068,6 +3189,33 @@ export class RaceCore {
       `${participant.displayName} 完赛时只完成 ${participant.completedPitServices}/${required} 次有效维修停留，判定未满足完赛条件。`,
       participant.id,
       now);
+  }
+
+  private revokeRecoveredMinimumPitStopDisqualification(
+    participant: ParticipantState,
+    now: Date): boolean {
+    const required = clampInteger(this.state.minimumRequiredPitStops ?? 1, 0, 20);
+    if (required === 0 || participant.completedPitServices < required) return false;
+    let revokedAny = false;
+    for (const penalty of this.state.penalties) {
+      if (penalty.participantId !== participant.id || penalty.isRevoked ||
+          penalty.kind !== "disqualification" || penalty.isAutomatic !== true ||
+          !penalty.reason.startsWith("未完成规定的最少有效维修停留次数")) continue;
+      penalty.isRevoked = true;
+      revokedAny = true;
+    }
+    if (!revokedAny) return false;
+    const hasOtherDisqualification = this.state.penalties.some(penalty =>
+      penalty.participantId === participant.id && !penalty.isRevoked &&
+      penalty.kind === "disqualification");
+    if (!hasOtherDisqualification && participant.status === "disqualified")
+      participant.status = participant.finishedAt ? "finished" : "onTrack";
+    this.recordEvent(
+      "minimumPitStopsRecovered",
+      `${participant.displayName} 的补传换胎停留已确认，最低进站要求恢复为已完成。`,
+      participant.id,
+      now);
+    return true;
   }
 
   private updateDriveThroughDeadline(

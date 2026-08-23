@@ -1558,6 +1558,102 @@ describe("RaceCore", () => {
     expect(snapshot.penalties?.some(item => item.participantId === withoutStop &&
       item.kind === "disqualification" && item.isAutomatic)).toBe(true);
   });
+
+  it("uses an acknowledged pit service event as the idempotent authority", () => {
+    const core = createCore();
+    const participantId = connect(core, "可靠换胎");
+    const started = new Date("2026-08-23T10:00:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 3 }, started);
+    const raceStartedAt = Date.parse(core.snapshot(started).startsAt!);
+    const visitId = "pit-visit-1";
+    core.updateTelemetry(participantId, {
+      ...telemetry(),
+      isInPitLane: true,
+      isInServiceZone: true,
+      pitServiceElapsedSeconds: 3,
+      pitServiceRequirementMet: true,
+      completedPitServices: 1,
+      pitServiceVisitId: visitId
+    }, new Date(started.getTime() + 1_000));
+    expect(core.snapshot().participants[0].completedPitServices).toBe(0);
+
+    const completed = {
+      eventId: "pit-event-1",
+      visitId,
+      completedPitServices: 1,
+      requiredSeconds: 2.5,
+      elapsedSeconds: 2.5,
+      clientMonotonicMilliseconds: 20_000,
+      raceStartedAtUnixMilliseconds: raceStartedAt
+    };
+    expect(core.completePitService(participantId, completed,
+      new Date(started.getTime() + 3_000)).ok).toBe(true);
+    expect(core.completePitService(participantId, completed,
+      new Date(started.getTime() + 4_000)).ok).toBe(true);
+    expect(core.completePitService(participantId, { ...completed, eventId: "pit-event-retry" },
+      new Date(started.getTime() + 5_000)).ok).toBe(true);
+    expect(core.snapshot().participants[0].completedPitServices).toBe(1);
+  });
+
+  it("accepts a pre-finish pit visit completed after the line and repairs the result", () => {
+    const core = createCore();
+    expect(core.applyRoomSettings({
+      ...core.roomSettings(),
+      totalRaceLaps: 1,
+      minimumRequiredPitStops: 1
+    }).ok).toBe(true);
+    const participantId = connect(core, "跨线换胎");
+    const started = new Date("2026-08-23T11:00:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 1 }, started);
+    const raceStartedAt = Date.parse(core.snapshot(started).startsAt!);
+    core.updateTelemetry(participantId, {
+      ...telemetry(),
+      trackProgress: .99,
+      isInPitLane: true,
+      isInServiceZone: true,
+      pitServiceElapsedSeconds: 2,
+      pitServiceVisitId: "cross-line-visit"
+    }, new Date(started.getTime() + 58_000));
+    core.completeLap(participantId, lap("cross-line-finish", 60, true, 1),
+      new Date(started.getTime() + 60_000));
+    expect(core.snapshot().participants[0].status).toBe("disqualified");
+
+    const recovered = core.completePitService(participantId, {
+      eventId: "cross-line-service",
+      visitId: "cross-line-visit",
+      completedPitServices: 1,
+      requiredSeconds: 2.5,
+      elapsedSeconds: 2.7,
+      clientMonotonicMilliseconds: 61_000,
+      raceStartedAtUnixMilliseconds: raceStartedAt
+    }, new Date(started.getTime() + 61_000));
+    expect(recovered.ok).toBe(true);
+    const corrected = core.snapshot();
+    expect(corrected.participants[0].status).toBe("finished");
+    expect(corrected.participants[0].completedPitServices).toBe(1);
+    expect(corrected.penalties?.find(penalty => penalty.kind === "disqualification")?.isRevoked).toBe(true);
+    expect(core.events().some(event => event.type === "pitServiceCompletedRecovered")).toBe(true);
+    expect(core.events().some(event => event.type === "minimumPitStopsRecovered")).toBe(true);
+    expect(core.results()[0].participants[0].status).toBe("finished");
+
+    core.updateTelemetry(participantId, {
+      ...telemetry(),
+      trackProgress: .02,
+      isInPitLane: true,
+      isInServiceZone: true,
+      pitServiceVisitId: "post-finish-visit"
+    }, new Date(started.getTime() + 62_000));
+    expect(core.completePitService(participantId, {
+      eventId: "post-finish-service",
+      visitId: "post-finish-visit",
+      completedPitServices: 2,
+      requiredSeconds: 2.5,
+      elapsedSeconds: 2.5,
+      clientMonotonicMilliseconds: 63_000,
+      raceStartedAtUnixMilliseconds: raceStartedAt
+    }, new Date(started.getTime() + 63_000)).ok).toBe(false);
+    expect(core.snapshot().participants[0].completedPitServices).toBe(1);
+  });
 });
 
 function createCore(maximumParticipants = 12): RaceCore {

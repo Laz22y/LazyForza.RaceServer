@@ -2429,6 +2429,120 @@ public sealed class RaceCoordinatorTests
             item.IsAutomatic));
     }
 
+    [TestMethod]
+    public void ReliablePitServiceEventIsAuthoritativeAndIdempotent()
+    {
+        var coordinator = CreateCoordinator();
+        var participant = Join(coordinator, 1).Accepted!;
+        var started = DateTimeOffset.Parse("2026-08-23T10:00:00Z");
+        Assert.IsTrue(coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Race, "换胎确认", 3, 0, null), started).IsAccepted);
+        var raceStartedAt = coordinator.Snapshot(started).StartsAt!.Value;
+        var visitId = Guid.NewGuid();
+        var telemetry = Telemetry(0, .45) with
+        {
+            IsInPitLane = true,
+            IsInServiceZone = true,
+            PitServiceElapsedSeconds = 3,
+            PitServiceRequirementMet = true,
+            CompletedPitServices = 1,
+            PitServiceVisitId = visitId
+        };
+        Assert.IsTrue(coordinator.UpdateTelemetry(
+            participant.ParticipantId, telemetry, started.AddSeconds(1)).IsAccepted);
+        Assert.AreEqual(0, coordinator.Snapshot().Participants.Single().CompletedPitServices,
+            "带访问 ID 的新客户端必须由可靠完成事件记账，不能再依赖普通遥测帧碰运气。");
+
+        var eventId = Guid.NewGuid();
+        var completed = new RacePitServiceCompleted(
+            eventId,
+            visitId,
+            1,
+            2.5,
+            2.5,
+            20_000,
+            raceStartedAt.ToUnixTimeMilliseconds());
+        var result = coordinator.CompletePitService(
+            participant.ParticipantId, completed, started.AddSeconds(3));
+        Assert.IsTrue(result.IsAccepted, result.Error);
+        Assert.AreEqual(1, coordinator.Snapshot().Participants.Single().CompletedPitServices);
+
+        Assert.IsTrue(coordinator.CompletePitService(
+            participant.ParticipantId, completed, started.AddSeconds(4)).IsAccepted);
+        Assert.IsTrue(coordinator.CompletePitService(
+            participant.ParticipantId,
+            completed with { EventId = Guid.NewGuid() },
+            started.AddSeconds(5)).IsAccepted);
+        Assert.AreEqual(1, coordinator.Snapshot().Participants.Single().CompletedPitServices,
+            "同一换胎访问即使因确认丢失而使用不同事件重试，也不能重复累计。");
+    }
+
+    [TestMethod]
+    public void PitServiceStartedBeforeFinishCanCompleteAfterLineAndRestoreClassification()
+    {
+        var coordinator = CreateCoordinator();
+        SetMinimumPitStops(coordinator, 1);
+        var participant = Join(coordinator, 1).Accepted!;
+        var started = DateTimeOffset.Parse("2026-08-23T11:00:00Z");
+        Assert.IsTrue(coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Race, "跨线换胎区", 1, 0, null), started).IsAccepted);
+        var raceStartedAt = coordinator.Snapshot(started).StartsAt!.Value;
+        var visitId = Guid.NewGuid();
+        Assert.IsTrue(coordinator.UpdateTelemetry(
+            participant.ParticipantId,
+            Telemetry(0, .99) with
+            {
+                IsInPitLane = true,
+                IsInServiceZone = true,
+                PitServiceElapsedSeconds = 2,
+                CompletedPitServices = 0,
+                PitServiceVisitId = visitId
+            },
+            started.AddSeconds(58)).IsAccepted);
+
+        CompleteLap(coordinator, participant.ParticipantId, 1, 60, started.AddSeconds(60));
+        var disqualified = coordinator.Snapshot(started.AddSeconds(60));
+        Assert.AreEqual(RaceParticipantStatus.Disqualified, disqualified.Participants.Single().Status);
+
+        var recovered = coordinator.CompletePitService(
+            participant.ParticipantId,
+            new RacePitServiceCompleted(
+                Guid.NewGuid(), visitId, 1, 2.5, 2.7, 61_000,
+                raceStartedAt.ToUnixTimeMilliseconds()),
+            started.AddSeconds(61));
+        Assert.IsTrue(recovered.IsAccepted, recovered.Error);
+        var corrected = coordinator.Snapshot(started.AddSeconds(61));
+        Assert.AreEqual(RaceParticipantStatus.Finished, corrected.Participants.Single().Status);
+        Assert.AreEqual(1, corrected.Participants.Single().CompletedPitServices);
+        Assert.IsTrue(corrected.Penalties!.Single(item =>
+            item.Kind == RacePenaltyKind.Disqualification).IsRevoked);
+        Assert.IsTrue(coordinator.Events().Any(item => item.Type == "pitServiceCompletedRecovered"));
+        Assert.IsTrue(coordinator.Events().Any(item => item.Type == "minimumPitStopsRecovered"));
+        Assert.AreEqual(RaceParticipantStatus.Finished,
+            coordinator.Results().Single().Participants.Single().Status,
+            "赛后补传完成后，已经归档的正赛结果也必须同步纠正。");
+
+        var postFinishVisit = Guid.NewGuid();
+        Assert.IsTrue(coordinator.UpdateTelemetry(
+            participant.ParticipantId,
+            Telemetry(1, .02) with
+            {
+                IsInPitLane = true,
+                IsInServiceZone = true,
+                PitServiceVisitId = postFinishVisit
+            },
+            started.AddSeconds(62)).IsAccepted);
+        var rejected = coordinator.CompletePitService(
+            participant.ParticipantId,
+            new RacePitServiceCompleted(
+                Guid.NewGuid(), postFinishVisit, 2, 2.5, 2.5, 63_000,
+                raceStartedAt.ToUnixTimeMilliseconds()),
+            started.AddSeconds(63));
+        Assert.IsFalse(rejected.IsAccepted,
+            "允许换胎区跨线不等于允许车手完赛后再新进站补足次数。");
+        Assert.AreEqual(1, coordinator.Snapshot().Participants.Single().CompletedPitServices);
+    }
+
     private static RaceCoordinator CreateCoordinator(int maximumParticipants = RaceProtocol.MaximumParticipants) =>
         new(new RaceServerOptions
         {
@@ -2459,6 +2573,33 @@ public sealed class RaceCoordinatorTests
             settings.DriversPerTeam,
             settings.Teams,
             mode));
+        Assert.IsTrue(result.IsAccepted, result.Error);
+    }
+
+    private static void SetMinimumPitStops(RaceCoordinator coordinator, int minimumPitStops)
+    {
+        var settings = coordinator.RoomSettings();
+        var result = coordinator.ApplyRoomSettings(new RaceAdminRoomSettingsCommand(
+            settings.SessionName,
+            settings.TotalRaceLaps,
+            settings.SectorCount,
+            settings.AutomaticYellowEnabled,
+            settings.SlowSpeedKph,
+            settings.SlowDurationSeconds,
+            settings.SevereLateralOffsetMeters,
+            settings.RecoveryDurationSeconds,
+            settings.AllowTeams,
+            settings.TrackName,
+            settings.TrackId,
+            settings.TrackRevision,
+            settings.TrackPackageHash,
+            settings.TeamCount,
+            settings.DriversPerTeam,
+            settings.Teams,
+            settings.TrackLimitMode,
+            minimumPitStops,
+            settings.AutomaticCollisionInvestigationsEnabled,
+            settings.DisconnectedLapRecoveryEnabled));
         Assert.IsTrue(result.IsAccepted, result.Error);
     }
 
