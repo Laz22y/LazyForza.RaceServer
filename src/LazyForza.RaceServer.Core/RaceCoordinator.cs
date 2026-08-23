@@ -314,6 +314,7 @@ public sealed class RaceCoordinator
 
                 if (resumed is not null)
                 {
+                    var resumedAfterDisconnect = resumed.Status == RaceParticipantStatus.Disconnected;
                     if (HasDuplicateName(displayName, resumed.Id))
                     {
                         rejected = new RaceLoginRejected("duplicateName", "该比赛昵称已被其他车手使用。");
@@ -346,6 +347,9 @@ public sealed class RaceCoordinator
                         if (resumed.Status == RaceParticipantStatus.DidNotFinish)
                             resumed.FinishedAt ??= DateTimeOffset.UtcNow;
                     }
+                    resumed.AwaitingFreshTelemetryAfterResume = resumedAfterDisconnect &&
+                        resumed.Status is not (RaceParticipantStatus.Finished or
+                            RaceParticipantStatus.DidNotFinish or RaceParticipantStatus.Disqualified);
                     TryCompleteRaceIfReady(DateTimeOffset.UtcNow);
                     IncrementRevision();
                     published = BuildSnapshot(DateTimeOffset.UtcNow);
@@ -486,6 +490,7 @@ public sealed class RaceCoordinator
 
             var shortcutDecision = EvaluateShortcut(participant, normalized, now);
             participant.TelemetryValid = true;
+            participant.AwaitingFreshTelemetryAfterResume = false;
             participant.TrackProgress = normalized.TrackProgress;
             participant.LateralOffsetMeters = normalized.LateralOffsetMeters;
             participant.MapX = normalized.MapX;
@@ -744,6 +749,9 @@ public sealed class RaceCoordinator
             }
             if (!participant.IsConnected) return;
             var now = DateTimeOffset.UtcNow;
+            participant.AwaitingFreshTelemetryAfterResume = participant.Status is not (
+                RaceParticipantStatus.Finished or RaceParticipantStatus.DidNotFinish or
+                RaceParticipantStatus.Disqualified);
             participant.IsConnected = false;
             if (participant.Status is not (RaceParticipantStatus.Finished or
                     RaceParticipantStatus.DidNotFinish or RaceParticipantStatus.Disqualified))
@@ -751,6 +759,7 @@ public sealed class RaceCoordinator
             participant.AutomaticYellowActive = false;
             participant.HazardCandidateStartedAt = null;
             participant.HazardRecoveryStartedAt = null;
+            participant.RaceProgressContinuityReady = false;
             ResetCollisionState(participant);
             participant.LastSeenAt = now;
             var canRecoverLap = disconnectedLapRecoveryEnabled &&
@@ -3296,6 +3305,8 @@ public sealed class RaceCoordinator
     {
         if (reference.Id == participant.Id) return 0;
         if (!IsRaceClassificationPhase(phase)) return null;
+        if (reference.AwaitingFreshTelemetryAfterResume || participant.AwaitingFreshTelemetryAfterResume)
+            return null;
         if (reference.Status == RaceParticipantStatus.Finished &&
             participant.Status == RaceParticipantStatus.Finished)
             return AdjustedRaceTotalSeconds(participant, now) - AdjustedRaceTotalSeconds(reference, now);
@@ -3422,6 +3433,30 @@ public sealed class RaceCoordinator
         return Math.Max(0, participantTime.Value - referenceTime.Value);
     }
 
+    private Dictionary<Guid, Dictionary<Guid, double>>? BuildPairwiseRaceDeltas(
+        IReadOnlyList<ParticipantState> ordered,
+        DateTimeOffset now)
+    {
+        if (!IsRaceClassificationPhase(phase)) return null;
+        var result = ordered.ToDictionary(
+            participant => participant.Id,
+            participant => new Dictionary<Guid, double> { [participant.Id] = 0d });
+        for (var aheadIndex = 0; aheadIndex < ordered.Count; aheadIndex++)
+        {
+            for (var behindIndex = aheadIndex + 1; behindIndex < ordered.Count; behindIndex++)
+            {
+                var ahead = ordered[aheadIndex];
+                var behind = ordered[behindIndex];
+                if (RaceDeltaSeconds(ahead, behind, now) is not double delta ||
+                    !double.IsFinite(delta) || delta < 0)
+                    continue;
+                result[behind.Id][ahead.Id] = delta;
+                result[ahead.Id][behind.Id] = -delta;
+            }
+        }
+        return result;
+    }
+
     private static string FormatRaceTime(double seconds)
     {
         if (!double.IsFinite(seconds) || seconds < 0) return "—";
@@ -3445,6 +3480,7 @@ public sealed class RaceCoordinator
             .ToList();
         var snapshots = new List<RaceParticipantSnapshot>(ordered.Count);
         var leader = ordered.FirstOrDefault();
+        var pairwiseRaceDeltas = BuildPairwiseRaceDeltas(ordered, now);
         ParticipantState? prior = null;
         for (var index = 0; index < ordered.Count; index++)
         {
@@ -3534,7 +3570,8 @@ public sealed class RaceCoordinator
                 participant.QualifyingEliminatedInSession,
                 participant.QualifyingSessionBestLapSeconds.ToArray(),
                 participant.PracticeFinalLapPending,
-                participant.PracticeSessionBestLapSeconds.ToArray()));
+                participant.PracticeSessionBestLapSeconds.ToArray(),
+                pairwiseRaceDeltas?.GetValueOrDefault(participant.Id)));
             prior = participant;
         }
 
@@ -3620,6 +3657,7 @@ public sealed class RaceCoordinator
             RaceSessionPhase.Suspended or RaceSessionPhase.Finished)
             return activeParticipants
                 .OrderBy(candidate => TerminalRank(candidate.Status))
+                .ThenBy(candidate => candidate.AwaitingFreshTelemetryAfterResume)
                 .ThenByDescending(candidate => candidate.CompletedLaps)
                 .ThenBy(candidate => candidate.Status == RaceParticipantStatus.Finished
                     ? AdjustedRaceTotalSeconds(candidate, now)
@@ -4183,6 +4221,7 @@ public sealed class RaceCoordinator
         public bool IsConnected { get; set; } = true;
         public bool IsReady { get; set; }
         public bool TelemetryValid { get; set; }
+        public bool AwaitingFreshTelemetryAfterResume { get; set; }
         public int CompletedLaps { get; set; }
         public int CurrentSector { get; set; }
         public double TrackProgress { get; set; }

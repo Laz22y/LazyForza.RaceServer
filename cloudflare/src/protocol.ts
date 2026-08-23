@@ -198,6 +198,7 @@ export interface ParticipantSnapshot {
   bestLapSeconds?: number | null;
   gapToLeaderSeconds?: number | null;
   intervalSeconds?: number | null;
+  raceDeltaSecondsByReference?: Record<string, number> | null;
   isInPitLane: boolean;
   isInServiceZone: boolean;
   pitServiceElapsedSeconds: number;

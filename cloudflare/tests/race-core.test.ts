@@ -1004,6 +1004,91 @@ describe("RaceCore", () => {
     expect(afterPit).toBeLessThan(10);
   });
 
+  it("publishes direct pairwise Delta instead of subtracting different leader anchors", () => {
+    const core = createCore();
+    const leader = connect(core, "甲"), local = connect(core, "乙"), trailing = connect(core, "丙");
+    const started = new Date("2026-08-09T10:42:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 5 }, started);
+
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .10 }, new Date(started.getTime() + 10_000));
+    core.updateTelemetry(local, { ...telemetry(), trackProgress: .10 }, new Date(started.getTime() + 12_000));
+    core.updateTelemetry(trailing, { ...telemetry(), trackProgress: .10 }, new Date(started.getTime() + 13_000));
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .20 }, new Date(started.getTime() + 20_000));
+    core.updateTelemetry(local, { ...telemetry(), trackProgress: .20 }, new Date(started.getTime() + 22_000));
+    core.updateTelemetry(trailing, { ...telemetry(), trackProgress: .20 }, new Date(started.getTime() + 25_000));
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .30 }, new Date(started.getTime() + 30_000));
+    core.updateTelemetry(local, { ...telemetry(), trackProgress: .30 }, new Date(started.getTime() + 38_000));
+
+    const snapshot = core.snapshot(new Date(started.getTime() + 38_000));
+    const localSnapshot = snapshot.participants.find(item => item.id === local)!;
+    const trailingSnapshot = snapshot.participants.find(item => item.id === trailing)!;
+    expect(localSnapshot.gapToLeaderSeconds).toBe(8);
+    expect(trailingSnapshot.gapToLeaderSeconds).toBe(5);
+    expect(trailingSnapshot.raceDeltaSecondsByReference?.[local]).toBe(3);
+    expect(localSnapshot.raceDeltaSecondsByReference?.[trailing]).toBe(-3);
+  });
+
+  it("keeps direct pairwise Delta stable across twelve laps", () => {
+    const core = createCore();
+    const leader = connect(core, "甲"), trailing = connect(core, "乙");
+    const started = new Date("2026-08-09T10:44:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 20 }, started);
+
+    for (let completedLap = 1; completedLap <= 12; completedLap++) {
+      const lapStart = (completedLap - 1) * 60_000;
+      core.updateTelemetry(leader, {
+        ...telemetry(), completedLaps: completedLap - 1, trackProgress: .25
+      }, new Date(started.getTime() + lapStart + 15_000));
+      core.updateTelemetry(trailing, {
+        ...telemetry(), completedLaps: completedLap - 1, trackProgress: .25
+      }, new Date(started.getTime() + lapStart + 17_000));
+      core.updateTelemetry(leader, {
+        ...telemetry(), completedLaps: completedLap - 1, trackProgress: .75
+      }, new Date(started.getTime() + lapStart + 45_000));
+      core.updateTelemetry(trailing, {
+        ...telemetry(), completedLaps: completedLap - 1, trackProgress: .75
+      }, new Date(started.getTime() + lapStart + 47_000));
+      core.completeLap(leader, lap(`leader-${completedLap}`, 60, true, completedLap),
+        new Date(started.getTime() + lapStart + 60_000));
+      core.completeLap(trailing, lap(`trailing-${completedLap}`, 60, true, completedLap),
+        new Date(started.getTime() + lapStart + 62_000));
+
+      const trailingSnapshot = core.snapshot(new Date(started.getTime() + lapStart + 62_000))
+        .participants.find(item => item.id === trailing)!;
+      expect(trailingSnapshot.raceDeltaSecondsByReference?.[leader]).toBeCloseTo(2, 3);
+    }
+  });
+
+  it("waits for fresh telemetry before a reconnected driver affects live order", () => {
+    const core = createCore();
+    const weakLogin = core.login(login("弱网"));
+    if (!weakLogin.ok) throw new Error(weakLogin.message);
+    const weak = weakLogin.participantId;
+    const healthyLeader = connect(core, "正常甲"), healthyTrailing = connect(core, "正常乙");
+    const started = new Date("2026-08-09T10:46:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 5 }, started);
+
+    core.updateTelemetry(weak, { ...telemetry(), trackProgress: .90 }, new Date(started.getTime() + 10_000));
+    core.updateTelemetry(healthyLeader, { ...telemetry(), trackProgress: .20 }, new Date(started.getTime() + 12_000));
+    core.updateTelemetry(healthyTrailing, { ...telemetry(), trackProgress: .20 }, new Date(started.getTime() + 15_000));
+    core.updateTelemetry(healthyLeader, { ...telemetry(), trackProgress: .50 }, new Date(started.getTime() + 22_000));
+    core.updateTelemetry(healthyLeader, { ...telemetry(), trackProgress: .60 }, new Date(started.getTime() + 23_000));
+    core.updateTelemetry(healthyTrailing, { ...telemetry(), trackProgress: .50 }, new Date(started.getTime() + 25_000));
+
+    core.disconnect(weak, new Date(started.getTime() + 30_000));
+    const resumed = core.login(
+      { ...login("弱网"), resumeToken: weakLogin.resumeToken },
+      new Date(started.getTime() + 31_000));
+    expect(resumed.ok).toBe(true);
+
+    const snapshot = core.snapshot(new Date(started.getTime() + 31_000));
+    expect(snapshot.participants.map(item => item.id)).toEqual([
+      healthyLeader, healthyTrailing, weak
+    ]);
+    expect(snapshot.participants[1].raceDeltaSecondsByReference?.[healthyLeader]).toBeCloseTo(3, 3);
+    expect(snapshot.participants[2].raceDeltaSecondsByReference?.[healthyLeader]).toBeUndefined();
+  });
+
   it("keeps a seconds gap when the leader crosses before the trailing driver", () => {
     const core = createCore();
     const leader = connect(core, "甲"), trailing = connect(core, "乙");

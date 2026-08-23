@@ -81,6 +81,7 @@ interface ParticipantState {
   mapY: number;
   speedKph: number;
   telemetryValid?: boolean;
+  awaitingFreshTelemetryAfterResume?: boolean;
   hasWorldPosition?: boolean;
   worldX?: number;
   worldY?: number;
@@ -485,6 +486,7 @@ export class RaceCore {
       return { ok: false, code: "teamRequired", message: "请选择服务端已经配置的车队。" };
 
     if (resumed) {
+      const resumedAfterDisconnect = resumed.status === "disconnected";
       if (this.hasDuplicateName(displayName, resumed.id))
         return { ok: false, code: "duplicateName", message: "该比赛显示名已被其他车手使用。" };
       if (team && !this.teamHasCapacity(team.id, resumed.id))
@@ -503,6 +505,7 @@ export class RaceCore {
           ? "onTrack"
           : resumed.isReady ? "ready" : "connected";
       if (resumed.status === "didNotFinish") resumed.finishedAt ??= now.toISOString();
+      resumed.awaitingFreshTelemetryAfterResume = resumedAfterDisconnect && !terminal(resumed.status);
       resumed.lastSeenAt = now.toISOString();
       this.tryCompleteRaceIfReady(now);
       this.touch();
@@ -540,6 +543,7 @@ export class RaceCore {
       mapX: 0,
       mapY: 0,
       speedKph: 0,
+      awaitingFreshTelemetryAfterResume: false,
       currentLapSeconds: 0,
       lastLapSeconds: null,
       bestLapSeconds: null,
@@ -607,6 +611,7 @@ export class RaceCore {
       return true;
     }
     if (!participant.isConnected) return false;
+    participant.awaitingFreshTelemetryAfterResume = !terminal(participant.status);
     participant.isConnected = false;
     if (!terminal(participant.status)) participant.status = "disconnected";
     participant.automaticYellowActive = false;
@@ -690,6 +695,7 @@ export class RaceCore {
     participant.mapY = clamp(update.mapY, -10_000_000, 10_000_000);
     participant.speedKph = clamp(update.speedKph, 0, 800);
     participant.telemetryValid = true;
+    participant.awaitingFreshTelemetryAfterResume = false;
     participant.hasWorldPosition = update.hasWorldPosition === true;
     participant.worldX = clamp(update.worldX, -10_000_000, 10_000_000);
     participant.worldY = clamp(update.worldY, -10_000_000, 10_000_000);
@@ -1401,6 +1407,7 @@ export class RaceCore {
   snapshot(now = new Date()): SessionSnapshot {
     const ordered = this.orderParticipants(now).filter(participant => participant.reservationActive !== false);
     const leader = ordered[0];
+    const pairwiseRaceDeltas = this.buildPairwiseRaceDeltas(ordered, now);
     let prior: ParticipantState | undefined;
     const participants: ParticipantSnapshot[] = ordered.map((participant, index) => {
       const displayedBestLap = this.qualifyingDisplayedBestLap(participant);
@@ -1448,6 +1455,7 @@ export class RaceCore {
         bestLapSeconds: displayedBestLap,
         gapToLeaderSeconds,
         intervalSeconds,
+        raceDeltaSecondsByReference: pairwiseRaceDeltas?.get(participant.id) ?? null,
         isInPitLane: participant.isInPitLane,
         isInServiceZone: participant.isInServiceZone,
         pitServiceElapsedSeconds: participant.pitServiceElapsedSeconds,
@@ -1624,6 +1632,7 @@ export class RaceCore {
         pitVisitHadServiceStop: participant.pitVisitHadServiceStop ?? false,
         pitVisitPaused: participant.pitVisitPaused ?? false,
         telemetryValid: participant.telemetryValid ?? false,
+        awaitingFreshTelemetryAfterResume: participant.awaitingFreshTelemetryAfterResume ?? false,
         hasWorldPosition: participant.hasWorldPosition ?? false,
         lastTelemetryReceivedAt: participant.lastTelemetryReceivedAt ?? null,
         isApproachingPit: participant.isApproachingPit ?? false,
@@ -2894,6 +2903,7 @@ export class RaceCore {
     participant.pitVisitHadServiceStop = false;
     participant.pitVisitPaused = false;
     participant.telemetryValid = false;
+    participant.awaitingFreshTelemetryAfterResume = false;
     participant.hasWorldPosition = false;
     participant.lastTelemetryReceivedAt = null;
     participant.isApproachingPit = false;
@@ -3158,6 +3168,8 @@ export class RaceCore {
   private raceDeltaSeconds(reference: ParticipantState, participant: ParticipantState, now: Date): number | null {
     if (reference.id === participant.id) return 0;
     if (!this.isRaceClassificationPhase()) return null;
+    if (reference.awaitingFreshTelemetryAfterResume || participant.awaitingFreshTelemetryAfterResume)
+      return null;
     if (reference.status === "finished" && participant.status === "finished")
       return this.adjustedRaceTotalSeconds(participant, now) - this.adjustedRaceTotalSeconds(reference, now);
     const liveDelta = this.liveRaceDeltaSeconds(reference, participant);
@@ -3269,6 +3281,24 @@ export class RaceCore {
     return Math.max(0, participantTime - referenceTime);
   }
 
+  private buildPairwiseRaceDeltas(
+    ordered: ParticipantState[],
+    now: Date): Map<string, Record<string, number>> | null {
+    if (!this.isRaceClassificationPhase()) return null;
+    const result = new Map<string, Record<string, number>>();
+    for (const participant of ordered) result.set(participant.id, { [participant.id]: 0 });
+    for (let aheadIndex = 0; aheadIndex < ordered.length; aheadIndex++) {
+      for (let behindIndex = aheadIndex + 1; behindIndex < ordered.length; behindIndex++) {
+        const ahead = ordered[aheadIndex], behind = ordered[behindIndex];
+        const delta = this.raceDeltaSeconds(ahead, behind, now);
+        if (delta === null || !Number.isFinite(delta) || delta < 0) continue;
+        result.get(behind.id)![ahead.id] = delta;
+        result.get(ahead.id)![behind.id] = -delta;
+      }
+    }
+    return result;
+  }
+
   private orderParticipants(now: Date): ParticipantState[] {
     const participants = this.state.participants.filter(participant => participant.reservationActive !== false);
     if ((this.state.phase === "qualifying" || this.state.phase === "grid") &&
@@ -3296,6 +3326,8 @@ export class RaceCore {
     if (["outLap", "formationLap", "race", "countdown", "suspended", "finished"].includes(this.state.phase)) {
       return participants.sort((left, right) =>
         terminalRank(left.status) - terminalRank(right.status) ||
+        Number(left.awaitingFreshTelemetryAfterResume ?? false) -
+          Number(right.awaitingFreshTelemetryAfterResume ?? false) ||
         right.completedLaps - left.completedLaps ||
         (left.status === "finished" && right.status === "finished"
           ? this.adjustedRaceTotalSeconds(left, now) - this.adjustedRaceTotalSeconds(right, now)

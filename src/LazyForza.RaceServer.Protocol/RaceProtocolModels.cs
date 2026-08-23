@@ -363,7 +363,8 @@ public sealed record RaceParticipantSnapshot(
     int? QualifyingEliminatedInSession = null,
     IReadOnlyList<double?>? QualifyingSessionBestLapSeconds = null,
     bool PracticeFinalLapPending = false,
-    IReadOnlyList<double?>? PracticeSessionBestLapSeconds = null);
+    IReadOnlyList<double?>? PracticeSessionBestLapSeconds = null,
+    IReadOnlyDictionary<Guid, double>? RaceDeltaSecondsByReference = null);
 
 public sealed record RaceObserverSnapshot(
     Guid Id,

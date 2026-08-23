@@ -362,13 +362,21 @@ public sealed class RaceCoordinatorTests
         var participants = Enumerable.Range(1, RaceProtocol.MaximumParticipants)
             .Select(index => Join(coordinator, index).Accepted!)
             .ToArray();
+        var started = DateTimeOffset.Parse("2026-08-21T16:00:00Z");
         coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
-            RaceSessionPhase.Race, null, 10, null, null));
+            RaceSessionPhase.Race, null, 10, null, null), started);
         for (var index = 0; index < participants.Length; index++)
             coordinator.UpdateTelemetry(participants[index].ParticipantId,
-                Telemetry(2, index / (double)participants.Length));
+                Telemetry(0, 0), started.AddMilliseconds(index));
+        for (var index = 0; index < participants.Length; index++)
+            coordinator.UpdateTelemetry(participants[index].ParticipantId,
+                Telemetry(0, .1 + index * .05), started.AddSeconds(10 + index));
 
-        var message = RaceProtocolJson.Serialize(RaceMessageTypes.Snapshot, 1, coordinator.Snapshot());
+        var snapshot = coordinator.Snapshot(started.AddSeconds(22));
+        Assert.IsTrue(snapshot.Participants.All(participant =>
+                participant.RaceDeltaSecondsByReference?.Count == RaceProtocol.MaximumParticipants),
+            "带宽测试必须覆盖完整的 12 × 12 两车直接秒差表。 ");
+        var message = RaceProtocolJson.Serialize(RaceMessageTypes.Snapshot, 1, snapshot);
         var bytes = Encoding.UTF8.GetByteCount(message);
         var egressBytesPerSecond = bytes * RaceProtocol.MaximumParticipants * 4L;
         Console.WriteLine(
@@ -1532,6 +1540,119 @@ public sealed class RaceCoordinatorTests
         var nonPitting = afterPit.Participants.Single(item => item.Id == first.ParticipantId);
         Assert.IsTrue(nonPitting.GapToLeaderSeconds is >= 0 and < 10,
             $"维修支路投影不能污染实时秒差，当前为 {nonPitting.GapToLeaderSeconds}。");
+    }
+
+    [TestMethod]
+    public void RaceSnapshotPublishesDirectPairwiseDeltaInsteadOfSubtractingDifferentLeaderAnchors()
+    {
+        var coordinator = CreateCoordinator();
+        var leader = Join(coordinator, 1).Accepted!;
+        var local = Join(coordinator, 2).Accepted!;
+        var trailing = Join(coordinator, 3).Accepted!;
+        var started = DateTimeOffset.Parse("2026-08-09T10:42:00Z");
+        Assert.IsTrue(coordinator.ApplySessionCommand(
+            new RaceAdminSessionCommand(RaceSessionPhase.Race, "两车直接秒差", 5, null, null),
+            started).IsAccepted);
+
+        coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(0, .10), started.AddSeconds(10));
+        coordinator.UpdateTelemetry(local.ParticipantId, Telemetry(0, .10), started.AddSeconds(12));
+        coordinator.UpdateTelemetry(trailing.ParticipantId, Telemetry(0, .10), started.AddSeconds(13));
+        coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(0, .20), started.AddSeconds(20));
+        coordinator.UpdateTelemetry(local.ParticipantId, Telemetry(0, .20), started.AddSeconds(22));
+        coordinator.UpdateTelemetry(trailing.ParticipantId, Telemetry(0, .20), started.AddSeconds(25));
+        coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(0, .30), started.AddSeconds(30));
+        coordinator.UpdateTelemetry(local.ParticipantId, Telemetry(0, .30), started.AddSeconds(38));
+
+        var snapshot = coordinator.Snapshot(started.AddSeconds(38));
+        var localSnapshot = snapshot.Participants.Single(item => item.Id == local.ParticipantId);
+        var trailingSnapshot = snapshot.Participants.Single(item => item.Id == trailing.ParticipantId);
+        Assert.AreEqual(8, localSnapshot.GapToLeaderSeconds.GetValueOrDefault(), .001);
+        Assert.AreEqual(5, trailingSnapshot.GapToLeaderSeconds.GetValueOrDefault(), .001);
+        Assert.AreEqual(3,
+            trailingSnapshot.RaceDeltaSecondsByReference![local.ParticipantId],
+            .001,
+            "两名车手相对榜首的差值取自不同位置，不能相减为 -3 秒。 ");
+        Assert.AreEqual(-3,
+            localSnapshot.RaceDeltaSecondsByReference![trailing.ParticipantId],
+            .001);
+    }
+
+    [TestMethod]
+    public void DirectPairwiseRaceDeltaRemainsStableAcrossTwelveLaps()
+    {
+        var coordinator = CreateCoordinator();
+        var leader = Join(coordinator, 1).Accepted!;
+        var trailing = Join(coordinator, 2).Accepted!;
+        var started = DateTimeOffset.Parse("2026-08-09T10:44:00Z");
+        Assert.IsTrue(coordinator.ApplySessionCommand(
+            new RaceAdminSessionCommand(RaceSessionPhase.Race, "长距离两车秒差", 20, null, null),
+            started).IsAccepted);
+
+        for (var lap = 1; lap <= 12; lap++)
+        {
+            var lapStartSeconds = (lap - 1) * 60;
+            coordinator.UpdateTelemetry(
+                leader.ParticipantId,
+                Telemetry(lap - 1, .25),
+                started.AddSeconds(lapStartSeconds + 15));
+            coordinator.UpdateTelemetry(
+                trailing.ParticipantId,
+                Telemetry(lap - 1, .25),
+                started.AddSeconds(lapStartSeconds + 17));
+            coordinator.UpdateTelemetry(
+                leader.ParticipantId,
+                Telemetry(lap - 1, .75),
+                started.AddSeconds(lapStartSeconds + 45));
+            coordinator.UpdateTelemetry(
+                trailing.ParticipantId,
+                Telemetry(lap - 1, .75),
+                started.AddSeconds(lapStartSeconds + 47));
+            CompleteLap(coordinator, leader.ParticipantId, lap, 60, started.AddSeconds(lapStartSeconds + 60));
+            CompleteLap(coordinator, trailing.ParticipantId, lap, 60, started.AddSeconds(lapStartSeconds + 62));
+
+            var trailingSnapshot = coordinator.Snapshot(started.AddSeconds(lapStartSeconds + 62))
+                .Participants.Single(item => item.Id == trailing.ParticipantId);
+            Assert.AreEqual(2,
+                trailingSnapshot.RaceDeltaSecondsByReference![leader.ParticipantId],
+                .001,
+                $"第 {lap} 圈的直接秒差不应随累计圈数漂移。 ");
+        }
+    }
+
+    [TestMethod]
+    public void ReconnectedDriverWaitsForFreshTelemetryBeforeAffectingLiveOrder()
+    {
+        var coordinator = CreateCoordinator();
+        var weak = Join(coordinator, 1).Accepted!;
+        var healthyLeader = Join(coordinator, 2).Accepted!;
+        var healthyTrailing = Join(coordinator, 3).Accepted!;
+        var started = DateTimeOffset.UtcNow.AddMinutes(-1);
+        Assert.IsTrue(coordinator.ApplySessionCommand(
+            new RaceAdminSessionCommand(RaceSessionPhase.Race, "重连排序门控", 5, null, null),
+            started).IsAccepted);
+
+        coordinator.UpdateTelemetry(weak.ParticipantId, Telemetry(0, .90), started.AddSeconds(10));
+        coordinator.UpdateTelemetry(healthyLeader.ParticipantId, Telemetry(0, .20), started.AddSeconds(12));
+        coordinator.UpdateTelemetry(healthyTrailing.ParticipantId, Telemetry(0, .20), started.AddSeconds(15));
+        coordinator.UpdateTelemetry(healthyLeader.ParticipantId, Telemetry(0, .50), started.AddSeconds(22));
+        coordinator.UpdateTelemetry(healthyLeader.ParticipantId, Telemetry(0, .60), started.AddSeconds(23));
+        coordinator.UpdateTelemetry(healthyTrailing.ParticipantId, Telemetry(0, .50), started.AddSeconds(25));
+
+        coordinator.Disconnect(weak.ParticipantId);
+        var resumed = coordinator.TryJoin(Login(1) with { ResumeToken = weak.ResumeToken });
+        Assert.IsTrue(resumed.IsAccepted);
+
+        var snapshot = coordinator.Snapshot();
+        Assert.AreEqual(healthyLeader.ParticipantId, snapshot.Participants[0].Id);
+        Assert.AreEqual(healthyTrailing.ParticipantId, snapshot.Participants[1].Id);
+        Assert.AreEqual(weak.ParticipantId, snapshot.Participants[2].Id,
+            "重连后的旧赛道进度必须等到第一份有效新遥测后才能参与实时排序。 ");
+        Assert.AreEqual(3,
+            snapshot.Participants[1].RaceDeltaSecondsByReference![healthyLeader.ParticipantId],
+            .001,
+            "弱网车手重连不能改变两名正常车手之间的直接秒差。 ");
+        Assert.IsFalse(snapshot.Participants[2].RaceDeltaSecondsByReference!
+            .ContainsKey(healthyLeader.ParticipantId));
     }
 
     [TestMethod]
