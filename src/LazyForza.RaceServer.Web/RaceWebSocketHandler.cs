@@ -79,6 +79,8 @@ public sealed class RaceWebSocketHandler(
                     continue;
                 }
 
+                if (!registry.IsCurrent(participantId.Value, socket)) break;
+
                 var command = HandleMessage(participantId.Value, isObserver, envelope, socket, context.RequestAborted);
                 if (command is not null) await command;
             }

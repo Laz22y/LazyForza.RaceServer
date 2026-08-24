@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
 using LazyForza.RaceServer.Web;
@@ -18,7 +19,9 @@ public sealed class RaceWebSocketRegistryTests
         await registry.RegisterAsync(Guid.NewGuid(), healthy, CancellationToken.None);
 
         await registry.BroadcastAsync("first", CancellationToken.None);
+        await WaitUntilAsync(() => broken.State == WebSocketState.Aborted);
         await registry.BroadcastAsync("second", CancellationToken.None);
+        await WaitUntilAsync(() => healthy.Messages.Count == 2);
 
         Assert.AreEqual(1, registry.Count);
         CollectionAssert.AreEqual(new[] { "first", "second" }, healthy.Messages.ToArray());
@@ -34,13 +37,19 @@ public sealed class RaceWebSocketRegistryTests
         await registry.RegisterAsync(stalledId, stalled, CancellationToken.None);
         await registry.RegisterAsync(Guid.NewGuid(), healthy, CancellationToken.None);
 
-        var disconnected = await registry.BroadcastAsync("snapshot", CancellationToken.None)
-            .WaitAsync(TimeSpan.FromSeconds(2));
+        var broadcast = registry.BroadcastAsync("snapshot", CancellationToken.None);
+        Assert.AreSame(
+            broadcast,
+            await Task.WhenAny(broadcast, Task.Delay(200)),
+            "弱网连接不能阻塞整场广播队列。 ");
+        await WaitUntilAsync(() => stalled.State == WebSocketState.Aborted);
+        var disconnected = await registry.BroadcastAsync("after-timeout", CancellationToken.None);
+        await WaitUntilAsync(() => healthy.Messages.Count == 2);
 
         Assert.AreEqual(1, registry.Count);
         CollectionAssert.Contains(disconnected.ToArray(), stalledId);
         Assert.AreEqual(WebSocketState.Aborted, stalled.State);
-        CollectionAssert.AreEqual(new[] { "snapshot" }, healthy.Messages.ToArray());
+        CollectionAssert.AreEqual(new[] { "snapshot", "after-timeout" }, healthy.Messages.ToArray());
     }
 
     [TestMethod]
@@ -60,6 +69,7 @@ public sealed class RaceWebSocketRegistryTests
         socket.AllowSend.TrySetResult(true);
         await broadcast.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.IsTrue(await direct.WaitAsync(TimeSpan.FromSeconds(2)));
+        await WaitUntilAsync(() => socket.Messages.Count == 2);
         CollectionAssert.AreEqual(new[] { "snapshot", "pong" }, socket.Messages.ToArray());
     }
 
@@ -96,12 +106,41 @@ public sealed class RaceWebSocketRegistryTests
         var oldBroadcast = registry.BroadcastAsync("old", CancellationToken.None);
         await oldSocket.SendStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await registry.RegisterAsync(participantId, resumedSocket, CancellationToken.None);
+        Assert.AreEqual(WebSocketState.Aborted, oldSocket.State);
+        Assert.IsFalse(registry.IsCurrent(participantId, oldSocket));
+        Assert.IsTrue(registry.IsCurrent(participantId, resumedSocket));
         oldSocket.AllowSend.TrySetResult(true);
         await oldBroadcast.WaitAsync(TimeSpan.FromSeconds(2));
 
         await registry.BroadcastAsync("resumed", CancellationToken.None);
+        await WaitUntilAsync(() => resumedSocket.Messages.Count == 1);
         Assert.AreEqual(1, registry.Count);
         CollectionAssert.AreEqual(new[] { "resumed" }, resumedSocket.Messages.ToArray());
+    }
+
+    [TestMethod]
+    public async Task SlowClientKeepsOnlyLatestPendingSnapshot()
+    {
+        var registry = new RaceWebSocketRegistry();
+        var slow = new TestWebSocket { BlockSend = true };
+        await registry.RegisterAsync(Guid.NewGuid(), slow, CancellationToken.None);
+
+        await registry.BroadcastAsync("first", CancellationToken.None);
+        await slow.SendStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await registry.BroadcastAsync("stale", CancellationToken.None);
+        await registry.BroadcastAsync("latest", CancellationToken.None);
+        slow.AllowSend.TrySetResult(true);
+        await WaitUntilAsync(() => slow.Messages.Count == 2);
+
+        CollectionAssert.AreEqual(new[] { "first", "latest" }, slow.Messages.ToArray());
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> predicate)
+    {
+        var timeout = DateTimeOffset.UtcNow.AddSeconds(3);
+        while (!predicate() && DateTimeOffset.UtcNow < timeout)
+            await Task.Delay(10);
+        Assert.IsTrue(predicate(), "等待 WebSocket 测试状态超时。 ");
     }
 
     private sealed class TestWebSocket : WebSocket
@@ -110,7 +149,7 @@ public sealed class RaceWebSocketRegistryTests
 
         public Exception? SendFailure { get; init; }
         public bool BlockSend { get; init; }
-        public List<string> Messages { get; } = [];
+        public ConcurrentQueue<string> Messages { get; } = [];
         public TaskCompletionSource<bool> SendStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<bool> AllowSend { get; } =
@@ -157,7 +196,7 @@ public sealed class RaceWebSocketRegistryTests
             SendStarted.TrySetResult(true);
             if (BlockSend) await AllowSend.Task.WaitAsync(cancellationToken);
             if (SendFailure is not null) throw SendFailure;
-            Messages.Add(Encoding.UTF8.GetString(buffer));
+            Messages.Enqueue(Encoding.UTF8.GetString(buffer));
         }
     }
 }
