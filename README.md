@@ -74,6 +74,8 @@ chmod +x ./LazyForza.RaceServer.Web
 
 需要 .NET SDK 9。Cloudflare 端另需 Node.js 20+：
 
+第一次接触仓库或修改跨端行为时，先读 [Coding Agent 开发入口](AGENTS.md)。其中列出协议三份副本、原生/Cloudflare 对等文件和验证矩阵。
+
 ```powershell
 dotnet restore LazyForza.RaceServer.sln
 dotnet build LazyForza.RaceServer.sln -c Release --no-restore
@@ -83,6 +85,7 @@ cd cloudflare
 npm ci
 npm run check
 npm test
+npm run dry-run
 ```
 
 运行原生端：
@@ -91,7 +94,7 @@ npm test
 dotnet run --project src/LazyForza.RaceServer.Web/LazyForza.RaceServer.Web.csproj
 ```
 
-任何协议、总控接口或 Web 功能变更都必须同步修改原生端与 Cloudflare 端，并补齐双端测试。
+任何协议、总控接口或 Web 功能变更都必须同步修改原生端与 Cloudflare 端，并补齐双端测试。协议还需要同步 LazyForza 客户端；完整文件映射见 [AGENTS.md](AGENTS.md)。
 
 ## 数据与验证边界
 

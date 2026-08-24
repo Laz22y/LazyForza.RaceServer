@@ -1,5 +1,7 @@
 # Cloudflare Durable Objects 部署
 
+开发或修改 Cloudflare 实现前先读仓库根目录 [`AGENTS.md`](../AGENTS.md)。Cloudflare 与原生 ASP.NET 是同一服务端的两套实现，对客户端可见的协议、比赛行为、管理接口和 Web 总控必须保持一致。
+
 这个目录提供与 LazyForza 地产赛事客户端协议 v2 兼容的 Cloudflare Workers + Durable Objects 服务端。一个 Worker 固定使用一个名为 `main` 的赛事房间，支持 1–12 名车手，并可额外连接最多 12 个只读 OB 席位。OB 不占车手名额，可在比赛进行中加入，只接收赛事数据用于观赛或转播。
 
 正式服务端 `v0.4.2` 完整支持 LazyForza `1.4.9`，并与 `1.4.2`–`1.4.8` 的协议和主要比赛流程兼容。路线收益切弯证据和本次碰撞识别改进需要 `1.4.9`；断线计圈恢复需要 `1.4.8` 或更高版本，并由总控主动开启。旧客户端不会使用其版本发布后新增的练习项目、进站策略预测、OB 登录、主办方 Logo、赛道文件按需下载和后续维修区路线修正；1.4.2 没有服务端车队下拉框，填写名称能匹配时按名称加入，否则由服务端自动分配空余车队。完整兼容说明见仓库根目录 `README.md`。
@@ -73,7 +75,7 @@ npx wrangler secret put ADMIN_PASSWORD
 
 ```powershell
 cd cloudflare
-npm install
+npm ci
 npm run check
 npm test
 npm run dry-run
