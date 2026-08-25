@@ -1620,6 +1620,71 @@ public sealed class RaceCoordinatorTests
     }
 
     [TestMethod]
+    public void DirectPairwiseRaceDeltaResumesAfterLateRacePitServicePause()
+    {
+        var coordinator = CreateCoordinator();
+        var leader = Join(coordinator, 1).Accepted!;
+        var trailing = Join(coordinator, 2).Accepted!;
+        var started = DateTimeOffset.Parse("2026-08-09T11:10:00Z");
+        Assert.IsTrue(coordinator.ApplySessionCommand(
+            new RaceAdminSessionCommand(RaceSessionPhase.Race, "后半程进站秒差", 12, null, null),
+            started).IsAccepted);
+
+        for (var lap = 1; lap <= 5; lap++)
+        {
+            var lapStartSeconds = (lap - 1) * 60;
+            coordinator.UpdateTelemetry(
+                leader.ParticipantId,
+                Telemetry(lap - 1, .25),
+                started.AddSeconds(lapStartSeconds + 15));
+            coordinator.UpdateTelemetry(
+                trailing.ParticipantId,
+                Telemetry(lap - 1, .25),
+                started.AddSeconds(lapStartSeconds + 17));
+            coordinator.UpdateTelemetry(
+                leader.ParticipantId,
+                Telemetry(lap - 1, .75),
+                started.AddSeconds(lapStartSeconds + 45));
+            coordinator.UpdateTelemetry(
+                trailing.ParticipantId,
+                Telemetry(lap - 1, .75),
+                started.AddSeconds(lapStartSeconds + 47));
+            CompleteLap(coordinator, leader.ParticipantId, lap, 60, started.AddSeconds(lapStartSeconds + 60));
+            CompleteLap(coordinator, trailing.ParticipantId, lap, 60, started.AddSeconds(lapStartSeconds + 62));
+        }
+
+        coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(5, .25), started.AddSeconds(315));
+        coordinator.UpdateTelemetry(trailing.ParticipantId, Telemetry(5, .25), started.AddSeconds(317));
+        coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(5, .75), started.AddSeconds(345));
+        coordinator.UpdateTelemetry(trailing.ParticipantId, Telemetry(5, .80) with
+        {
+            IsApproachingPit = true,
+            IsOnPitRoute = true,
+            IsInPitLane = true
+        }, started.AddSeconds(348));
+        coordinator.UpdateTelemetry(trailing.ParticipantId, Telemetry(5, .80) with
+        {
+            IsTelemetryValid = false,
+            IsPausedOrRewinding = true,
+            IsOnPitRoute = true,
+            IsInPitLane = true,
+            IsInServiceZone = true
+        }, started.AddSeconds(354));
+        CompleteLap(coordinator, leader.ParticipantId, 6, 60, started.AddSeconds(360));
+        CompleteLap(coordinator, trailing.ParticipantId, 6, 67, started.AddSeconds(367));
+        coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(6, .20), started.AddSeconds(372));
+        coordinator.UpdateTelemetry(trailing.ParticipantId, Telemetry(6, .10), started.AddSeconds(373));
+        coordinator.UpdateTelemetry(trailing.ParticipantId, Telemetry(6, .20), started.AddSeconds(379));
+
+        var snapshot = coordinator.Snapshot(started.AddSeconds(379));
+        var trailingSnapshot = snapshot.Participants.Single(item => item.Id == trailing.ParticipantId);
+        Assert.AreEqual(7,
+            trailingSnapshot.RaceDeltaSecondsByReference![leader.ParticipantId],
+            .001,
+            "比赛后半程的进站和换胎暂停不能使出站后的实时秒差退化为只在冲线时更新。");
+    }
+
+    [TestMethod]
     public void ReconnectedDriverWaitsForFreshTelemetryBeforeAffectingLiveOrder()
     {
         var coordinator = CreateCoordinator();
