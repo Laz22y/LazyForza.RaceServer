@@ -1,6 +1,12 @@
 # LazyForza RaceServer
 
+<p align="center"><a href="#简体中文">简体中文</a> · <a href="#english">English</a></p>
+
+## 简体中文
+
 LazyForza 地产赛事的独立服务端。支持原生 ASP.NET 自托管和 Cloudflare Durable Objects，两套实现保持同一协议与 Web 总控功能。
+
+0.4.3 为 Web 总控加入完整中英文界面，并改善弱网广播隔离、实时秒差、换胎停留确认和疑似违规操作区布局。总控语言由各浏览器独立保存，不影响房间协议或客户端语言。
 
 [客户端下载](https://github.com/Laz22y/LazyForza/releases/latest) · [完整文档](https://laz22y.github.io/LazyForza/docs/#race-server) · [服务端 Releases](https://github.com/Laz22y/LazyForza.RaceServer/releases/latest)
 
@@ -62,9 +68,10 @@ chmod +x ./LazyForza.RaceServer.Web
 
 ## 兼容性
 
-当前正式服务端为 `v0.4.2`：
+当前正式服务端为 `v0.4.3`：
 
-- LazyForza `1.4.9`：完整支持路线收益切弯证据、收紧后的碰撞识别和维修区轨迹保护；
+- LazyForza `1.5.0`：推荐版本，完整支持中英文客户端、弱网隔离、稳定实时秒差和可靠换胎停留确认；
+- LazyForza `1.4.9`：支持路线收益切弯证据、碰撞识别和维修区轨迹保护；
 - LazyForza `1.4.8`：完整支持弱网状态提示与可选断线计圈恢复；
 - LazyForza `1.4.7`：支持增强碰撞证据与其发布时的全部赛事交互；
 - LazyForza `1.4.2–1.4.6`：协议 v2 主要赛事流程兼容，但不具备其版本发布后新增的全部客户端能力；
@@ -105,3 +112,99 @@ dotnet run --project src/LazyForza.RaceServer.Web/LazyForza.RaceServer.Web.cspro
 ## License
 
 [MIT](LICENSE)。LazyForza RaceServer 是非官方社区项目，与 Microsoft、Xbox 或 Playground Games 无隶属关系。
+
+## English
+
+LazyForza RaceServer is the independent server for estate racing. Native ASP.NET self-hosting and Cloudflare Durable Objects provide the same protocol, race behavior and browser Race Control.
+
+Version 0.4.3 adds a complete Chinese and English Race Control interface, isolates slow connections from room broadcasts, stabilizes live gaps, improves tire-change dwell confirmation and fixes overlap in non-collision investigation controls. Each browser stores its own interface language; room protocol and client language remain independent.
+
+[Client downloads](https://github.com/Laz22y/LazyForza/releases/latest) · [Documentation](https://laz22y.github.io/LazyForza/docs/#race-server) · [Server releases](https://github.com/Laz22y/LazyForza.RaceServer/releases/latest)
+
+### Features
+
+- 1–12 drivers with single-driver starts, plus up to 12 read-only observer slots;
+- one to three practice and qualifying sessions, races, out laps, formation laps, five red lights and the checkered flag;
+- teams, pit lanes, flags, penalties, collision investigations, shortcut evidence, DNF/DSQ and optional disconnected-lap recovery;
+- hosted track packages and organizer logos;
+- archived session results that remain available in the lobby, with PNG and CSV export;
+- browser Race Control designed for desktop widescreens and touch tablets;
+- JSONL audit logs and persistent critical race state.
+
+The server does not read the game. Each LazyForza client derives local position, lap, pit and grip information from official FH6 UDP data and reports the required race data.
+
+### Deployment options
+
+| Option | Best for | Release package |
+| --- | --- | --- |
+| Native self-hosting | LAN races, VPS or dedicated servers | Windows, Linux x64/ARM64 and macOS x64/ARM64 |
+| Cloudflare Durable Objects | Hosting without maintaining a VPS | Cloudflare source package or repository template |
+
+### Native server
+
+Download the ZIP for your platform from [Releases](https://github.com/Laz22y/LazyForza.RaceServer/releases/latest), extract it and run:
+
+```powershell
+# Windows
+./LazyForza.RaceServer.Web.exe
+```
+
+```bash
+# Linux / macOS
+chmod +x ./LazyForza.RaceServer.Web
+./LazyForza.RaceServer.Web
+```
+
+The server listens on `http://0.0.0.0:24876` by default. On first launch, set the room password, Race Control password and base rules. The Race Control password must contain 8–128 characters and must differ from the room password.
+
+For public hosting, terminate TLS through Caddy, Nginx or a similar reverse proxy and connect clients over `wss://`. Do not expose plain `ws://` publicly.
+
+### Cloudflare Durable Objects
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Laz22y/LazyForza.RaceServer/tree/main/cloudflare)
+
+Or run from the repository root:
+
+```powershell
+./scripts/Deploy-Cloudflare.ps1
+```
+
+Requires Node.js 20+, npm and PowerShell 7. Open the Worker domain after deployment to finish setup, then upload a `.lfzestate` track package from Race Control. See [cloudflare/README.md](cloudflare/README.md) for deployment details.
+
+### Client connection
+
+Drivers need the server domain or IP, room password, matching estate circuit, display name and optional team. The WebSocket endpoint is `/ws`. Observers receive race snapshots only and do not upload telemetry or participate in standings or penalties.
+
+Race Control accepts `.lfzestate` packages up to 1.5 MiB. The server verifies the manifest and SHA-256; clients without the matching track confirm the download and verify it again.
+
+### Compatibility
+
+RaceServer `0.4.3` is recommended with LazyForza `1.5.0`. The main protocol v2 race flow remains compatible with LazyForza `1.4.2–1.4.9`; features introduced after a client version are unavailable to that older client. Disconnected-lap recovery requires client `1.4.8` or later and must be enabled from Race Control.
+
+### Local development
+
+Requires .NET SDK 9; the Cloudflare implementation also requires Node.js 20+:
+
+```powershell
+dotnet restore LazyForza.RaceServer.sln
+dotnet build LazyForza.RaceServer.sln -c Release --no-restore
+dotnet test LazyForza.RaceServer.sln -c Release --no-build --no-restore
+
+cd cloudflare
+npm ci
+npm run check
+npm test
+npm run dry-run
+```
+
+Protocol, Race Control API and web changes must be implemented and tested in both the native and Cloudflare versions. Read [AGENTS.md](AGENTS.md) for the contract map and validation matrix.
+
+### Data boundaries
+
+- Native state, settings and audit logs are stored under `data`; Cloudflare uses Durable Object storage.
+- The server cannot confirm that the game actually changed tires or repaired damage.
+- Deterministic multi-client tests do not replace real FH6 multi-PC, public-network or Cloudflare deployment validation.
+
+### License
+
+[MIT](LICENSE). LazyForza RaceServer is an unofficial community project not affiliated with Microsoft, Xbox or Playground Games.

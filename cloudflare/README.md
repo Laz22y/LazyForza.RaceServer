@@ -1,10 +1,14 @@
 # Cloudflare Durable Objects 部署
 
+<p align="center"><a href="#简体中文">简体中文</a> · <a href="#english">English</a></p>
+
+## 简体中文
+
 开发或修改 Cloudflare 实现前先读仓库根目录 [`AGENTS.md`](../AGENTS.md)。Cloudflare 与原生 ASP.NET 是同一服务端的两套实现，对客户端可见的协议、比赛行为、管理接口和 Web 总控必须保持一致。
 
 这个目录提供与 LazyForza 地产赛事客户端协议 v2 兼容的 Cloudflare Workers + Durable Objects 服务端。一个 Worker 固定使用一个名为 `main` 的赛事房间，支持 1–12 名车手，并可额外连接最多 12 个只读 OB 席位。OB 不占车手名额，可在比赛进行中加入，只接收赛事数据用于观赛或转播。
 
-正式服务端 `v0.4.2` 完整支持 LazyForza `1.4.9`，并与 `1.4.2`–`1.4.8` 的协议和主要比赛流程兼容。路线收益切弯证据和本次碰撞识别改进需要 `1.4.9`；断线计圈恢复需要 `1.4.8` 或更高版本，并由总控主动开启。旧客户端不会使用其版本发布后新增的练习项目、进站策略预测、OB 登录、主办方 Logo、赛道文件按需下载和后续维修区路线修正；1.4.2 没有服务端车队下拉框，填写名称能匹配时按名称加入，否则由服务端自动分配空余车队。完整兼容说明见仓库根目录 `README.md`。
+正式服务端 `v0.4.3` 推荐搭配 LazyForza `1.5.0`，并与 `1.4.2`–`1.4.9` 的协议 v2 主要比赛流程兼容。断线计圈恢复需要 `1.4.8` 或更高版本，并由总控主动开启。旧客户端不会使用其版本发布后新增的练习项目、进站策略预测、OB 登录、主办方 Logo、赛道文件按需下载和后续维修区路线修正；1.4.2 没有服务端车队下拉框，填写名称能匹配时按名称加入，否则由服务端自动分配空余车队。完整兼容说明见仓库根目录 `README.md`。
 
 实现范围：
 
@@ -83,3 +87,73 @@ npm run dev
 ```
 
 本地测试和 dry-run 不等于中国大陆网络直连或真实 FH6 多机联机验证。实际使用前仍应从参赛车手所在网络测试 HTTPS、WebSocket 握手、10 Hz 状态更新和短时断线恢复。
+
+## English
+
+Read the repository-level [`AGENTS.md`](../AGENTS.md) before changing the Cloudflare implementation. Cloudflare Durable Objects and native ASP.NET are equal RaceServer targets and must keep the same client protocol, race behavior, management API and Race Control features.
+
+RaceServer `0.4.3` is recommended with LazyForza `1.5.0` and remains compatible with the main protocol v2 race flow in LazyForza `1.4.2–1.4.9`. Disconnected-lap recovery requires client `1.4.8` or later and must be explicitly enabled from Race Control.
+
+The Worker uses one Durable Object race room named `main`, with 1–12 drivers and up to 12 read-only observers. It supports:
+
+- room and Race Control passwords, display names, colors, teams and reconnect recovery;
+- one to three practice and qualifying sessions, out laps, formation laps, five red lights, races and red flags;
+- standings, live gaps, flags, penalties, DNF/DSQ, collision investigations, shortcut evidence and pit progress;
+- optional 30-second disconnected-lap recovery with acknowledged, deduplicated lap events;
+- hosted `.lfzestate` track packages, organizer logos, WebSocket Hibernation and persistent Durable Object state;
+- the same Chinese and English browser Race Control used by the native server.
+
+Client telemetry defaults to 10 Hz and room snapshots are broadcast at no more than 10 Hz. Only a unique valid `lapCompleted` event advances the authoritative lap count. Pit state records location and dwell conditions; it cannot prove that the game changed tires or repaired damage.
+
+### One-click deployment
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Laz22y/LazyForza.RaceServer/tree/main/cloudflare)
+
+Cloudflare copies this public template to your GitHub or GitLab account, creates the Durable Object binding and configures deployment from later commits. After deployment, open the Worker domain, complete first-time setup and upload the matching `.lfzestate` package from Race Control.
+
+### PowerShell deployment
+
+Requires Node.js 20+, npm and PowerShell 7. Run from the repository root:
+
+```powershell
+./scripts/Deploy-Cloudflare.ps1
+```
+
+Use a custom Worker name when needed:
+
+```powershell
+./scripts/Deploy-Cloudflare.ps1 -WorkerName lazyforza-my-race
+```
+
+The script installs locked dependencies, runs TypeScript checks and tests, opens Cloudflare authorization and reads passwords through hidden input. Passwords are never written to the repository or printed by the script.
+
+### Configuration
+
+Edit `wrangler.jsonc` for non-secret defaults:
+
+- `MAXIMUM_PARTICIPANTS`: enforced between 1 and 12;
+- `TOTAL_RACE_LAPS`: initial race length, editable from Race Control;
+- `SERVER_NAME` and `SESSION_NAME`: server and initial event names.
+
+Update secrets separately when required:
+
+```powershell
+cd cloudflare
+npx wrangler secret put PLAYER_PASSWORD
+npx wrangler secret put ADMIN_PASSWORD
+```
+
+Race Control accepts `.lfzestate` packages up to 1.5 MiB and verifies their manifest and SHA-256. Clients with a matching track do not download it; missing or mismatched tracks require driver confirmation and are verified again on import.
+
+### Local validation
+
+```powershell
+cd cloudflare
+npm ci
+npm run check
+npm test
+npm run dry-run
+npm run dev
+```
+
+Local tests and dry-runs do not prove public-network reachability or real FH6 multi-PC behavior. Test HTTPS, the WebSocket handshake, 10 Hz state updates and short reconnect recovery from the drivers' actual networks before an event.
