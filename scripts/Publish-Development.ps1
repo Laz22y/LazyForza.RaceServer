@@ -130,9 +130,10 @@ if ($CloudflareLabel -or $PackageVersion) {
         New-Item -ItemType Directory -Force -Path (Join-Path $cloudflareStage $directory) | Out-Null
     }
     foreach ($relative in @(
-            'public/app.js', 'public/events.css', 'public/index.html', 'public/results.css', 'public/styles.css', 'public/teams.css',
+            'public/app.js', 'public/events.css', 'public/i18n.js', 'public/index.html', 'public/lazyforza-logo.png',
+            'public/results.css', 'public/styles.css', 'public/teams.css',
             'src/index.ts', 'src/passwords.ts', 'src/protocol.ts', 'src/race-core.ts', 'src/track-package.ts',
-            'tests/passwords.test.ts', 'tests/race-core.test.ts', 'tests/track-package.test.ts',
+            'tests/passwords.test.ts', 'tests/race-core.test.ts', 'tests/track-package.test.ts', 'tests/web-localization.test.ts',
             'package-lock.json', 'package.json', 'README.md', 'tsconfig.json', 'wrangler.jsonc')) {
         $source = [System.IO.Path]::GetFullPath((Join-Path $cloudflareRoot $relative))
         if (!$source.StartsWith(

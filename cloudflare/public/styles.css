@@ -20,6 +20,7 @@
 }
 
 * { box-sizing: border-box; }
+.sr-only { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 html { scroll-behavior: smooth; scroll-padding-top: 84px; }
 body {
   margin: 0;
@@ -44,6 +45,11 @@ button, input, select, summary, a { -webkit-tap-highlight-color: transparent; }
 .brand-mark { width: 50px; height: 50px; display: block; flex: 0 0 auto; object-fit: contain; }
 .brand-copy h1 { margin: 2px 0 0; font-size: 25px; line-height: 1.1; letter-spacing: -.035em; }
 .eyebrow { margin: 0; color: var(--cyan); font-size: 9px; font-weight: 900; letter-spacing: .18em; }
+.topbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.language-switcher { position: relative; display: inline-flex; align-items: center; }
+.language-switcher::before { content: "A/文"; position: absolute; left: 12px; z-index: 1; color: var(--cyan); font-size: 10px; font-weight: 900; letter-spacing: -.04em; pointer-events: none; }
+.language-switcher select { min-width: 136px; min-height: 34px; padding: 0 30px 0 42px; border: 1px solid var(--line); border-radius: 999px; color: var(--text); background: rgba(10,15,22,.82); font-size: 11px; font-weight: 700; cursor: pointer; }
+.language-switcher select:hover, .language-switcher select:focus-visible { border-color: rgba(66,215,232,.55); outline: none; }
 .connection-state { display: inline-flex; align-items: center; gap: 9px; min-height: 34px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted-strong); background: rgba(10,15,22,.82); font-size: 11px; font-weight: 700; }
 .connection-state i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px rgba(52,209,123,.1); }
 
@@ -241,6 +247,7 @@ tr:hover td { background: rgba(66,215,232,.035); }
   .topbar { min-height: 58px; }
   .brand-copy h1 { font-size: 20px; }
   .connection-state { display: none; }
+  .language-switcher select { min-width: 118px; padding-left: 38px; }
   .auth-panel { grid-template-columns: 1fr; gap: 24px; padding: 22px; }
   .form-grid.two, .form-grid.three, .summary-grid, .session-buttons, .flag-form, .room-fields-primary, .room-fields, .hazard-fields, .qualifying-session-grid, .rules-note { grid-template-columns: 1fr; }
   .control-dock { top: 4px; }
