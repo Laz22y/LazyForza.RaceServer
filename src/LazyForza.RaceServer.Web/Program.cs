@@ -49,11 +49,13 @@ builder.Services.AddSingleton<RaceWebSocketRegistry>();
 builder.Services.AddSingleton<HostedTrackPackageStore>();
 builder.Services.AddSingleton<HostedOrganizerLogoStore>();
 builder.Services.AddSingleton<RaceRuleTemplateStore>();
+builder.Services.AddSingleton<RaceEventProjectStore>();
 builder.Services.AddSingleton<RaceBroadcastService>();
 builder.Services.AddSingleton<RaceWebSocketHandler>();
 builder.Services.AddSingleton(new AdminSessionStore(configurationStore.AdminPasswordMatches));
 builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<RaceBroadcastService>());
 builder.Services.AddHostedService<RaceClockService>();
+builder.Services.AddHostedService<RaceEventProjectSyncService>();
 
 var app = builder.Build();
 app.Use(async (context, next) =>
@@ -207,6 +209,224 @@ app.MapGet("/api/admin/state", (HttpContext context, AdminSessionStore sessions,
 
 app.MapGet("/api/admin/settings", (HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
     Authorized(context, sessions) ? Results.Ok(coordinator.RoomSettings()) : Results.Unauthorized());
+
+app.MapGet("/api/admin/event-projects", (
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceEventProjectStore projects) =>
+    Authorized(context, sessions)
+        ? Results.Ok(new { projects = projects.List(), maximumProjects = RaceEventProjectStore.MaximumProjects })
+        : Results.Unauthorized());
+
+app.MapGet("/api/admin/event-projects/{projectId:guid}", (
+    Guid projectId,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceEventProjectStore projects) =>
+    Authorized(context, sessions)
+        ? projects.Find(projectId) is { } project
+            ? Results.Ok(new { project })
+            : Results.NotFound(new { error = "赛事项目不存在。" })
+        : Results.Unauthorized());
+
+app.MapPost("/api/admin/event-projects", async (
+    RaceEventProjectSaveRequest request,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceEventProjectStore projects,
+    RaceCoordinator coordinator,
+    HostedTrackPackageStore trackPackages,
+    HostedOrganizerLogoStore organizerLogos,
+    CancellationToken cancellationToken) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    try
+    {
+        projects.SyncActive(coordinator.Results(), coordinator.Events(500));
+        var assets = await ReadCurrentProjectAssets(
+            trackPackages, organizerLogos, coordinator.RoomSettings(), cancellationToken);
+        var project = projects.Create(
+            request, coordinator.RoomSettings(), coordinator.Results(), coordinator.Events(500),
+            assets.TrackMetadata, assets.TrackBytes, assets.LogoMetadata, assets.LogoBytes);
+        return Results.Ok(new { project });
+    }
+    catch (Exception exception) when (exception is InvalidDataException or IOException)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPut("/api/admin/event-projects/{projectId:guid}", async (
+    Guid projectId,
+    RaceEventProjectSaveRequest request,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceEventProjectStore projects,
+    RaceCoordinator coordinator,
+    HostedTrackPackageStore trackPackages,
+    HostedOrganizerLogoStore organizerLogos,
+    CancellationToken cancellationToken) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    try
+    {
+        projects.SyncActive(coordinator.Results(), coordinator.Events(500));
+        var assets = await ReadCurrentProjectAssets(
+            trackPackages, organizerLogos, coordinator.RoomSettings(), cancellationToken);
+        var project = projects.Capture(
+            projectId, request, coordinator.RoomSettings(), coordinator.Results(), coordinator.Events(500),
+            assets.TrackMetadata, assets.TrackBytes, assets.LogoMetadata, assets.LogoBytes);
+        return Results.Ok(new { project });
+    }
+    catch (KeyNotFoundException) { return Results.NotFound(new { error = "赛事项目不存在。" }); }
+    catch (Exception exception) when (exception is InvalidDataException or IOException)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPost("/api/admin/event-projects/{projectId:guid}/copy", (
+    Guid projectId,
+    RaceEventProjectCopyRequest request,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceEventProjectStore projects) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    try { return Results.Ok(new { project = projects.Copy(projectId, request.Name) }); }
+    catch (KeyNotFoundException) { return Results.NotFound(new { error = "赛事项目不存在。" }); }
+    catch (Exception exception) when (exception is InvalidDataException or IOException)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPost("/api/admin/event-projects/{projectId:guid}/activate", async (
+    Guid projectId,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceEventProjectStore projects,
+    RaceCoordinator coordinator,
+    RaceServerConfigurationStore settings,
+    HostedTrackPackageStore trackPackages,
+    HostedOrganizerLogoStore organizerLogos,
+    RaceBroadcastService broadcasts,
+    CancellationToken cancellationToken) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    try
+    {
+        if (coordinator.Snapshot().Phase is not (RaceSessionPhase.Lobby or RaceSessionPhase.Finished))
+            return Results.BadRequest(new { error = "练习赛、排位赛或正赛进行期间不能切换赛事项目。请先返回大厅。" });
+        var project = projects.Find(projectId) ?? throw new KeyNotFoundException();
+        var assets = projects.ReadAssets(projectId);
+        var applied = coordinator.ApplyRoomSettings(ToRoomCommand(project.Room));
+        if (!applied.IsAccepted) return Results.BadRequest(new { error = applied.Error });
+
+        if (project.TrackPackage is not null && assets.TrackPackage is not null)
+        {
+            await using var trackStream = new MemoryStream(assets.TrackPackage, writable: false);
+            await trackPackages.SaveAsync(trackStream, project.TrackPackage.FileName, cancellationToken);
+        }
+        else await trackPackages.DeleteAsync(cancellationToken);
+
+        if (project.OrganizerLogo is not null && assets.OrganizerLogo is not null)
+        {
+            await using var logoStream = new MemoryStream(assets.OrganizerLogo, writable: false);
+            await organizerLogos.SaveAsync(
+                logoStream, project.OrganizerLogo.FileName, project.OrganizerLogo.MimeType, cancellationToken);
+        }
+        else await organizerLogos.DeleteAsync(cancellationToken);
+
+        settings.SaveRoomSettings(coordinator.RoomSettings());
+        project = projects.Activate(projectId);
+        broadcasts.Queue(coordinator.Snapshot());
+        return Results.Ok(new { project, room = coordinator.RoomSettings() });
+    }
+    catch (KeyNotFoundException) { return Results.NotFound(new { error = "赛事项目不存在。" }); }
+    catch (Exception exception) when (exception is InvalidDataException or IOException or JsonException)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPost("/api/admin/event-projects/{projectId:guid}/complete", (
+    Guid projectId,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceEventProjectStore projects,
+    RaceCoordinator coordinator) =>
+    ChangeProjectStatus(projectId, RaceEventProjectStatus.Completed, context, sessions, projects, coordinator));
+
+app.MapPost("/api/admin/event-projects/{projectId:guid}/archive", (
+    Guid projectId,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceEventProjectStore projects,
+    RaceCoordinator coordinator) =>
+    ChangeProjectStatus(projectId, RaceEventProjectStatus.Archived, context, sessions, projects, coordinator));
+
+app.MapDelete("/api/admin/event-projects/{projectId:guid}", (
+    Guid projectId,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceEventProjectStore projects) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    try
+    {
+        return projects.Delete(projectId)
+            ? Results.Ok()
+            : Results.NotFound(new { error = "赛事项目不存在。" });
+    }
+    catch (InvalidDataException exception) { return Results.BadRequest(new { error = exception.Message }); }
+});
+
+app.MapGet("/api/admin/event-projects/{projectId:guid}/export", (
+    Guid projectId,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceEventProjectStore projects,
+    RaceCoordinator coordinator) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    try
+    {
+        projects.SyncActive(coordinator.Results(), coordinator.Events(500));
+        var project = projects.Find(projectId) ?? throw new KeyNotFoundException();
+        return Results.File(
+            projects.Export(projectId),
+            "application/vnd.lazyforza.event-project",
+            RaceEventProjectStore.SafeExportFileName(project));
+    }
+    catch (KeyNotFoundException) { return Results.NotFound(new { error = "赛事项目不存在。" }); }
+    catch (Exception exception) when (exception is InvalidDataException or IOException)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPost("/api/admin/event-projects/import", async (
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceEventProjectStore projects,
+    CancellationToken cancellationToken) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    if (!context.Request.HasFormContentType) return Results.BadRequest(new { error = "请使用表单上传 .lfzevent 文件。" });
+    try
+    {
+        var form = await context.Request.ReadFormAsync(cancellationToken);
+        var file = form.Files.GetFile("file");
+        if (file is null) return Results.BadRequest(new { error = "请选择要导入的 .lfzevent 文件。" });
+        var bytes = await ReadBoundedAsync(file, RaceEventProjectStore.MaximumPackageBytes, cancellationToken);
+        return Results.Ok(new { project = projects.Import(bytes) });
+    }
+    catch (Exception exception) when (exception is InvalidDataException or IOException or JsonException)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
 
 app.MapGet("/api/admin/rule-templates", (
     HttpContext context,
@@ -475,6 +695,86 @@ app.Run();
 
 static bool Authorized(HttpContext context, AdminSessionStore sessions) =>
     context.Request.Cookies.TryGetValue(AdminSessionStore.CookieName, out var token) && sessions.IsValid(token);
+
+static IResult ChangeProjectStatus(
+    Guid projectId,
+    RaceEventProjectStatus status,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceEventProjectStore projects,
+    RaceCoordinator coordinator)
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    try
+    {
+        projects.SyncActive(coordinator.Results(), coordinator.Events(500));
+        return Results.Ok(new { project = projects.SetStatus(projectId, status) });
+    }
+    catch (KeyNotFoundException) { return Results.NotFound(new { error = "赛事项目不存在。" }); }
+    catch (InvalidDataException exception) { return Results.BadRequest(new { error = exception.Message }); }
+}
+
+static RaceAdminRoomSettingsCommand ToRoomCommand(RaceRoomSettingsSnapshot room) => new(
+    room.SessionName,
+    room.TotalRaceLaps,
+    room.SectorCount,
+    room.AutomaticYellowEnabled,
+    room.SlowSpeedKph,
+    room.SlowDurationSeconds,
+    room.SevereLateralOffsetMeters,
+    room.RecoveryDurationSeconds,
+    room.AllowTeams,
+    room.TrackName,
+    room.TrackId,
+    room.TrackRevision,
+    room.TrackPackageHash,
+    room.TeamCount,
+    room.DriversPerTeam,
+    room.Teams,
+    room.TrackLimitMode,
+    room.MinimumRequiredPitStops,
+    room.AutomaticCollisionInvestigationsEnabled,
+    room.DisconnectedLapRecoveryEnabled);
+
+static async Task<(
+    HostedTrackPackageMetadata? TrackMetadata,
+    byte[]? TrackBytes,
+    HostedOrganizerLogoMetadata? LogoMetadata,
+    byte[]? LogoBytes)> ReadCurrentProjectAssets(
+    HostedTrackPackageStore trackPackages,
+    HostedOrganizerLogoStore organizerLogos,
+    RaceRoomSettingsSnapshot room,
+    CancellationToken cancellationToken)
+{
+    var track = trackPackages.Matching(room.TrackId, room.TrackRevision, room.TrackPackageHash);
+    var logo = organizerLogos.Current;
+    var trackBytes = track is null
+        ? null
+        : await trackPackages.ReadAsync(track.TrackId, track.TrackRevision, track.TrackPackageHash, cancellationToken);
+    var logoBytes = logo is null ? null : await organizerLogos.ReadAsync(cancellationToken);
+    return (track, trackBytes, logo, logoBytes);
+}
+
+static async Task<byte[]> ReadBoundedAsync(
+    IFormFile file,
+    long maximumBytes,
+    CancellationToken cancellationToken)
+{
+    if (file.Length is <= 0 || file.Length > maximumBytes)
+        throw new InvalidDataException("赛事项目包为空或超过 4 MiB 上限。");
+    await using var source = file.OpenReadStream();
+    await using var output = new MemoryStream();
+    var buffer = new byte[32 * 1024];
+    while (true)
+    {
+        var read = await source.ReadAsync(buffer, cancellationToken);
+        if (read == 0) break;
+        if (output.Length + read > maximumBytes)
+            throw new InvalidDataException("赛事项目包超过 4 MiB 上限。");
+        await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+    }
+    return output.ToArray();
+}
 
 static IResult AdminResult(
     HttpContext context,

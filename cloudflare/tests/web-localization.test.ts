@@ -12,6 +12,13 @@ describe("Race Control localization", () => {
       expect(readFileSync(publicUrl(name), "utf8")).toBe(readFileSync(nativeUrl(name), "utf8"));
   });
 
+  it("restores session schedule controls when project editing is canceled", () => {
+    const app = readFileSync(publicUrl("app.js"), "utf8");
+    expect(app).toContain("eventProjectScheduleBeforeEdit=readEventSchedule()");
+    expect(app).toContain("resetEventProjectForm(true)");
+    expect(app).toContain("applyEventSchedule(eventProjectScheduleBeforeEdit)");
+  });
+
   it("loads localization before the application and packages every referenced asset", () => {
     const index = readFileSync(publicUrl("index.html"), "utf8");
     expect(index.indexOf('/i18n.js')).toBeGreaterThan(0);
@@ -27,6 +34,8 @@ describe("Race Control localization", () => {
     expect(packageScript).toContain("'public/lazyforza-logo.png'");
     expect(packageScript).toContain("'src/rule-templates.ts'");
     expect(packageScript).toContain("'tests/rule-templates.test.ts'");
+    expect(packageScript).toContain("'src/event-projects.ts'");
+    expect(packageScript).toContain("'tests/event-projects.test.ts'");
   });
 
   it("translates every fixed Chinese Web label and JavaScript literal", () => {

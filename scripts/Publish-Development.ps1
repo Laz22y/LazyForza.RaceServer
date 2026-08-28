@@ -132,8 +132,8 @@ if ($CloudflareLabel -or $PackageVersion) {
     foreach ($relative in @(
             'public/app.js', 'public/events.css', 'public/i18n.js', 'public/index.html', 'public/lazyforza-logo.png',
             'public/results.css', 'public/styles.css', 'public/teams.css',
-            'src/index.ts', 'src/passwords.ts', 'src/protocol.ts', 'src/race-core.ts', 'src/rule-templates.ts', 'src/track-package.ts',
-            'tests/passwords.test.ts', 'tests/race-core.test.ts', 'tests/rule-templates.test.ts', 'tests/track-package.test.ts', 'tests/web-localization.test.ts',
+            'src/event-projects.ts', 'src/index.ts', 'src/passwords.ts', 'src/protocol.ts', 'src/race-core.ts', 'src/rule-templates.ts', 'src/track-package.ts',
+            'tests/event-projects.test.ts', 'tests/passwords.test.ts', 'tests/race-core.test.ts', 'tests/rule-templates.test.ts', 'tests/track-package.test.ts', 'tests/web-localization.test.ts',
             'package-lock.json', 'package.json', 'README.md', 'tsconfig.json', 'wrangler.jsonc')) {
         $source = [System.IO.Path]::GetFullPath((Join-Path $cloudflareRoot $relative))
         if (!$source.StartsWith(

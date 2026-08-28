@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LazyForza 地产赛事总控</title>
-  <link rel="stylesheet" href="/styles.css?v=20260828-2">
+  <link rel="stylesheet" href="/styles.css?v=20260828-3">
   <link rel="stylesheet" href="/teams.css?v=20260820-1">
   <link rel="stylesheet" href="/events.css?v=20260820-1">
   <link rel="stylesheet" href="/results.css?v=20260823-1">
@@ -61,7 +61,7 @@
     <div id="dashboard" class="dashboard hidden">
       <nav class="control-dock" aria-label="总控区域导航">
         <div class="dock-links">
-          <a href="#raceControl">比赛控制</a><a href="#liveTiming">实时排名</a><a href="#stewards">处罚调查</a><a href="#resultHistoryPanel">阶段赛果</a><a href="#roomConfiguration">高级设置</a><a href="#raceEvents">赛事记录</a>
+          <a href="#eventProjects">赛事项目</a><a href="#raceControl">比赛控制</a><a href="#liveTiming">实时排名</a><a href="#stewards">处罚调查</a><a href="#resultHistoryPanel">阶段赛果</a><a href="#roomConfiguration">高级设置</a><a href="#raceEvents">赛事记录</a>
         </div>
         <button id="logoutButton" class="quiet dock-logout">退出总控</button>
       </nav>
@@ -73,6 +73,29 @@
         <article id="flagCard" class="panel summary-card flag-card green"><p class="label">赛道旗语</p><strong id="flagValue">GREEN</strong><span id="flagMessage">赛道正常</span></article>
         <article class="panel summary-card"><p class="label">在线车手</p><strong><span id="onlineValue">0</span><small> / 12</small></strong><span id="readyValue">0 人已准备</span></article>
         <article class="panel summary-card fastest-card"><p class="label">本场最快圈</p><strong id="fastestValue">—</strong><span id="fastestDriver">尚无有效圈</span></article>
+      </section>
+
+      <section id="eventProjects" class="panel event-project-panel">
+        <div class="section-heading"><div><p class="eyebrow">EVENT PROJECTS</p><h2>赛事项目包</h2></div><span id="eventProjectCount" class="section-note">尚未创建赛事项目</span></div>
+        <p class="muted compact">将赛事资料、当前房间规则、赛程、车队、赛道、Logo、阶段赛果与赛事记录保存为一个可复用项目，并可通过 .lfzevent 在两种服务端之间迁移。</p>
+        <div class="event-project-workspace">
+          <form id="eventProjectForm" class="event-project-form">
+            <div class="event-project-fields">
+              <label>项目名称<input id="eventProjectName" maxlength="96" placeholder="例如：秋季周末杯" required></label>
+              <label>短名称<input id="eventProjectShortName" maxlength="32" placeholder="例如：AWC"></label>
+              <label>主办方<input id="eventProjectOrganizer" maxlength="96" placeholder="例如：LazyForza Club"></label>
+              <label>计划开始时间<input id="eventProjectStart" type="datetime-local"></label>
+              <label class="event-project-description">赛事说明<textarea id="eventProjectDescription" maxlength="1000" rows="2" placeholder="选填；用于项目归档和交接"></textarea></label>
+            </div>
+            <div class="event-project-form-actions"><button id="saveEventProject" type="submit" class="primary">从当前房间创建项目</button><button id="cancelEventProjectEdit" type="button" class="quiet hidden">取消编辑</button><span id="eventProjectEditHint" class="muted compact">创建时会保存当前赛程、已固化赛果与现有赛事记录。</span></div>
+          </form>
+          <div class="event-project-import">
+            <div><strong>导入赛事项目包</strong><p class="muted compact">导入项目保持原有标识；若本机已有同一项目，则自动创建新副本。导入不会直接改变当前房间。</p></div>
+            <div class="event-project-import-actions"><input id="eventProjectFile" type="file" accept=".lfzevent,application/zip"><button id="importEventProject" type="button">导入 .lfzevent</button></div>
+          </div>
+        </div>
+        <p id="eventProjectStatus" class="event-project-status" aria-live="polite"></p>
+        <div id="eventProjectList" class="event-project-list"><div class="event-project-empty">尚未创建赛事项目</div></div>
       </section>
 
       <section id="raceControl" class="command-grid">
@@ -216,7 +239,7 @@
       <p class="collision-replay-disclaimer">这是各客户端上报遥测形成的轨迹证据，不是游戏画面，也不自动认定事故责任。</p>
     </section>
   </div>
-  <script src="/i18n.js?v=20260828-2" defer></script>
-  <script src="/app.js?v=20260828-2" defer></script>
+  <script src="/i18n.js?v=20260828-3" defer></script>
+  <script src="/app.js?v=20260828-3" defer></script>
 </body>
 </html>

@@ -16,6 +16,7 @@
 - 由总控选择开启的 30 秒断线计圈恢复，补交事件支持确认和去重；
 - 1–3 节练习赛、每节默认 60 分钟或由总控逐节设置、独立圈速排名和最后一圈收尾；
 - 可保存、覆盖、应用和删除的赛事规则模板，赛事名称、赛道与车队资料保持独立；
+- 可复用赛事项目及 `.lfzevent` 导入导出，项目包含房间规则、赛程、车队、赛道、Logo、阶段赛果和赛事记录；
 - 大厅、兼容单节的 1–3 节排位、默认或自定义淘汰、每节最后飞驰圈、完整排位顺位、出场圈和暖胎圈；
 - 五盏红灯随机熄灭发车、抢跑自动加罚、正赛、红旗暂停和自动方格旗；
 - 全场最快圈、排名、排位/正赛自动黄旗、人工分区/全场黄旗、自动蓝旗、处罚、DNF/DSQ、维修停留进度；
@@ -99,6 +100,7 @@ The Worker uses one Durable Object race room named `main`, with 1–12 drivers a
 
 - room and Race Control passwords, display names, colors, teams and reconnect recovery;
 - reusable race-rule templates that keep event, track and team details separate;
+- reusable event projects with `.lfzevent` import and export for room rules, schedules, teams, track, logo, session results and race logs;
 - one to three practice and qualifying sessions, out laps, formation laps, five red lights, races and red flags;
 - standings, live gaps, flags, penalties, DNF/DSQ, collision investigations, shortcut evidence and pit progress;
 - optional 30-second disconnected-lap recovery with acknowledged, deduplicated lap events;

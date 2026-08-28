@@ -14,6 +14,12 @@ public sealed record HostedTrackPackageMetadata(
     DateTimeOffset UploadedAt,
     string FileName);
 
+public sealed record HostedTrackPackageIdentity(
+    string TrackId,
+    string TrackName,
+    string TrackRevision,
+    string TrackPackageHash);
+
 public sealed class HostedTrackPackageStore
 {
     public const long MaximumPackageBytes = 1_572_864;
@@ -67,7 +73,7 @@ public sealed class HostedTrackPackageStore
         }
         if (buffer.Length == 0) throw new InvalidDataException("赛道文件为空。");
         var bytes = buffer.ToArray();
-        var identity = InspectArchive(bytes);
+        var identity = InspectPackage(bytes);
         var created = new HostedTrackPackageMetadata(
             identity.TrackId, identity.TrackName, identity.TrackRevision, identity.TrackPackageHash,
             Convert.ToHexString(SHA256.HashData(bytes)), bytes.LongLength, DateTimeOffset.UtcNow,
@@ -124,7 +130,7 @@ public sealed class HostedTrackPackageStore
         catch (IOException) { return null; }
     }
 
-    private static HostedTrackIdentity InspectArchive(byte[] bytes)
+    public static HostedTrackPackageIdentity InspectPackage(byte[] bytes)
     {
         try
         {
@@ -167,7 +173,7 @@ public sealed class HostedTrackPackageStore
                 throw new InvalidDataException("赛道包清单与 track.json 内容不一致。");
             ValidatePitCenterLine(payloadDefinition);
             ValidateIdentity(trackId, trackName, fingerprint);
-            return new HostedTrackIdentity(trackId, trackName, trackRevision, fingerprint);
+            return new HostedTrackPackageIdentity(trackId, trackName, trackRevision, fingerprint);
         }
         catch (InvalidDataException) { throw; }
         catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException or FormatException)
@@ -237,9 +243,4 @@ public sealed class HostedTrackPackageStore
         return new string(source.Select(character => Path.GetInvalidFileNameChars().Contains(character) ? '-' : character).ToArray());
     }
 
-    private sealed record HostedTrackIdentity(
-        string TrackId,
-        string TrackName,
-        string TrackRevision,
-        string TrackPackageHash);
 }

@@ -34,6 +34,26 @@ import {
   type RaceRuleTemplateSnapshot,
   updateRuleTemplate
 } from "./rule-templates";
+import {
+  activateEventProject,
+  captureEventProject,
+  copyEventProject,
+  createEventProject,
+  eventProjectContentDisposition,
+  exportEventProjectPackage,
+  importEventProjectPackage,
+  maximumEventProjectPackageBytes,
+  maximumEventProjects,
+  normalizeEventProjects,
+  setEventProjectStatus,
+  summarizeEventProject,
+  syncActiveEventProject,
+  type EventProjectAssetSnapshot,
+  type EventProjectAssets,
+  type EventProjectContext,
+  type EventProjectSaveRequest,
+  type EventProjectSnapshot
+} from "./event-projects";
 
 interface Env {
   RACE_ROOM: DurableObjectNamespace;
@@ -61,6 +81,7 @@ const organizerLogoKey = "organizer-logo-v1";
 const organizerLogoMetadataKey = "organizer-logo-metadata-v1";
 const maximumOrganizerLogoBytes = 262_144;
 const ruleTemplatesKey = "race-rule-templates-v1";
+const eventProjectsKey = "race-event-projects-v1";
 const roomName = "main";
 
 interface HostedTrackPackageMetadata {
@@ -110,6 +131,7 @@ export class RaceRoom {
   private hostedTrackPackage: HostedTrackPackageMetadata | null = null;
   private organizerLogo: OrganizerLogoMetadata | null = null;
   private ruleTemplates: RaceRuleTemplateSnapshot[] = [];
+  private eventProjects: EventProjectSnapshot[] = [];
   private setupInProgress = false;
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
@@ -120,6 +142,8 @@ export class RaceRoom {
       this.organizerLogo = await this.state.storage.get<OrganizerLogoMetadata>(organizerLogoMetadataKey) ?? null;
       this.ruleTemplates = normalizeRuleTemplates(
         await this.state.storage.get<RaceRuleTemplateSnapshot[]>(ruleTemplatesKey));
+      this.eventProjects = normalizeEventProjects(
+        await this.state.storage.get<EventProjectSnapshot[]>(eventProjectsKey));
       this.core = new RaceCore({
         sessionName: env.SESSION_NAME,
         maximumParticipants: Number.parseInt(env.MAXIMUM_PARTICIPANTS, 10),
@@ -193,6 +217,34 @@ export class RaceRoom {
     }
     if (url.pathname === "/api/admin/results" && request.method === "GET")
       return json(this.core.results());
+    if (url.pathname === "/api/admin/event-projects" && request.method === "GET")
+      return json({
+        projects: [...this.eventProjects]
+          .sort((left, right) => (left.status === "active" ? -1 : right.status === "active" ? 1 :
+            right.updatedAt.localeCompare(left.updatedAt)))
+          .map(summarizeEventProject),
+        maximumProjects: maximumEventProjects
+      });
+    if (url.pathname === "/api/admin/event-projects" && request.method === "POST")
+      return this.createEventProject(request);
+    if (url.pathname === "/api/admin/event-projects/import" && request.method === "POST")
+      return this.importEventProject(request);
+    const eventProjectExportRoute = url.pathname.match(/^\/api\/admin\/event-projects\/([^/]+)\/export$/);
+    if (eventProjectExportRoute && request.method === "GET")
+      return this.exportEventProject(decodeURIComponent(eventProjectExportRoute[1]));
+    const eventProjectActionRoute = url.pathname.match(/^\/api\/admin\/event-projects\/([^/]+)\/(activate|copy|complete|archive)$/);
+    if (eventProjectActionRoute && request.method === "POST")
+      return this.applyEventProjectAction(
+        decodeURIComponent(eventProjectActionRoute[1]), eventProjectActionRoute[2], request);
+    const eventProjectRoute = url.pathname.match(/^\/api\/admin\/event-projects\/([^/]+)$/);
+    if (eventProjectRoute && request.method === "GET") {
+      const project = this.eventProjects.find(item => item.id === decodeURIComponent(eventProjectRoute[1]));
+      return project ? json({ project }) : json({ error: "赛事项目不存在。" }, 404);
+    }
+    if (eventProjectRoute && request.method === "PUT")
+      return this.captureEventProject(decodeURIComponent(eventProjectRoute[1]), request);
+    if (eventProjectRoute && request.method === "DELETE")
+      return this.deleteEventProject(decodeURIComponent(eventProjectRoute[1]));
     const collisionReplayRoute = url.pathname.match(/^\/api\/admin\/investigations\/([^/]+)\/replay$/);
     if (collisionReplayRoute && request.method === "GET") {
       const replay = this.core.collisionReplay(decodeURIComponent(collisionReplayRoute[1]));
@@ -579,6 +631,243 @@ export class RaceRoom {
     return json({ ok: true });
   }
 
+  private async createEventProject(request: Request): Promise<Response> {
+    try {
+      const body = await readJson(request) as EventProjectSaveRequest;
+      const capture = await this.currentEventProjectCapture();
+      const created = createEventProject(this.eventProjects, body, capture.context);
+      this.eventProjects = created.projects;
+      await this.saveEventProjectAssets(created.project.id, capture.assets);
+      await this.state.storage.put(eventProjectsKey, this.eventProjects);
+      return json({ project: created.project });
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : "赛事项目创建失败。" }, 400);
+    }
+  }
+
+  private async captureEventProject(projectId: string, request: Request): Promise<Response> {
+    try {
+      const body = await readJson(request) as EventProjectSaveRequest;
+      const capture = await this.currentEventProjectCapture();
+      const captured = captureEventProject(this.eventProjects, projectId, body, capture.context);
+      this.eventProjects = captured.projects;
+      await this.saveEventProjectAssets(captured.project.id, capture.assets);
+      await this.state.storage.put(eventProjectsKey, this.eventProjects);
+      return json({ project: captured.project });
+    } catch (error) {
+      const status = error instanceof RangeError ? 404 : 400;
+      return json({ error: error instanceof Error ? error.message : "赛事项目保存失败。" }, status);
+    }
+  }
+
+  private async applyEventProjectAction(
+    projectId: string,
+    action: string,
+    request: Request): Promise<Response> {
+    try {
+      if (action === "copy") {
+        const body = await readJson(request) as { name?: string | null };
+        const assets = await this.readEventProjectAssets(projectId);
+        const copied = copyEventProject(this.eventProjects, projectId, body.name);
+        this.eventProjects = copied.projects;
+        await this.saveEventProjectAssets(copied.project.id, assets);
+        await this.state.storage.put(eventProjectsKey, this.eventProjects);
+        return json({ project: copied.project });
+      }
+      if (action === "activate") return this.activateEventProject(projectId);
+      const synchronized = syncActiveEventProject(this.eventProjects, this.core.results(), this.core.events(500));
+      this.eventProjects = synchronized.projects;
+      const changed = setEventProjectStatus(
+        this.eventProjects, projectId, action === "archive" ? "archived" : "completed");
+      this.eventProjects = changed.projects;
+      await this.state.storage.put(eventProjectsKey, this.eventProjects);
+      return json({ project: changed.project });
+    } catch (error) {
+      const status = error instanceof RangeError ? 404 : 400;
+      return json({ error: error instanceof Error ? error.message : "赛事项目操作失败。" }, status);
+    }
+  }
+
+  private async activateEventProject(projectId: string): Promise<Response> {
+    if (!["lobby", "finished"].includes(this.core.snapshot().phase))
+      return json({ error: "练习赛、排位赛或正赛进行期间不能切换赛事项目。请先返回大厅。" }, 400);
+    const project = this.eventProjects.find(item => item.id === projectId);
+    if (!project) return json({ error: "赛事项目不存在。" }, 404);
+    if (project.status === "archived")
+      return json({ error: "已归档的赛事项目不能直接启用，请先复制为新项目。" }, 400);
+    const assets = await this.readEventProjectAssets(projectId);
+    const result = this.core.applyRoomSettings(project.room);
+    if (!result.ok) return json({ error: result.error }, 400);
+
+    if (project.trackPackage && assets.trackPackage) {
+      if (!project.room.trackId || !project.room.trackName || !project.room.trackPackageHash)
+        return json({ error: "赛事项目的赛道标识不完整。" }, 400);
+      const metadata: HostedTrackPackageMetadata = {
+        trackId: project.room.trackId,
+        trackName: project.room.trackName,
+        trackRevision: project.room.trackRevision ?? null,
+        trackPackageHash: project.room.trackPackageHash,
+        fileSha256: project.trackPackage.sha256,
+        sizeBytes: project.trackPackage.sizeBytes,
+        uploadedAt: new Date().toISOString(),
+        fileName: project.trackPackage.fileName
+      };
+      await this.state.storage.put({
+        [hostedTrackPackageKey]: assets.trackPackage,
+        [hostedTrackPackageMetadataKey]: metadata
+      });
+      this.hostedTrackPackage = metadata;
+    } else {
+      await this.state.storage.delete([hostedTrackPackageKey, hostedTrackPackageMetadataKey]);
+      this.hostedTrackPackage = null;
+    }
+
+    if (project.organizerLogo && assets.organizerLogo) {
+      const metadata: OrganizerLogoMetadata = {
+        sha256: project.organizerLogo.sha256,
+        mimeType: project.organizerLogo.mimeType as "image/png" | "image/jpeg",
+        sizeBytes: project.organizerLogo.sizeBytes,
+        uploadedAt: new Date().toISOString(),
+        fileName: project.organizerLogo.fileName
+      };
+      await this.state.storage.put({
+        [organizerLogoKey]: assets.organizerLogo,
+        [organizerLogoMetadataKey]: metadata
+      });
+      this.organizerLogo = metadata;
+    } else {
+      await this.state.storage.delete([organizerLogoKey, organizerLogoMetadataKey]);
+      this.organizerLogo = null;
+    }
+
+    const activated = activateEventProject(this.eventProjects, projectId);
+    this.eventProjects = activated.projects;
+    await this.persist();
+    await this.scheduleAlarm();
+    this.broadcastSnapshot(true);
+    return json({ project: activated.project, room: this.core.roomSettings() });
+  }
+
+  private async deleteEventProject(projectId: string): Promise<Response> {
+    const project = this.eventProjects.find(item => item.id === projectId);
+    if (!project) return json({ error: "赛事项目不存在。" }, 404);
+    if (project.status === "active") return json({ error: "正在使用的赛事项目不能删除。" }, 400);
+    this.eventProjects = this.eventProjects.filter(item => item.id !== projectId);
+    await this.state.storage.delete([
+      eventProjectTrackKey(projectId), eventProjectLogoKey(projectId)
+    ]);
+    await this.state.storage.put(eventProjectsKey, this.eventProjects);
+    return json({ ok: true });
+  }
+
+  private async exportEventProject(projectId: string): Promise<Response> {
+    try {
+      const synchronized = syncActiveEventProject(this.eventProjects, this.core.results(), this.core.events(500));
+      this.eventProjects = synchronized.projects;
+      if (synchronized.changed) await this.state.storage.put(eventProjectsKey, this.eventProjects);
+      const project = this.eventProjects.find(item => item.id === projectId);
+      if (!project) return json({ error: "赛事项目不存在。" }, 404);
+      const bytes = await exportEventProjectPackage(project, await this.readEventProjectAssets(projectId));
+      return new Response(bytes, { headers: {
+        "Content-Type": "application/vnd.lazyforza.event-project",
+        "Content-Length": String(bytes.byteLength),
+        "Content-Disposition": eventProjectContentDisposition(project),
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff"
+      }});
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : "赛事项目导出失败。" }, 400);
+    }
+  }
+
+  private async importEventProject(request: Request): Promise<Response> {
+    try {
+      const form = await request.formData();
+      const file = form.get("file");
+      if (!(file instanceof File)) return json({ error: "请选择要导入的 .lfzevent 文件。" }, 400);
+      if (file.size <= 0 || file.size > maximumEventProjectPackageBytes)
+        return json({ error: "赛事项目包为空或超过 4 MiB 上限。" }, 400);
+      if (this.eventProjects.length >= maximumEventProjects)
+        return json({ error: `赛事项目最多保存 ${maximumEventProjects} 个。` }, 400);
+      const imported = await importEventProjectPackage(
+        await file.arrayBuffer(), new Set(this.eventProjects.map(item => item.id)));
+      this.eventProjects = [...this.eventProjects, imported.project];
+      await this.saveEventProjectAssets(imported.project.id, imported.assets);
+      await this.state.storage.put(eventProjectsKey, this.eventProjects);
+      return json({ project: imported.project });
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : "赛事项目导入失败。" }, 400);
+    }
+  }
+
+  private async currentEventProjectCapture(): Promise<{
+    context: EventProjectContext;
+    assets: EventProjectAssets;
+  }> {
+    const room = this.core.roomSettings();
+    const hostedTrack = this.matchingHostedTrackPackage(
+      room.trackId, room.trackRevision, room.trackPackageHash);
+    const [trackPackage, organizerLogo] = await Promise.all([
+      hostedTrack ? this.state.storage.get<ArrayBuffer>(hostedTrackPackageKey) : Promise.resolve(undefined),
+      this.organizerLogo ? this.state.storage.get<ArrayBuffer>(organizerLogoKey) : Promise.resolve(undefined)
+    ]);
+    const validTrack = hostedTrack && trackPackage && trackPackage.byteLength === hostedTrack.sizeBytes &&
+      (await sha256Hex(trackPackage)).toLowerCase() === hostedTrack.fileSha256.toLowerCase()
+      ? trackPackage : null;
+    const validLogo = this.organizerLogo && organizerLogo && organizerLogo.byteLength === this.organizerLogo.sizeBytes &&
+      (await sha256Hex(organizerLogo)).toLowerCase() === this.organizerLogo.sha256.toLowerCase()
+      ? organizerLogo : null;
+    const assets = { trackPackage: validTrack, organizerLogo: validLogo };
+    const context: EventProjectContext = {
+      room,
+      results: this.core.results(),
+      events: this.core.events(500),
+      trackPackage: hostedTrack && assets.trackPackage ? {
+        packagePath: "track/current.lfzestate",
+        fileName: hostedTrack.fileName,
+        mimeType: "application/vnd.lazyforza.estate-track",
+        sha256: hostedTrack.fileSha256,
+        sizeBytes: hostedTrack.sizeBytes
+      } : null,
+      organizerLogo: this.organizerLogo && assets.organizerLogo ? {
+        packagePath: this.organizerLogo.mimeType === "image/png"
+          ? "assets/organizer-logo.png" : "assets/organizer-logo.jpg",
+        fileName: this.organizerLogo.fileName,
+        mimeType: this.organizerLogo.mimeType,
+        sha256: this.organizerLogo.sha256,
+        sizeBytes: this.organizerLogo.sizeBytes
+      } : null
+    };
+    return { context, assets };
+  }
+
+  private async readEventProjectAssets(projectId: string): Promise<EventProjectAssets> {
+    const project = this.eventProjects.find(item => item.id === projectId);
+    if (!project) throw new RangeError("赛事项目不存在。");
+    const [trackPackage, organizerLogo] = await Promise.all([
+      this.state.storage.get<ArrayBuffer>(eventProjectTrackKey(projectId)),
+      this.state.storage.get<ArrayBuffer>(eventProjectLogoKey(projectId))
+    ]);
+    if (project.trackPackage && (!trackPackage || trackPackage.byteLength !== project.trackPackage.sizeBytes ||
+        (await sha256Hex(trackPackage)).toLowerCase() !== project.trackPackage.sha256.toLowerCase()))
+      throw new Error("赛事项目素材文件的长度或摘要不一致。");
+    if (project.organizerLogo && (!organizerLogo || organizerLogo.byteLength !== project.organizerLogo.sizeBytes ||
+        (await sha256Hex(organizerLogo)).toLowerCase() !== project.organizerLogo.sha256.toLowerCase()))
+      throw new Error("赛事项目素材文件的长度或摘要不一致。");
+    return { trackPackage: trackPackage ?? null, organizerLogo: organizerLogo ?? null };
+  }
+
+  private async saveEventProjectAssets(projectId: string, assets: EventProjectAssets): Promise<void> {
+    const values: Record<string, ArrayBuffer> = {};
+    const deletions: string[] = [];
+    if (assets.trackPackage) values[eventProjectTrackKey(projectId)] = assets.trackPackage;
+    else deletions.push(eventProjectTrackKey(projectId));
+    if (assets.organizerLogo) values[eventProjectLogoKey(projectId)] = assets.organizerLogo;
+    else deletions.push(eventProjectLogoKey(projectId));
+    if (Object.keys(values).length > 0) await this.state.storage.put(values);
+    if (deletions.length > 0) await this.state.storage.delete(deletions);
+  }
+
   private async disconnectClient(request: Request): Promise<Response> {
     if (!await this.isAdminAuthorized(request))
       return json({ error: "总控登录已过期。" }, 401);
@@ -775,7 +1064,12 @@ export class RaceRoom {
   }
 
   private async persist(): Promise<void> {
-    await this.state.storage.put(storedStateKey, this.core.serialize());
+    const synchronized = syncActiveEventProject(this.eventProjects, this.core.results(), this.core.events(500));
+    this.eventProjects = synchronized.projects;
+    await this.state.storage.put({
+      [storedStateKey]: this.core.serialize(),
+      [eventProjectsKey]: this.eventProjects
+    });
     this.lastTelemetryPersistedAt = Date.now();
   }
 
@@ -791,6 +1085,14 @@ export class RaceRoom {
     }
     await this.state.storage.setAlarm(Math.max(Date.now() + 1, next));
   }
+}
+
+function eventProjectTrackKey(projectId: string): string {
+  return `race-event-project:${projectId}:track`;
+}
+
+function eventProjectLogoKey(projectId: string): string {
+  return `race-event-project:${projectId}:logo`;
 }
 
 function adminLogout(): Response {

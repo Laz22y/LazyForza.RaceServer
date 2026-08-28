@@ -17,6 +17,7 @@ LazyForza 地产赛事的独立服务端。支持原生 ASP.NET 自托管和 Clo
 - 车队、维修区、旗语、处罚、带动态遥测回放的全阶段碰撞调查、路线收益切弯证据、DNF/DSQ 和可选断线计圈恢复；
 - 赛道文件与主办方 Logo 托管；
 - 可保存、覆盖、应用和删除的赛事规则模板，赛事名称、赛道与车队资料保持独立；
+- 可创建、更新、复制、启用、完成和归档的赛事项目；`.lfzevent` 项目包可携带房间规则、赛程、车队、赛道、Logo、阶段赛果与赛事记录，在原生和 Cloudflare 服务端之间迁移；
 - 阶段赛果归档，返回大厅后仍可回看，并支持 PNG/CSV 导出；
 - 面向电脑宽屏和 Pad 触控的浏览器总控；
 - JSONL 审计日志和关键赛事状态持久化。
@@ -129,6 +130,7 @@ Version 0.4.3 adds a complete Chinese and English Race Control interface, isolat
 - teams, pit lanes, flags, penalties, collision investigations with dynamic telemetry replay, shortcut evidence, DNF/DSQ and optional disconnected-lap recovery;
 - hosted track packages and organizer logos;
 - reusable race-rule templates that keep event, track and team details separate;
+- reusable event projects with create, update, copy, activate, complete and archive workflows; `.lfzevent` packages carry room rules, schedules, teams, track, logo, session results and race logs between native and Cloudflare servers;
 - archived session results that remain available in the lobby, with PNG and CSV export;
 - browser Race Control designed for desktop widescreens and touch tablets;
 - JSONL audit logs and persistent critical race state.
