@@ -19,10 +19,20 @@ import {
   type TelemetryUpdate
 } from "./protocol";
 import {
+  authenticateControlAccount,
+  controlAccountSummaries,
+  createControlAccount,
   createStoredCredentials,
+  deleteControlAccount,
+  maximumControlAccounts,
+  normalizeStoredCredentials,
+  type ControlAccountRequest,
+  type ControlPrincipal,
   type StoredCredentials,
+  updateControlAccount,
   verifyPassword
 } from "./passwords";
+import { controlRoleAllows, requiredControlPermission } from "./control-access";
 import { inspectEstateTrackPackage } from "./track-package";
 import {
   createRuleTemplate,
@@ -137,7 +147,12 @@ export class RaceRoom {
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
     this.initialized = this.state.blockConcurrencyWhile(async () => {
       const stored = await this.state.storage.get<StoredRaceState>(storedStateKey);
-      this.credentials = await this.state.storage.get<StoredCredentials>(storedCredentialsKey) ?? null;
+      const loadedCredentials = await this.state.storage.get<StoredCredentials>(storedCredentialsKey) ?? null;
+      if (loadedCredentials) {
+        const normalized = normalizeStoredCredentials(loadedCredentials);
+        this.credentials = normalized.credentials;
+        if (normalized.changed) await this.state.storage.put(storedCredentialsKey, this.credentials);
+      } else this.credentials = null;
       this.hostedTrackPackage = await this.state.storage.get<HostedTrackPackageMetadata>(hostedTrackPackageMetadataKey) ?? null;
       this.organizerLogo = await this.state.storage.get<OrganizerLogoMetadata>(organizerLogoMetadataKey) ?? null;
       this.ruleTemplates = normalizeRuleTemplates(
@@ -206,8 +221,28 @@ export class RaceRoom {
       return this.downloadTrackPackage();
     if (url.pathname === "/api/organizer-logo" && request.method === "GET")
       return this.downloadOrganizerLogo();
-    if (url.pathname.startsWith("/api/admin/") && !await this.isAdminAuthorized(request))
-      return json({ error: "总控登录已过期。" }, 401);
+    let controlPrincipal: ControlPrincipal | null = null;
+    if (url.pathname.startsWith("/api/admin/")) {
+      controlPrincipal = await this.adminPrincipal(request);
+      if (!controlPrincipal) return json({ error: "总控登录已过期。" }, 401);
+      const permission = requiredControlPermission(request.method, url.pathname);
+      if (!controlRoleAllows(controlPrincipal.role, permission))
+        return json({ error: "当前总控角色没有执行此操作的权限。" }, 403);
+    }
+    if (url.pathname === "/api/admin/me" && request.method === "GET")
+      return json({ principal: controlPrincipal });
+    if (url.pathname === "/api/admin/control-accounts" && request.method === "GET")
+      return json({
+        accounts: this.currentControlAccountSummaries(),
+        maximumAccounts: maximumControlAccounts
+      });
+    if (url.pathname === "/api/admin/control-accounts" && request.method === "POST")
+      return this.createControlAccount(request);
+    const controlAccountRoute = url.pathname.match(/^\/api\/admin\/control-accounts\/([^/]+)$/);
+    if (controlAccountRoute && request.method === "PUT")
+      return this.updateControlAccount(decodeURIComponent(controlAccountRoute[1]), request);
+    if (controlAccountRoute && request.method === "DELETE")
+      return this.deleteControlAccount(decodeURIComponent(controlAccountRoute[1]));
     if (url.pathname === "/api/admin/state" && request.method === "GET")
       return json(this.core.snapshot());
     if (url.pathname === "/api/admin/events" && request.method === "GET") {
@@ -493,13 +528,15 @@ export class RaceRoom {
     if (!this.isConfigured()) return json({ error: "服务端尚未完成首次设置。" }, 503);
     try {
       const body = await readJson(request) as { password?: string };
-      if (!await this.adminPasswordMatches(body.password ?? ""))
-        return json({ error: "总控密码不正确。" }, 401);
+      const principal = await this.authenticateAdminPassword(body.password ?? "");
+      if (!principal) return json({ error: "总控密码不正确。" }, 401);
       const expires = Date.now() + 12 * 60 * 60 * 1_000;
+      const accountVersion = this.controlAccountSessionVersion(principal.id);
+      if (!accountVersion) return json({ error: "总控账号不存在。" }, 401);
       const nonce = crypto.randomUUID().replaceAll("-", "");
-      const value = `${expires}.${nonce}`;
+      const value = `${expires}.${principal.id}.${accountVersion}.${nonce}`;
       const signature = await hmac(value, this.adminSigningSecret());
-      return json({ serverName: this.env.SERVER_NAME }, 200, {
+      return json({ serverName: this.env.SERVER_NAME, principal }, 200, {
         "Set-Cookie": `${adminCookieName}=${value}.${signature}; Path=/; Max-Age=43200; HttpOnly; Secure; SameSite=Strict`
       });
     } catch {
@@ -507,26 +544,75 @@ export class RaceRoom {
     }
   }
 
-  private async isAdminAuthorized(request: Request): Promise<boolean> {
-    if (!this.isConfigured()) return false;
+  private async adminPrincipal(request: Request): Promise<ControlPrincipal | null> {
+    if (!this.isConfigured()) return null;
     const cookie = parseCookies(request.headers.get("Cookie"))[adminCookieName];
-    if (!cookie) return false;
+    if (!cookie) return null;
     const pieces = cookie.split(".");
-    if (pieces.length !== 3) return false;
+    if (pieces.length !== 3 && pieces.length !== 5) return null;
     const expires = Number.parseInt(pieces[0], 10);
-    if (!Number.isFinite(expires) || expires <= Date.now()) return false;
+    if (!Number.isFinite(expires) || expires <= Date.now()) return null;
+    if (pieces.length === 5) {
+      const expected = await hmac(`${pieces[0]}.${pieces[1]}.${pieces[2]}.${pieces[3]}`, this.adminSigningSecret());
+      if (!constantTimeEquals(expected, pieces[4]) ||
+          this.controlAccountSessionVersion(pieces[1]) !== pieces[2]) return null;
+      return this.controlPrincipalById(pieces[1]);
+    }
     const expected = await hmac(`${pieces[0]}.${pieces[1]}`, this.adminSigningSecret());
-    return constantTimeEquals(expected, pieces[2]);
+    return constantTimeEquals(expected, pieces[2]) ? this.primarySuperAdmin() : null;
   }
 
   private adminSigningSecret(): string {
     return this.credentials?.admin.hash ?? this.env.ADMIN_PASSWORD ?? "unconfigured";
   }
 
-  private async adminPasswordMatches(password: string): Promise<boolean> {
-    return this.credentials
-      ? verifyPassword(password, this.credentials.admin)
-      : secureEquals(password, this.env.ADMIN_PASSWORD ?? "");
+  private async authenticateAdminPassword(password: string): Promise<ControlPrincipal | null> {
+    if (this.credentials) return authenticateControlAccount(this.credentials, password);
+    return await secureEquals(password, this.env.ADMIN_PASSWORD ?? "") ? this.environmentSuperAdmin() : null;
+  }
+
+  private environmentSuperAdmin(): ControlPrincipal {
+    return { id: "environment-super-admin", name: "初始超管", role: "superAdmin" };
+  }
+
+  private primarySuperAdmin(): ControlPrincipal | null {
+    if (!this.credentials) return this.environmentSuperAdmin();
+    const account = this.credentials.controlAccounts?.find(item => item.role === "superAdmin");
+    return account ? { id: account.id, name: account.name, role: account.role } : null;
+  }
+
+  private controlPrincipalById(id: string): ControlPrincipal | null {
+    if (!this.credentials)
+      return id === "environment-super-admin" ? this.environmentSuperAdmin() : null;
+    const account = this.credentials.controlAccounts?.find(item => item.id === id);
+    return account ? { id: account.id, name: account.name, role: account.role } : null;
+  }
+
+  private controlAccountSessionVersion(id: string): string | null {
+    if (!this.credentials) return id === "environment-super-admin" ? "0" : null;
+    const account = this.credentials.controlAccounts?.find(item => item.id === id);
+    return account ? String(Date.parse(account.updatedAt)) : null;
+  }
+
+  private currentControlAccountSummaries() {
+    if (this.credentials) return controlAccountSummaries(this.credentials);
+    const principal = this.environmentSuperAdmin();
+    const timestamp = new Date(0).toISOString();
+    return [{ ...principal, createdAt: timestamp, updatedAt: timestamp }];
+  }
+
+  private async ensureStoredCredentials(): Promise<StoredCredentials> {
+    if (this.credentials) return this.credentials;
+    if (!this.env.PLAYER_PASSWORD || !this.env.ADMIN_PASSWORD)
+      throw new Error("服务端尚未完成首次设置。");
+    const created = await createStoredCredentials(this.env.PLAYER_PASSWORD, this.env.ADMIN_PASSWORD);
+    this.credentials = {
+      ...created,
+      controlAccounts: created.controlAccounts?.map((account, index) =>
+        index === 0 ? { ...account, id: "environment-super-admin" } : account)
+    };
+    await this.state.storage.put(storedCredentialsKey, this.credentials);
+    return this.credentials;
   }
 
   private async playerPasswordMatches(password: string): Promise<boolean> {
@@ -593,6 +679,47 @@ export class RaceRoom {
       return json({ ok: true });
     } catch (error) {
       return json({ error: error instanceof Error ? error.message : "请求格式无效。" }, 400);
+    }
+  }
+
+  private async createControlAccount(request: Request): Promise<Response> {
+    try {
+      const credentials = await this.ensureStoredCredentials();
+      const body = await readJson(request) as ControlAccountRequest;
+      const created = await createControlAccount(credentials, body);
+      this.credentials = created.credentials;
+      await this.state.storage.put(storedCredentialsKey, this.credentials);
+      return json({ account: created.account });
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : "总控账号创建失败。" }, 400);
+    }
+  }
+
+  private async updateControlAccount(accountId: string, request: Request): Promise<Response> {
+    try {
+      const credentials = await this.ensureStoredCredentials();
+      const body = await readJson(request) as ControlAccountRequest;
+      const updated = await updateControlAccount(credentials, accountId, body);
+      this.credentials = updated.credentials;
+      await this.state.storage.put(storedCredentialsKey, this.credentials);
+      return json({ account: updated.account });
+    } catch (error) {
+      return json(
+        { error: error instanceof Error ? error.message : "总控账号更新失败。" },
+        error instanceof RangeError ? 404 : 400);
+    }
+  }
+
+  private async deleteControlAccount(accountId: string): Promise<Response> {
+    try {
+      const credentials = await this.ensureStoredCredentials();
+      const removed = deleteControlAccount(credentials, accountId);
+      if (!removed.deleted) return json({ error: "总控账号不存在。" }, 404);
+      this.credentials = removed.credentials;
+      await this.state.storage.put(storedCredentialsKey, this.credentials);
+      return json({ ok: true });
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : "总控账号删除失败。" }, 400);
     }
   }
 
@@ -869,8 +996,6 @@ export class RaceRoom {
   }
 
   private async disconnectClient(request: Request): Promise<Response> {
-    if (!await this.isAdminAuthorized(request))
-      return json({ error: "总控登录已过期。" }, 401);
     try {
       const command = await readJson(request) as DisconnectCommand;
       const clientId = cleanSetupText(command.clientId, 80) ?? "";

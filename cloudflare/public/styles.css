@@ -86,7 +86,23 @@ button.quiet { min-height: 34px; color: var(--muted-strong); background: transpa
 .dock-links::-webkit-scrollbar { display: none; }
 .dock-links a { min-height: 34px; display: inline-flex; align-items: center; padding: 0 11px; color: #aeb9c4; border-radius: 4px; text-decoration: none; white-space: nowrap; font-size: 11px; font-weight: 720; }
 .dock-links a:hover { color: #071014; background: var(--cyan); }
+.dock-account { flex: 0 0 auto; min-width: 108px; display: grid; gap: 1px; padding: 0 4px 0 12px; border-left: 1px solid rgba(88,104,123,.48); }
+.dock-account span { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #f4f7fa; font-size: 11px; font-weight: 760; }
+.dock-account small { color: var(--cyan); font-size: 9px; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; }
 .dock-logout { flex: 0 0 auto; }
+[data-permission].permission-hidden { display: none !important; }
+
+.control-access-panel { display: grid; gap: 16px; }
+.control-account-create { display: grid; grid-template-columns: minmax(180px,1.2fr) minmax(140px,.7fr) minmax(210px,1fr) auto; gap: 12px; align-items: end; padding: 16px; border: 1px solid rgba(66,215,232,.24); border-radius: 7px; background: linear-gradient(135deg,rgba(66,215,232,.07),rgba(90,140,255,.025)); }
+.control-account-create label { display: grid; gap: 6px; color: #b9c5d0; font-size: 11px; font-weight: 700; }
+.control-account-status { min-height: 18px; margin: -4px 0 0; color: var(--green); font-size: 11px; }
+.control-account-status.error { color: var(--red); }
+.control-account-list { display: grid; gap: 8px; }
+.control-account-card { display: grid; grid-template-columns: minmax(170px,1.1fr) minmax(130px,.65fr) minmax(200px,1fr) auto; gap: 10px; align-items: end; padding: 13px 14px; border: 1px solid rgba(69,85,104,.74); border-radius: 6px; background: #0d141d; }
+.control-account-card.current { border-color: rgba(66,215,232,.55); box-shadow: inset 3px 0 0 var(--cyan); }
+.control-account-card label { display: grid; gap: 5px; color: #8f9eae; font-size: 10px; font-weight: 700; }
+.control-account-card-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.control-account-current { align-self: center; color: var(--cyan); font-size: 10px; font-weight: 760; }
 
 .race-banner { min-height: 54px; display: grid; grid-template-columns: 80px max-content minmax(0, 1fr); align-items: center; gap: 14px; padding: 0 18px; color: #071014; background: var(--cyan); border-radius: 6px; }
 .race-banner[data-kind=fastestLap] { color: #fff; background: var(--purple); }
@@ -335,6 +351,8 @@ body.collision-replay-open { overflow: hidden; }
   .summary-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .control-dock { padding-left: 8px; }
   .dock-links a { padding: 0 9px; }
+  .dock-account { display: none; }
+  .control-account-create,.control-account-card { grid-template-columns: 1fr 1fr; }
   .session-buttons { grid-template-columns: repeat(3, minmax(0,1fr)); }
   .session-buttons .start-race { grid-column: span 1; }
   .flag-form { grid-template-columns: 170px minmax(0,1fr); }
@@ -359,6 +377,9 @@ body.collision-replay-open { overflow: hidden; }
   .control-dock { top: 4px; }
   .dock-links a { min-height: 38px; }
   .dock-logout { min-width: 88px; }
+  .control-account-create,.control-account-card { grid-template-columns: 1fr; }
+  .control-account-card-actions { justify-content: stretch; }
+  .control-account-card-actions button { flex: 1; }
   .race-banner { grid-template-columns: auto 1fr; gap: 7px 12px; padding: 10px 13px; }
   #bannerDetail { grid-column: 1 / -1; white-space: normal; }
   .controls, .timing-panel, .penalty-control-panel, .workspace-body { padding: 15px; }

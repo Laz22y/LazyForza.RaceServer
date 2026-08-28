@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LazyForza 地产赛事总控</title>
-  <link rel="stylesheet" href="/styles.css?v=20260828-3">
+  <link rel="stylesheet" href="/styles.css?v=20260828-4">
   <link rel="stylesheet" href="/teams.css?v=20260820-1">
   <link rel="stylesheet" href="/events.css?v=20260820-1">
   <link rel="stylesheet" href="/results.css?v=20260823-1">
@@ -32,7 +32,7 @@
       <div class="auth-intro">
         <span class="step-mark">首次设置</span>
         <h2>创建你的赛事房间</h2>
-        <p>这一步只会出现一次。设置完成后，车手使用房间密码加入；网页总控使用另一组密码登录。</p>
+        <p>这一步只会出现一次。设置完成后，车手使用房间密码加入；这里设置的总控密码会成为首个超管账号。</p>
         <ul><li>两个密码不要相同，也不要把总控密码发给参赛车手。</li><li>分段数需要与将要使用的地产赛道一致。</li><li>密码只保存为加盐摘要，不写入网页或赛事日志。</li></ul>
       </div>
       <form id="setupForm" class="auth-form">
@@ -42,7 +42,7 @@
           <label>正赛圈数<input id="setupRaceLaps" type="number" min="1" max="999" value="10" required></label>
           <span></span>
           <label>房间密码（可留空）<input id="setupPlayerPassword" type="password" maxlength="128" autocomplete="new-password"></label>
-          <label>总控密码<input id="setupAdminPassword" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
+          <label>超管密码<input id="setupAdminPassword" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
         </div>
         <button type="submit" class="primary wide">保存并启用房间</button>
         <p id="setupError" class="form-error" aria-live="polite"></p>
@@ -50,7 +50,7 @@
     </section>
 
     <section id="loginPanel" class="auth-panel panel hidden">
-      <div class="auth-intro"><span class="step-mark">赛事总控</span><h2>登录控制台</h2><p>请输入首次设置时保存的总控密码。参赛车手使用的是另一组房间密码。</p></div>
+      <div class="auth-intro"><span class="step-mark">赛事总控</span><h2>登录控制台</h2><p>请输入分配给你的总控账号密码。参赛车手使用的是另一组房间密码。</p></div>
       <form id="loginForm" class="auth-form compact-form">
         <label>总控密码<input id="adminPassword" type="password" autocomplete="current-password" required></label>
         <button type="submit" class="primary">登录总控</button>
@@ -61,9 +61,9 @@
     <div id="dashboard" class="dashboard hidden">
       <nav class="control-dock" aria-label="总控区域导航">
         <div class="dock-links">
-          <a href="#eventProjects">赛事项目</a><a href="#raceControl">比赛控制</a><a href="#liveTiming">实时排名</a><a href="#stewards">处罚调查</a><a href="#resultHistoryPanel">阶段赛果</a><a href="#roomConfiguration">高级设置</a><a href="#raceEvents">赛事记录</a>
+          <a href="#eventProjects" data-permission="manage">赛事项目</a><a href="#raceControl" data-permission="manage">比赛控制</a><a href="#liveTiming">实时排名</a><a href="#stewards">处罚调查</a><a href="#resultHistoryPanel">阶段赛果</a><a href="#roomConfiguration" data-permission="manage">高级设置</a><a href="#controlAccess" data-permission="superAdmin">角色权限</a><a href="#raceEvents">赛事记录</a>
         </div>
-        <button id="logoutButton" class="quiet dock-logout">退出总控</button>
+        <div class="dock-account"><span id="controlPrincipalName">总控账号</span><small id="controlPrincipalRole">—</small></div><button id="logoutButton" class="quiet dock-logout">退出总控</button>
       </nav>
 
       <section id="raceBanner" class="race-banner hidden" aria-live="polite"><span id="bannerKind" class="banner-kind">INFO</span><strong id="bannerTitle"></strong><span id="bannerDetail"></span></section>
@@ -75,7 +75,7 @@
         <article class="panel summary-card fastest-card"><p class="label">本场最快圈</p><strong id="fastestValue">—</strong><span id="fastestDriver">尚无有效圈</span></article>
       </section>
 
-      <section id="eventProjects" class="panel event-project-panel">
+      <section id="eventProjects" class="panel event-project-panel" data-permission="manage">
         <div class="section-heading"><div><p class="eyebrow">EVENT PROJECTS</p><h2>赛事项目包</h2></div><span id="eventProjectCount" class="section-note">尚未创建赛事项目</span></div>
         <p class="muted compact">将赛事资料、当前房间规则、赛程、车队、赛道、Logo、阶段赛果与赛事记录保存为一个可复用项目，并可通过 .lfzevent 在两种服务端之间迁移。</p>
         <div class="event-project-workspace">
@@ -98,7 +98,7 @@
         <div id="eventProjectList" class="event-project-list"><div class="event-project-empty">尚未创建赛事项目</div></div>
       </section>
 
-      <section id="raceControl" class="command-grid">
+      <section id="raceControl" class="command-grid" data-permission="manage">
         <article class="panel controls session-flow primary-command-panel">
           <div class="section-heading"><div><p class="eyebrow">SESSION CONTROL</p><h2>比赛流程</h2></div><span class="section-note">按实际比赛顺序排列</span></div>
           <div class="button-grid session-buttons">
@@ -169,7 +169,7 @@
         <div id="resultHistoryRows" class="result-history-list"><div class="result-history-empty">尚无可回看的阶段赛果</div></div>
       </section>
 
-      <details id="roomConfiguration" class="panel workspace-panel">
+      <details id="roomConfiguration" class="panel workspace-panel" data-permission="manage">
         <summary class="workspace-summary"><span class="workspace-icon">SET</span><span><small>ROOM CONFIGURATION</small><strong>房间、赛道与自动化设置</strong></span><span id="settingsSaved" class="save-state">按需展开</span></summary>
         <article class="controls room-settings workspace-body">
           <section class="rule-template-panel">
@@ -213,6 +213,19 @@
         </article>
       </details>
 
+      <section id="controlAccess" class="panel control-access-panel" data-permission="superAdmin">
+        <div class="section-heading"><div><p class="eyebrow">CONTROL ACCESS</p><h2>总控角色权限</h2></div><span id="controlAccountCount" class="section-note">正在读取账号</span></div>
+        <p class="muted compact">超管拥有全部权限；管理员不能管理总控账号；裁判只能查看赛事并处理判罚和调查。每位用户应使用独立密码。</p>
+        <form id="controlAccountForm" class="control-account-create">
+          <label>账号名称<input id="controlAccountName" maxlength="48" placeholder="例如：赛事主管" required></label>
+          <label>角色<select id="controlAccountRole"><option value="administrator">管理员</option><option value="steward">裁判</option><option value="superAdmin">超管</option></select></label>
+          <label>独立密码<input id="controlAccountPassword" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
+          <button id="createControlAccount" type="submit" class="primary">添加账号</button>
+        </form>
+        <p id="controlAccountStatus" class="control-account-status" aria-live="polite"></p>
+        <div id="controlAccountList" class="control-account-list"></div>
+      </section>
+
       <section id="raceEvents" class="panel event-panel">
         <div class="section-heading"><div><p class="eyebrow">RACE LOG</p><h2>赛事事件</h2></div><span class="section-note">最新事件在最上方</span></div>
         <div class="event-list" id="eventRows"><div class="event-empty">尚无赛事事件</div></div>
@@ -239,7 +252,7 @@
       <p class="collision-replay-disclaimer">这是各客户端上报遥测形成的轨迹证据，不是游戏画面，也不自动认定事故责任。</p>
     </section>
   </div>
-  <script src="/i18n.js?v=20260828-3" defer></script>
-  <script src="/app.js?v=20260828-3" defer></script>
+  <script src="/i18n.js?v=20260828-4" defer></script>
+  <script src="/app.js?v=20260828-4" defer></script>
 </body>
 </html>

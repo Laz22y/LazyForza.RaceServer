@@ -19,6 +19,12 @@ describe("Race Control localization", () => {
     expect(app).toContain("applyEventSchedule(eventProjectScheduleBeforeEdit)");
   });
 
+  it("lets role permissions control the account panel instead of hiding it permanently", () => {
+    const index = readFileSync(publicUrl("index.html"), "utf8");
+    expect(index).toContain('id="controlAccess" class="panel control-access-panel" data-permission="superAdmin"');
+    expect(index).not.toContain('id="controlAccess" class="panel control-access-panel hidden"');
+  });
+
   it("loads localization before the application and packages every referenced asset", () => {
     const index = readFileSync(publicUrl("index.html"), "utf8");
     expect(index.indexOf('/i18n.js')).toBeGreaterThan(0);
@@ -36,6 +42,8 @@ describe("Race Control localization", () => {
     expect(packageScript).toContain("'tests/rule-templates.test.ts'");
     expect(packageScript).toContain("'src/event-projects.ts'");
     expect(packageScript).toContain("'tests/event-projects.test.ts'");
+    expect(packageScript).toContain("'src/control-access.ts'");
+    expect(packageScript).toContain("'tests/control-access.test.ts'");
   });
 
   it("translates every fixed Chinese Web label and JavaScript literal", () => {

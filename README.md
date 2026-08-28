@@ -20,6 +20,7 @@ LazyForza 地产赛事的独立服务端。支持原生 ASP.NET 自托管和 Clo
 - 可创建、更新、复制、启用、完成和归档的赛事项目；`.lfzevent` 项目包可携带房间规则、赛程、车队、赛道、Logo、阶段赛果与赛事记录，在原生和 Cloudflare 服务端之间迁移；
 - 阶段赛果归档，返回大厅后仍可回看，并支持 PNG/CSV 导出；
 - 面向电脑宽屏和 Pad 触控的浏览器总控；
+- 可为多名总控分别创建账号：超管拥有全部权限，管理员可管理赛事但不能管理总控账号，裁判仅处理判罚与调查；
 - JSONL 审计日志和关键赛事状态持久化。
 
 服务端不读取游戏。车手位置、圈速、维修区状态和抓地趋势由各自的 LazyForza 客户端通过 FH6 官方 UDP 推导后上传。
@@ -46,7 +47,7 @@ chmod +x ./LazyForza.RaceServer.Web
 ./LazyForza.RaceServer.Web
 ```
 
-默认监听 `http://0.0.0.0:24876`。首次打开网页时设置房间密码、总控密码和赛事基础规则。房间密码没有最少位数限制；总控密码需 8–128 个字符，且不能与房间密码相同。
+默认监听 `http://0.0.0.0:24876`。首次打开网页时设置房间密码、初始超管密码和赛事基础规则，不要求同时设置其他角色。超管登录后可按需创建多个超管、管理员或裁判账号，同一角色可有多个独立名称和密码。房间密码没有最少位数限制；总控账号密码需 8–128 个字符，且不能与房间密码或其他总控账号密码相同。
 
 公网部署应由 Caddy、Nginx 或同类反向代理终止 TLS，让客户端连接 `wss://`。不要直接暴露明文 `ws://`。
 
@@ -133,6 +134,7 @@ Version 0.4.3 adds a complete Chinese and English Race Control interface, isolat
 - reusable event projects with create, update, copy, activate, complete and archive workflows; `.lfzevent` packages carry room rules, schedules, teams, track, logo, session results and race logs between native and Cloudflare servers;
 - archived session results that remain available in the lobby, with PNG and CSV export;
 - browser Race Control designed for desktop widescreens and touch tablets;
+- separate Race Control accounts for multiple users: super admins have full access, administrators manage the race but not accounts, and stewards handle penalties and investigations only;
 - JSONL audit logs and persistent critical race state.
 
 The server does not read the game. Each LazyForza client derives local position, lap, pit and grip information from official FH6 UDP data and reports the required race data.
@@ -159,7 +161,7 @@ chmod +x ./LazyForza.RaceServer.Web
 ./LazyForza.RaceServer.Web
 ```
 
-The server listens on `http://0.0.0.0:24876` by default. On first launch, set the room password, Race Control password and base rules. The Race Control password must contain 8–128 characters and must differ from the room password.
+The server listens on `http://0.0.0.0:24876` by default. On first launch, set the room password, initial super-admin password and base rules; the other roles are optional. A super admin can later create multiple named super-admin, administrator or steward accounts, including several users with the same role. Each Race Control password must contain 8–128 characters and must differ from the room password and every other Race Control password.
 
 For public hosting, terminate TLS through Caddy, Nginx or a similar reverse proxy and connect clients over `wss://`. Do not expose plain `ws://` publicly.
 

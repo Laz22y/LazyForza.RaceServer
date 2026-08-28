@@ -12,7 +12,7 @@
 
 实现范围：
 
-- 比赛密码、总控密码、显示名、主题色、可选车队和断线恢复；
+- 比赛密码、可多用户使用的超管/管理员/裁判总控账号、显示名、主题色、可选车队和断线恢复；
 - 由总控选择开启的 30 秒断线计圈恢复，补交事件支持确认和去重；
 - 1–3 节练习赛、每节默认 60 分钟或由总控逐节设置、独立圈速排名和最后一圈收尾；
 - 可保存、覆盖、应用和删除的赛事规则模板，赛事名称、赛道与车队资料保持独立；
@@ -37,7 +37,7 @@
 
 Cloudflare 会把这个公开模板复制到你的 GitHub 或 GitLab 账号，自动创建 Durable Object 绑定并配置后续提交的构建部署。`cloudflare` 子目录已包含 Worker、依赖锁文件和控制面板静态资源，不依赖仓库上级目录。
 
-部署完成后直接打开 Cloudflare 分配的域名。网页第一次打开只需要设置密码和房间基础规则，不要求填写赛道文件信息；房间密码没有最少位数限制，总控密码仍需 8–128 个字符，密码只以加盐摘要保存在 Durable Object 中。初始化完成后，到总控页面上传 LazyForza 导出的 `.lfzestate`，服务端会自动识别并填写赛道名称、标识、地图修订和稳定特征值。完成设置后，把域名与房间密码发给车手，总控密码只由赛事管理员保留。
+部署完成后直接打开 Cloudflare 分配的域名。网页第一次打开只需要设置房间密码、初始超管密码和房间基础规则，不要求同时设置管理员、裁判或赛道文件信息。超管之后可按需创建多个独立账号；管理员可管理赛事但不能管理总控账号，裁判仅处理判罚与调查。房间密码没有最少位数限制，总控账号密码仍需 8–128 个字符，密码只以加盐摘要保存在 Durable Object 中。初始化完成后，到总控页面上传 LazyForza 导出的 `.lfzestate`，服务端会自动识别并填写赛道名称、标识、地图修订和稳定特征值。完成设置后，把域名与房间密码发给车手，总控密码只交给对应工作人员。
 
 ## PowerShell 部署
 
@@ -98,7 +98,7 @@ RaceServer `0.4.3` is recommended with LazyForza `1.5.0` and remains compatible 
 
 The Worker uses one Durable Object race room named `main`, with 1–12 drivers and up to 12 read-only observers. It supports:
 
-- room and Race Control passwords, display names, colors, teams and reconnect recovery;
+- room passwords, named super-admin, administrator and steward accounts for multiple Race Control users, display names, colors, teams and reconnect recovery;
 - reusable race-rule templates that keep event, track and team details separate;
 - reusable event projects with `.lfzevent` import and export for room rules, schedules, teams, track, logo, session results and race logs;
 - one to three practice and qualifying sessions, out laps, formation laps, five red lights, races and red flags;
@@ -113,7 +113,7 @@ Client telemetry defaults to 10 Hz and room snapshots are broadcast at no more t
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Laz22y/LazyForza.RaceServer/tree/main/cloudflare)
 
-Cloudflare copies this public template to your GitHub or GitLab account, creates the Durable Object binding and configures deployment from later commits. After deployment, open the Worker domain, complete first-time setup and upload the matching `.lfzestate` package from Race Control.
+Cloudflare copies this public template to your GitHub or GitLab account, creates the Durable Object binding and configures deployment from later commits. After deployment, open the Worker domain and create the initial super-admin account; other roles are optional and can be added later. Super admins have full access, administrators manage the race but not Race Control accounts, and stewards handle penalties and investigations only. Then upload the matching `.lfzestate` package from Race Control.
 
 ### PowerShell deployment
 

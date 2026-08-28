@@ -52,7 +52,7 @@ builder.Services.AddSingleton<RaceRuleTemplateStore>();
 builder.Services.AddSingleton<RaceEventProjectStore>();
 builder.Services.AddSingleton<RaceBroadcastService>();
 builder.Services.AddSingleton<RaceWebSocketHandler>();
-builder.Services.AddSingleton(new AdminSessionStore(configurationStore.AdminPasswordMatches));
+builder.Services.AddSingleton(new AdminSessionStore(configurationStore.AuthenticateControlAccount));
 builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<RaceBroadcastService>());
 builder.Services.AddHostedService<RaceClockService>();
 builder.Services.AddHostedService<RaceEventProjectSyncService>();
@@ -69,6 +69,31 @@ app.Use(async (context, next) =>
 app.UseDefaultFiles();
 app.UseStaticFiles();
 app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(20) });
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path.Value ?? string.Empty;
+    if (path.StartsWith("/api/admin/", StringComparison.OrdinalIgnoreCase) &&
+        !path.Equals("/api/admin/login", StringComparison.OrdinalIgnoreCase) &&
+        !path.Equals("/api/admin/logout", StringComparison.OrdinalIgnoreCase))
+    {
+        var sessions = context.RequestServices.GetRequiredService<AdminSessionStore>();
+        context.Request.Cookies.TryGetValue(AdminSessionStore.CookieName, out var token);
+        if (!sessions.TryGetPrincipal(token, out var principal) || principal is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsJsonAsync(new { error = "总控登录已过期。" });
+            return;
+        }
+        var permission = RaceControlAccess.RequiredPermission(context.Request.Method, path);
+        if (!RaceControlAccess.Allows(principal.Role, permission))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(new { error = "当前总控角色没有执行此操作的权限。" });
+            return;
+        }
+    }
+    await next();
+});
 
 app.MapGet("/health", (RaceCoordinator coordinator, RaceWebSocketRegistry sockets) => Results.Ok(new
 {
@@ -183,8 +208,9 @@ app.MapPost("/api/setup", (
 
 app.MapPost("/api/admin/login", (RaceAdminLoginRequest request, HttpContext context, AdminSessionStore sessions) =>
 {
-    if (!sessions.PasswordMatches(request.Password)) return Results.Json(new { error = "总控密码不正确。" }, statusCode: 401);
-    var token = sessions.Create();
+    var principal = sessions.Authenticate(request.Password);
+    if (principal is null) return Results.Json(new { error = "总控密码不正确。" }, statusCode: 401);
+    var token = sessions.Create(principal);
     context.Response.Cookies.Append(AdminSessionStore.CookieName, token, new CookieOptions
     {
         HttpOnly = true,
@@ -193,7 +219,7 @@ app.MapPost("/api/admin/login", (RaceAdminLoginRequest request, HttpContext cont
         MaxAge = TimeSpan.FromHours(12),
         Path = "/"
     });
-    return Results.Ok(new { serverName = serverOptions.ServerName });
+    return Results.Ok(new { serverName = serverOptions.ServerName, principal });
 });
 
 app.MapPost("/api/admin/logout", (HttpContext context, AdminSessionStore sessions) =>
@@ -202,6 +228,60 @@ app.MapPost("/api/admin/logout", (HttpContext context, AdminSessionStore session
     sessions.Revoke(token);
     context.Response.Cookies.Delete(AdminSessionStore.CookieName);
     return Results.Ok();
+});
+
+app.MapGet("/api/admin/me", (HttpContext context, AdminSessionStore sessions) =>
+{
+    context.Request.Cookies.TryGetValue(AdminSessionStore.CookieName, out var token);
+    return sessions.TryGetPrincipal(token, out var principal) && principal is not null
+        ? Results.Ok(new { principal })
+        : Results.Unauthorized();
+});
+
+app.MapGet("/api/admin/control-accounts", (
+    RaceServerConfigurationStore settings) => Results.Ok(new
+    {
+        accounts = settings.ListControlAccounts(),
+        maximumAccounts = RaceServerConfigurationStore.MaximumControlAccounts
+    }));
+
+app.MapPost("/api/admin/control-accounts", (
+    RaceControlAccountCreateRequest request,
+    RaceServerConfigurationStore settings) =>
+{
+    try { return Results.Ok(new { account = settings.CreateControlAccount(request) }); }
+    catch (InvalidDataException exception) { return Results.BadRequest(new { error = exception.Message }); }
+});
+
+app.MapPut("/api/admin/control-accounts/{accountId:guid}", (
+    Guid accountId,
+    RaceControlAccountUpdateRequest request,
+    RaceServerConfigurationStore settings,
+    AdminSessionStore sessions) =>
+{
+    try
+    {
+        var account = settings.UpdateControlAccount(accountId, request);
+        sessions.RevokeAccount(accountId);
+        return Results.Ok(new { account });
+    }
+    catch (KeyNotFoundException) { return Results.NotFound(new { error = "总控账号不存在。" }); }
+    catch (InvalidDataException exception) { return Results.BadRequest(new { error = exception.Message }); }
+});
+
+app.MapDelete("/api/admin/control-accounts/{accountId:guid}", (
+    Guid accountId,
+    RaceServerConfigurationStore settings,
+    AdminSessionStore sessions) =>
+{
+    try
+    {
+        if (!settings.DeleteControlAccount(accountId))
+            return Results.NotFound(new { error = "总控账号不存在。" });
+        sessions.RevokeAccount(accountId);
+        return Results.Ok();
+    }
+    catch (InvalidDataException exception) { return Results.BadRequest(new { error = exception.Message }); }
 });
 
 app.MapGet("/api/admin/state", (HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
@@ -694,7 +774,8 @@ if (!configurationStore.IsConfigured)
 app.Run();
 
 static bool Authorized(HttpContext context, AdminSessionStore sessions) =>
-    context.Request.Cookies.TryGetValue(AdminSessionStore.CookieName, out var token) && sessions.IsValid(token);
+    context.Request.Cookies.TryGetValue(AdminSessionStore.CookieName, out var token) &&
+    sessions.TryGetPrincipal(token, out _);
 
 static IResult ChangeProjectStatus(
     Guid projectId,
