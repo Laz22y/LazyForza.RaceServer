@@ -194,10 +194,10 @@ public sealed class RaceCoordinatorTests
         var firstBannerId = coordinator.Snapshot().Banner?.Id;
 
         coordinator.UpdateTelemetry(other.ParticipantId,
-            CollisionTelemetry(3, 100.8, 9, 2, 4), started.AddSeconds(3));
+            CollisionTelemetry(3, 100.8, 9, 2, 4), started.AddSeconds(2));
         coordinator.UpdateTelemetry(reporter.ParticipantId,
             CollisionTelemetry(4, 100, 21, 2, 6) with { ImpactAgeMilliseconds = 50 },
-            started.AddMilliseconds(3_050));
+            started.AddMilliseconds(2_050));
 
         var grouped = coordinator.Snapshot().Investigations!.Single();
         Assert.AreEqual(first.Id, grouped.Id);
@@ -213,13 +213,101 @@ public sealed class RaceCoordinatorTests
             "归并后的连续接触不得重复写入新的调查事件。");
 
         coordinator.UpdateTelemetry(other.ParticipantId,
-            CollisionTelemetry(5, 101, 10, 3, 4), started.AddSeconds(16));
+            CollisionTelemetry(5, 101, 10, 3, 4), started.AddMilliseconds(3_200));
         coordinator.UpdateTelemetry(reporter.ParticipantId,
             CollisionTelemetry(6, 100, 20, 3, 5) with { ImpactAgeMilliseconds = 50 },
-            started.AddMilliseconds(16_050));
+            started.AddMilliseconds(3_250));
         Assert.HasCount(2, coordinator.Snapshot().Investigations!,
-            "超过 12 秒分组窗口后的再次接触应建立新调查。");
+            "超过首次检测去重窗口后的再次接触应建立新调查，不能按相邻间隔连锁合并。");
         Assert.AreEqual(2, coordinator.Events().Count(item => item.Type == "collisionInvestigationOpened"));
+    }
+
+    [TestMethod]
+    public void CollisionReplayCoversFirstContactMinusThreeSecondsThroughLastContactPlusThreeSeconds()
+    {
+        var coordinator = CreateCoordinator();
+        var reporter = Join(coordinator, 1).Accepted!;
+        var other = Join(coordinator, 2).Accepted!;
+        var settings = coordinator.RoomSettings();
+        Assert.IsTrue(coordinator.ApplyRoomSettings(new RaceAdminRoomSettingsCommand(
+            settings.SessionName, settings.TotalRaceLaps, settings.SectorCount, settings.AutomaticYellowEnabled,
+            settings.SlowSpeedKph, settings.SlowDurationSeconds, settings.SevereLateralOffsetMeters,
+            settings.RecoveryDurationSeconds, settings.AllowTeams, settings.TrackName, settings.TrackId,
+            settings.TrackRevision, settings.TrackPackageHash, settings.TeamCount, settings.DriversPerTeam,
+            settings.Teams, settings.TrackLimitMode, 0, true)).IsAccepted);
+        var started = DateTimeOffset.Parse("2026-08-20T11:30:00Z");
+        Assert.IsTrue(coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Race, null, 10, null, null), started).IsAccepted);
+
+        long sequence = 1;
+        for (var milliseconds = 0; milliseconds < 3_000; milliseconds += 50)
+        {
+            var progress = milliseconds / 3_000d;
+            coordinator.UpdateTelemetry(reporter.ParticipantId,
+                CollisionTelemetry(sequence++, 94 + (6 * progress), 20, 0, 0),
+                started.AddMilliseconds(milliseconds));
+            coordinator.UpdateTelemetry(other.ParticipantId,
+                CollisionTelemetry(sequence++, 101.2, 10, 0, 0),
+                started.AddMilliseconds(milliseconds));
+        }
+
+        coordinator.UpdateTelemetry(other.ParticipantId,
+            CollisionTelemetry(sequence++, 100.8, 10, 0, 0), started.AddSeconds(3));
+        coordinator.UpdateTelemetry(reporter.ParticipantId,
+            CollisionTelemetry(sequence++, 100, 20, 1, 5) with { ImpactAgeMilliseconds = 50 },
+            started.AddMilliseconds(3_050));
+        var investigation = coordinator.Snapshot().Investigations!.Single();
+
+        for (var milliseconds = 3_250; milliseconds < 4_000; milliseconds += 50)
+        {
+            coordinator.UpdateTelemetry(reporter.ParticipantId,
+                CollisionTelemetry(sequence++, 100 + ((milliseconds - 3_000) / 1_000d), 20, 0, 0),
+                started.AddMilliseconds(milliseconds));
+            coordinator.UpdateTelemetry(other.ParticipantId,
+                CollisionTelemetry(sequence++, 100.8 + ((milliseconds - 3_000) / 1_000d), 10, 0, 0),
+                started.AddMilliseconds(milliseconds));
+        }
+
+        coordinator.UpdateTelemetry(other.ParticipantId,
+            CollisionTelemetry(sequence++, 101.8, 10, 2, 4), started.AddSeconds(4));
+        coordinator.UpdateTelemetry(reporter.ParticipantId,
+            CollisionTelemetry(sequence++, 101, 20, 2, 6) with { ImpactAgeMilliseconds = 50 },
+            started.AddMilliseconds(4_050));
+
+        var recording = coordinator.CollisionReplay(investigation.Id, started.AddMilliseconds(4_400));
+        Assert.IsNotNull(recording);
+        Assert.IsFalse(recording.IsPostWindowComplete);
+        Assert.IsFalse(recording.IsFinalized);
+
+        for (var milliseconds = 4_250; milliseconds <= 7_000; milliseconds += 50)
+        {
+            coordinator.UpdateTelemetry(reporter.ParticipantId,
+                CollisionTelemetry(sequence++, 101 + ((milliseconds - 4_000) / 1_000d), 20, 0, 0),
+                started.AddMilliseconds(milliseconds));
+            coordinator.UpdateTelemetry(other.ParticipantId,
+                CollisionTelemetry(sequence++, 101.8 + ((milliseconds - 4_000) / 1_000d), 10, 0, 0),
+                started.AddMilliseconds(milliseconds));
+        }
+
+        var replay = coordinator.CollisionReplay(investigation.Id, started.AddSeconds(7));
+        Assert.IsNotNull(replay);
+        Assert.AreEqual(started, replay.StartsAt);
+        Assert.AreEqual(started.AddSeconds(7), replay.EndsAt);
+        Assert.AreEqual(replay.EndsAt, replay.AvailableUntil);
+        Assert.IsTrue(replay.IsPostWindowComplete);
+        Assert.IsTrue(replay.IsFinalized);
+        CollectionAssert.AreEqual(
+            new[] { started.AddSeconds(3), started.AddSeconds(4) },
+            replay.IncidentTimes.ToArray());
+        Assert.AreEqual(started, replay.ReporterSamples.First().At);
+        Assert.AreEqual(started, replay.OtherSamples.First().At);
+        Assert.IsTrue(replay.ReporterSamples.Last().At >= replay.EndsAt.AddMilliseconds(-100));
+        Assert.IsTrue(replay.OtherSamples.Last().At >= replay.EndsAt.AddMilliseconds(-100));
+        Assert.IsTrue(replay.ReporterSamples.Count is >= 60 and <= 75,
+            "高刷新率遥测应约按 10 Hz 保存回放证据。");
+        Assert.IsTrue(replay.OtherSamples.Count is >= 60 and <= 75,
+            "高刷新率遥测应约按 10 Hz 保存回放证据。");
+        Assert.IsTrue(coordinator.CollisionReplay(investigation.Id, started.AddSeconds(7.1))!.IsFinalized);
     }
 
     [TestMethod]

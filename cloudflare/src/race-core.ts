@@ -23,6 +23,8 @@ import {
   type InvestigationCommand,
   type InvestigationSnapshot,
   type CollisionEvidenceSnapshot,
+  type CollisionReplaySampleSnapshot,
+  type CollisionReplaySnapshot,
   type ReadyUpdate,
   type RoomSettings,
   type SessionCommand,
@@ -198,6 +200,21 @@ interface CollisionPositionSample {
   worldVelocityZ: number;
 }
 
+interface StoredCollisionReplay {
+  investigationId: string;
+  firstIncidentAt: string;
+  lastIncidentAt: string;
+  reporterParticipantId: string;
+  otherParticipantId: string;
+  reporterName: string;
+  otherName: string;
+  reporterThemeColor: string;
+  otherThemeColor: string;
+  incidentTimes: string[];
+  reporterSamples: CollisionReplaySampleSnapshot[];
+  otherSamples: CollisionReplaySampleSnapshot[];
+}
+
 export interface StoredRaceState {
   revision: number;
   sessionName: string;
@@ -229,6 +246,7 @@ export interface StoredRaceState {
   observers: ObserverState[];
   penalties: PenaltySnapshot[];
   investigations?: InvestigationSnapshot[];
+  collisionReplays?: Record<string, StoredCollisionReplay>;
   receivedLapEvents: string[];
   receivedPitServiceEvents?: string[];
   sectorCount: number;
@@ -314,15 +332,72 @@ function compareOptionalTimes(left?: number | null, right?: number | null): numb
   return left! - right!;
 }
 
+function normalizeCollisionReplaySamples(
+  source: CollisionReplaySampleSnapshot[] | undefined): CollisionReplaySampleSnapshot[] {
+  if (!Array.isArray(source)) return [];
+  return source.slice(-20_000).flatMap(sample => {
+    const at = cleanText(sample?.at, 80);
+    if (!at || !Number.isFinite(Date.parse(at))) return [];
+    return [{
+      at,
+      worldX: clamp(sample.worldX, -10_000_000, 10_000_000),
+      worldY: clamp(sample.worldY, -10_000_000, 10_000_000),
+      worldZ: clamp(sample.worldZ, -10_000_000, 10_000_000),
+      velocityX: clamp(sample.velocityX, -500, 500),
+      velocityY: clamp(sample.velocityY, -500, 500),
+      velocityZ: clamp(sample.velocityZ, -500, 500)
+    }];
+  }).sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+}
+
+function normalizeCollisionReplays(
+  source: Record<string, StoredCollisionReplay> | undefined): Record<string, StoredCollisionReplay> {
+  if (!source || typeof source !== "object") return {};
+  const result: Record<string, StoredCollisionReplay> = {};
+  for (const [rawId, replay] of Object.entries(source).slice(-24)) {
+    const id = cleanText(rawId, 80), firstIncidentAt = cleanText(replay?.firstIncidentAt, 80),
+      lastIncidentAt = cleanText(replay?.lastIncidentAt, 80);
+    if (!id || !firstIncidentAt || !lastIncidentAt ||
+        !Number.isFinite(Date.parse(firstIncidentAt)) || !Number.isFinite(Date.parse(lastIncidentAt))) continue;
+    const reporterId = cleanText(replay.reporterParticipantId, 80),
+      otherId = cleanText(replay.otherParticipantId, 80);
+    if (!reporterId || !otherId) continue;
+    const incidentTimes = Array.isArray(replay.incidentTimes)
+      ? replay.incidentTimes.map(at => cleanText(at, 80))
+        .filter((at): at is string => Boolean(at) && Number.isFinite(Date.parse(at!)))
+        .slice(0, 99)
+        .sort((left, right) => Date.parse(left) - Date.parse(right))
+      : [firstIncidentAt];
+    result[id] = {
+      investigationId: id,
+      firstIncidentAt,
+      lastIncidentAt,
+      reporterParticipantId: reporterId,
+      otherParticipantId: otherId,
+      reporterName: cleanText(replay.reporterName, 20) ?? "车手 A",
+      otherName: cleanText(replay.otherName, 20) ?? "车手 B",
+      reporterThemeColor: isThemeColor(replay.reporterThemeColor) ? replay.reporterThemeColor.toUpperCase() : "#42D7E8",
+      otherThemeColor: isThemeColor(replay.otherThemeColor) ? replay.otherThemeColor.toUpperCase() : "#FF4057",
+      incidentTimes: incidentTimes.length > 0 ? incidentTimes : [firstIncidentAt],
+      reporterSamples: normalizeCollisionReplaySamples(replay.reporterSamples),
+      otherSamples: normalizeCollisionReplaySamples(replay.otherSamples)
+    };
+  }
+  return result;
+}
+
 export class RaceCore {
   private static readonly maximumLiveGapSamples = 3_600;
   private static readonly liveGapHistoryLaps = 1.25;
   private static readonly liveGapProgressJitter = .002;
   private static readonly maximumLiveGapDistanceLaps = .999;
-  private static readonly collisionPairCooldownMilliseconds = 12_000;
-  private static readonly collisionTrajectoryLifetimeMilliseconds = 2_000;
+  // De-duplicates repeated detector reports for one contact burst; it is not an accident-grouping window.
+  private static readonly collisionDetectionDeduplicationWindowMilliseconds = 1_500;
+  private static readonly collisionTrajectoryLifetimeMilliseconds = 4_000;
   private static readonly collisionTrajectoryMatchToleranceMilliseconds = 650;
   private static readonly collisionApproachLookbackMilliseconds = 280;
+  private static readonly collisionReplayWindowMilliseconds = 3_000;
+  private static readonly collisionReplaySampleIntervalMilliseconds = 100;
   private static readonly minimumCollisionImpactMagnitudeMps = 2.3;
   private static readonly strongCollisionImpactMagnitudeMps = 2.8;
   private static readonly minimumCollisionRelativeSpeedMps = 1.5;
@@ -333,7 +408,7 @@ export class RaceCore {
   private readonly maximumParticipants: number;
   private readonly liveProgressSamples = new Map<string, RaceProgressSample[]>();
   private readonly liveProgressTrackers = new Map<string, RaceProgressTracker>();
-  private readonly collisionPairCooldowns = new Map<string, number>();
+  private readonly collisionDetectionDeduplicationUntil = new Map<string, number>();
   private readonly collisionTrajectories = new Map<string, CollisionPositionSample[]>();
   private state: StoredRaceState;
 
@@ -371,6 +446,7 @@ export class RaceCore {
       observers: [],
       penalties: [],
       investigations: [],
+      collisionReplays: {},
       receivedLapEvents: []
       ,receivedPitServiceEvents: []
       ,activeResultStageId: null
@@ -401,6 +477,38 @@ export class RaceCore {
 
   serialize(): StoredRaceState {
     return structuredClone(this.state);
+  }
+
+  collisionReplay(investigationId: string, observedAt = new Date()): CollisionReplaySnapshot | null {
+    const replay = this.state.collisionReplays?.[investigationId];
+    if (!replay) return null;
+    const firstAt = Date.parse(replay.firstIncidentAt), lastAt = Date.parse(replay.lastIncidentAt);
+    if (!Number.isFinite(firstAt) || !Number.isFinite(lastAt)) return null;
+    const startsAt = firstAt - RaceCore.collisionReplayWindowMilliseconds;
+    const endsAt = lastAt + RaceCore.collisionReplayWindowMilliseconds;
+    const availableUntil = Math.min(endsAt, Math.max(startsAt, observedAt.getTime()));
+    const samplesUntil = (samples: CollisionReplaySampleSnapshot[]) => samples
+      .filter(sample => Date.parse(sample.at) <= availableUntil)
+      .map(sample => ({ ...sample }));
+    return {
+      investigationId: replay.investigationId,
+      startsAt: new Date(startsAt).toISOString(),
+      endsAt: new Date(endsAt).toISOString(),
+      availableUntil: new Date(availableUntil).toISOString(),
+      firstIncidentAt: replay.firstIncidentAt,
+      lastIncidentAt: replay.lastIncidentAt,
+      isPostWindowComplete: observedAt.getTime() >= endsAt,
+      isFinalized: observedAt.getTime() >= firstAt + RaceCore.collisionDetectionDeduplicationWindowMilliseconds,
+      reporterParticipantId: replay.reporterParticipantId,
+      otherParticipantId: replay.otherParticipantId,
+      reporterName: replay.reporterName,
+      otherName: replay.otherName,
+      reporterThemeColor: replay.reporterThemeColor,
+      otherThemeColor: replay.otherThemeColor,
+      incidentTimes: [...replay.incidentTimes],
+      reporterSamples: samplesUntil(replay.reporterSamples),
+      otherSamples: samplesUntil(replay.otherSamples)
+    };
   }
 
   events(limit = 250, afterSequence?: number): RaceEventSnapshot[] {
@@ -712,6 +820,7 @@ export class RaceCore {
     participant.velocityZ = clamp(update.velocityZ, -500, 500);
     participant.lastTelemetryReceivedAt = now.toISOString();
     this.recordCollisionPositionSample(participant, update, now);
+    this.recordCollisionReplaySample(participant, now);
     participant.isApproachingPit = update.isApproachingPit === true;
     participant.isOnPitRoute = update.isOnPitRoute === true;
     participant.currentSector = clampInteger(update.currentSector, 0, this.state.sectorCount - 1);
@@ -1072,7 +1181,7 @@ export class RaceCore {
         participant.lastImpactSmashableVelDiff = 0;
         participant.lastImpactSmashableMass = 0;
       }
-      this.collisionPairCooldowns.clear();
+      this.collisionDetectionDeduplicationUntil.clear();
       this.collisionTrajectories.clear();
     }
     this.recordEvent("collisionInvestigationSetting",
@@ -1783,6 +1892,7 @@ export class RaceCore {
           collisionEvidence: item.collisionEvidence ?? null
         }))
         : [],
+      collisionReplays: normalizeCollisionReplays(stored.collisionReplays),
       receivedLapEvents: Array.isArray(stored.receivedLapEvents) ? stored.receivedLapEvents.slice(-10_000) : []
       ,receivedPitServiceEvents: Array.isArray(stored.receivedPitServiceEvents)
         ? stored.receivedPitServiceEvents.slice(-10_000) : []
@@ -2072,13 +2182,13 @@ export class RaceCore {
       contactCount: 1,
       lastIncidentAt: incidentAt.toISOString()
     };
-    if (this.tryMergeCollisionInvestigation(pairKey, currentEvidence, lapNumber)) {
-      this.collisionPairCooldowns.set(pairKey, now.getTime() + RaceCore.collisionPairCooldownMilliseconds);
+    if (this.tryMergeCollisionInvestigation(pairKey, currentEvidence, lapNumber, now)) {
       return;
     }
     if ((this.state.investigations ?? []).filter(item => item.collisionEvidence).length >= 24 ||
-        (this.collisionPairCooldowns.get(pairKey) ?? 0) > now.getTime()) return;
-    this.collisionPairCooldowns.set(pairKey, now.getTime() + RaceCore.collisionPairCooldownMilliseconds);
+        (this.collisionDetectionDeduplicationUntil.get(pairKey) ?? 0) > now.getTime()) return;
+    this.collisionDetectionDeduplicationUntil.set(pairKey,
+      incidentAt.getTime() + RaceCore.collisionDetectionDeduplicationWindowMilliseconds);
     const investigation: InvestigationSnapshot = {
       id: crypto.randomUUID(), participantId: participant.id, offense: this.collisionOffense(currentEvidence),
       detectedAt: now.toISOString(), lapNumber, status: "pending",
@@ -2086,6 +2196,7 @@ export class RaceCore {
       collisionEvidence: currentEvidence
     };
     (this.state.investigations ??= []).push(investigation);
+    this.startCollisionReplay(investigation.id, participant, nearest, currentEvidence, now);
     this.state.banner = this.newBanner("information", "正在调查 · 疑似碰撞",
       `${participant.displayName} ↔ ${nearest.displayName} · 第 ${lapNumber} 圈`, null, 8_000, now);
     this.state.banner.isInvestigation = true;
@@ -2097,16 +2208,19 @@ export class RaceCore {
   private tryMergeCollisionInvestigation(
     pairKey: string,
     current: CollisionEvidenceSnapshot,
-    lapNumber: number): boolean {
+    lapNumber: number,
+    observedAt: Date): boolean {
     const investigations = this.state.investigations ?? [];
     for (let index = investigations.length - 1; index >= 0; index--) {
       const existing = investigations[index], previous = existing.collisionEvidence;
       if (existing.status !== "pending" || !previous ||
           [previous.reporterParticipantId, previous.otherParticipantId].sort().join(":") !== pairKey) continue;
       const previousLastAt = Date.parse(previous.lastIncidentAt ?? previous.incidentAt);
+      const previousFirstAt = Date.parse(previous.incidentAt);
       const currentAt = Date.parse(current.incidentAt);
-      if (!Number.isFinite(previousLastAt) || !Number.isFinite(currentAt) ||
-          Math.abs(currentAt - previousLastAt) > RaceCore.collisionPairCooldownMilliseconds) continue;
+      if (!Number.isFinite(previousLastAt) || !Number.isFinite(previousFirstAt) || !Number.isFinite(currentAt) ||
+          Math.abs(currentAt - previousFirstAt) >
+            RaceCore.collisionDetectionDeduplicationWindowMilliseconds) continue;
 
       const useCurrentGeometry = current.impactMagnitudeMps > previous.impactMagnitudeMps ||
         current.horizontalDistanceMeters < previous.horizontalDistanceMeters;
@@ -2135,6 +2249,7 @@ export class RaceCore {
         lapNumber: Math.min(existing.lapNumber, lapNumber),
         collisionEvidence: merged
       };
+      this.extendCollisionReplay(existing.id, current.incidentAt, observedAt);
       return true;
     }
     return false;
@@ -2153,7 +2268,7 @@ export class RaceCore {
   private recordCollisionPositionSample(participant: ParticipantState, update: TelemetryUpdate, now: Date): void {
     if (update.hasWorldPosition !== true) return;
     const samples = this.collisionTrajectories.get(participant.id) ?? [];
-    samples.push({
+    const sample: CollisionPositionSample = {
       at: now.getTime(),
       worldX: clamp(update.worldX, -10_000_000, 10_000_000),
       worldY: clamp(update.worldY, -10_000_000, 10_000_000),
@@ -2162,11 +2277,117 @@ export class RaceCore {
       worldVelocityX: clamp(update.worldVelocityX, -500, 500),
       worldVelocityY: clamp(update.worldVelocityY, -500, 500),
       worldVelocityZ: clamp(update.worldVelocityZ, -500, 500)
-    });
+    };
+    if (samples.length > 0 && sample.at - samples[samples.length - 1].at <
+        RaceCore.collisionReplaySampleIntervalMilliseconds) return;
+    samples.push(sample);
     const minimumAt = now.getTime() - RaceCore.collisionTrajectoryLifetimeMilliseconds;
     while (samples.length > 0 && samples[0].at < minimumAt) samples.shift();
-    if (samples.length > 32) samples.splice(0, samples.length - 32);
+    if (samples.length > 48) samples.splice(0, samples.length - 48);
     this.collisionTrajectories.set(participant.id, samples);
+  }
+
+  private startCollisionReplay(
+    investigationId: string,
+    reporter: ParticipantState,
+    other: ParticipantState,
+    evidence: CollisionEvidenceSnapshot,
+    observedAt: Date): void {
+    const replay: StoredCollisionReplay = {
+      investigationId,
+      firstIncidentAt: evidence.incidentAt,
+      lastIncidentAt: evidence.incidentAt,
+      reporterParticipantId: reporter.id,
+      otherParticipantId: other.id,
+      reporterName: reporter.displayName,
+      otherName: other.displayName,
+      reporterThemeColor: reporter.themeColor,
+      otherThemeColor: other.themeColor,
+      incidentTimes: [evidence.incidentAt],
+      reporterSamples: [],
+      otherSamples: []
+    };
+    this.mergeCollisionReplaySamples(replay, reporter.id, observedAt);
+    this.mergeCollisionReplaySamples(replay, other.id, observedAt);
+    (this.state.collisionReplays ??= {})[investigationId] = replay;
+  }
+
+  private extendCollisionReplay(investigationId: string, incidentAt: string, observedAt: Date): void {
+    const replay = this.state.collisionReplays?.[investigationId];
+    const incidentTime = Date.parse(incidentAt);
+    if (!replay || !Number.isFinite(incidentTime)) return;
+    if (!replay.incidentTimes.includes(incidentAt))
+      replay.incidentTimes.push(incidentAt);
+    replay.incidentTimes.sort((left, right) => Date.parse(left) - Date.parse(right));
+    if (incidentTime < Date.parse(replay.firstIncidentAt)) replay.firstIncidentAt = incidentAt;
+    if (incidentTime > Date.parse(replay.lastIncidentAt)) replay.lastIncidentAt = incidentAt;
+    this.mergeCollisionReplaySamples(replay, replay.reporterParticipantId, observedAt);
+    this.mergeCollisionReplaySamples(replay, replay.otherParticipantId, observedAt);
+  }
+
+  private recordCollisionReplaySample(participant: ParticipantState, now: Date): void {
+    const trajectory = this.collisionTrajectories.get(participant.id) ?? [];
+    const sample = trajectory.length > 0 ? trajectory[trajectory.length - 1] : null;
+    if (!sample) return;
+    for (const replay of Object.values(this.state.collisionReplays ?? {})) {
+      const lastAt = Date.parse(replay.lastIncidentAt);
+      const captureUntil = lastAt + Math.max(
+        RaceCore.collisionDetectionDeduplicationWindowMilliseconds,
+        RaceCore.collisionReplayWindowMilliseconds);
+      if (!Number.isFinite(lastAt) || now.getTime() > captureUntil ||
+          participant.id !== replay.reporterParticipantId && participant.id !== replay.otherParticipantId) continue;
+      this.addCollisionReplaySample(replay, participant.id, sample);
+    }
+  }
+
+  private mergeCollisionReplaySamples(
+    replay: StoredCollisionReplay,
+    participantId: string,
+    observedAt: Date): void {
+    for (const sample of this.collisionTrajectories.get(participantId) ?? []) {
+      if (sample.at > observedAt.getTime()) continue;
+      this.addCollisionReplaySample(replay, participantId, sample);
+    }
+  }
+
+  private addCollisionReplaySample(
+    replay: StoredCollisionReplay,
+    participantId: string,
+    sample: CollisionPositionSample): void {
+    const startsAt = Date.parse(replay.firstIncidentAt) - RaceCore.collisionReplayWindowMilliseconds;
+    const captureEndsAt = Date.parse(replay.lastIncidentAt) + Math.max(
+      RaceCore.collisionDetectionDeduplicationWindowMilliseconds,
+      RaceCore.collisionReplayWindowMilliseconds);
+    if (sample.at < startsAt || sample.at > captureEndsAt) return;
+    const target = participantId === replay.reporterParticipantId
+      ? replay.reporterSamples
+      : participantId === replay.otherParticipantId
+        ? replay.otherSamples
+        : null;
+    if (!target) return;
+    const snapshot: CollisionReplaySampleSnapshot = {
+      at: new Date(sample.at).toISOString(),
+      worldX: sample.worldX,
+      worldY: sample.worldY,
+      worldZ: sample.worldZ,
+      velocityX: sample.worldVelocityX,
+      velocityY: sample.worldVelocityY,
+      velocityZ: sample.worldVelocityZ
+    };
+    const lastAt = target.length > 0 ? Date.parse(target[target.length - 1].at) : Number.NEGATIVE_INFINITY;
+    if (sample.at > lastAt) {
+      if (sample.at - lastAt < RaceCore.collisionReplaySampleIntervalMilliseconds)
+        target[target.length - 1] = snapshot;
+      else
+        target.push(snapshot);
+    }
+    else if (sample.at === lastAt) target[target.length - 1] = snapshot;
+    else {
+      const index = target.findIndex(existing => Date.parse(existing.at) >= sample.at);
+      if (index < 0) target.push(snapshot);
+      else if (Date.parse(target[index].at) === sample.at) target[index] = snapshot;
+      else target.splice(index, 0, snapshot);
+    }
   }
 
   private closestCollisionPositionSample(participantId: string, target: number): CollisionPositionSample | null {
@@ -2943,6 +3164,7 @@ export class RaceCore {
     this.state.chequeredImminent = false;
     this.state.penalties = [];
     this.state.investigations = [];
+    this.state.collisionReplays = {};
     this.state.receivedLapEvents = [];
     this.state.receivedPitServiceEvents = [];
     this.state.startsAt = null;

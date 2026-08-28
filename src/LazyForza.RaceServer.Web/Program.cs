@@ -215,6 +215,17 @@ app.MapGet("/api/admin/events", (HttpContext context, AdminSessionStore sessions
 app.MapGet("/api/admin/results", (HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
     Authorized(context, sessions) ? Results.Ok(coordinator.Results()) : Results.Unauthorized());
 
+app.MapGet("/api/admin/investigations/{investigationId:guid}/replay", (
+    Guid investigationId,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceCoordinator coordinator) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    var replay = coordinator.CollisionReplay(investigationId);
+    return replay is null ? Results.NotFound() : Results.Ok(replay);
+});
+
 app.MapGet("/api/admin/track-package", (HttpContext context, AdminSessionStore sessions, HostedTrackPackageStore trackPackages) =>
     Authorized(context, sessions) ? Results.Ok(new { package = trackPackages.Current, maximumBytes = HostedTrackPackageStore.MaximumPackageBytes }) : Results.Unauthorized());
 

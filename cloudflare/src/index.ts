@@ -179,6 +179,11 @@ export class RaceRoom {
     }
     if (url.pathname === "/api/admin/results" && request.method === "GET")
       return json(this.core.results());
+    const collisionReplayRoute = url.pathname.match(/^\/api\/admin\/investigations\/([^/]+)\/replay$/);
+    if (collisionReplayRoute && request.method === "GET") {
+      const replay = this.core.collisionReplay(decodeURIComponent(collisionReplayRoute[1]));
+      return replay ? json(replay) : json({ error: "碰撞回放证据不存在。" }, 404);
+    }
     if (url.pathname === "/api/admin/track-package" && request.method === "GET")
       return json({ package: this.hostedTrackPackage, maximumBytes: maximumHostedTrackPackageBytes });
     if (url.pathname === "/api/admin/track-package" && request.method === "POST")

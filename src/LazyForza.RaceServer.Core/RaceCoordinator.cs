@@ -39,10 +39,13 @@ public sealed class RaceCoordinator
     private const int MaximumCollisionInvestigationsPerSession = 24;
     private static readonly TimeSpan CollisionEvidenceLifetime = TimeSpan.FromMilliseconds(1_000);
     private static readonly TimeSpan CollisionPeerFreshness = TimeSpan.FromMilliseconds(750);
-    private static readonly TimeSpan CollisionTrajectoryLifetime = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan CollisionTrajectoryLifetime = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan CollisionTrajectoryMatchTolerance = TimeSpan.FromMilliseconds(650);
     private static readonly TimeSpan CollisionApproachLookback = TimeSpan.FromMilliseconds(280);
-    private static readonly TimeSpan CollisionPairCooldown = TimeSpan.FromSeconds(12);
+    // De-duplicates repeated detector reports for one contact burst; it is not an accident-grouping window.
+    private static readonly TimeSpan CollisionDetectionDeduplicationWindow = TimeSpan.FromSeconds(1.5);
+    private static readonly TimeSpan CollisionReplayWindow = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan CollisionReplaySampleInterval = TimeSpan.FromMilliseconds(100);
     private static readonly TimeSpan MinimumTelemetrySnapshotInterval = TimeSpan.FromMilliseconds(100);
     private static readonly TimeSpan DisconnectedLapRecoveryGrace = TimeSpan.FromSeconds(30);
     private const int ShortcutDistanceGainFlag = 1;
@@ -57,6 +60,7 @@ public sealed class RaceCoordinator
     private readonly List<ObserverState> observers = [];
     private readonly List<RacePenaltySnapshot> penalties = [];
     private readonly List<RaceInvestigationSnapshot> investigations = [];
+    private readonly Dictionary<Guid, CollisionReplayState> collisionReplays = [];
     private readonly List<RaceEventSnapshot> events = [];
     private readonly List<RaceStageResultSnapshot> resultHistory = [];
     private readonly HashSet<Guid> receivedLapEvents = [];
@@ -197,6 +201,18 @@ public sealed class RaceCoordinator
     {
         lock (sync)
             return BuildSnapshot(observedAt ?? DateTimeOffset.UtcNow);
+    }
+
+    public RaceCollisionReplaySnapshot? CollisionReplay(
+        Guid investigationId,
+        DateTimeOffset? observedAt = null)
+    {
+        lock (sync)
+        {
+            return collisionReplays.TryGetValue(investigationId, out var replay)
+                ? replay.Snapshot(observedAt ?? DateTimeOffset.UtcNow)
+                : null;
+        }
     }
 
     public RaceJoinResult TryJoin(RaceLoginRequest request)
@@ -509,6 +525,7 @@ public sealed class RaceCoordinator
             participant.VelocityZ = normalized.VelocityZ;
             participant.LastTelemetryReceivedAt = now;
             RecordCollisionPositionSample(participant, normalized, now);
+            RecordCollisionReplaySample(participant, now);
             participant.IsApproachingPit = normalized.IsApproachingPit;
             participant.IsOnPitRoute = normalized.IsOnPitRoute;
             participant.GripCondition = normalized.GripCondition;
@@ -973,7 +990,7 @@ public sealed class RaceCoordinator
                     participant.LastImpactAt = null;
                     participant.LastImpactMagnitudeMps = 0;
                     participant.LastImpactSpeedLossMps = 0;
-                    participant.CollisionPairCooldowns.Clear();
+                    participant.CollisionDetectionDeduplicationUntil.Clear();
                 }
             }
             IncrementRevision();
@@ -1170,7 +1187,7 @@ public sealed class RaceCoordinator
                     participant.LastImpactAt = null;
                     participant.LastImpactMagnitudeMps = 0;
                     participant.LastImpactSpeedLossMps = 0;
-                    participant.CollisionPairCooldowns.Clear();
+                    participant.CollisionDetectionDeduplicationUntil.Clear();
                 }
             }
             IncrementRevision();
@@ -2492,23 +2509,18 @@ public sealed class RaceCoordinator
             nearestBothReportedImpact,
             1,
             incidentAt);
-        if (TryMergeCollisionInvestigation(pairKey, currentEvidence, lapNumber))
-        {
-            var groupedUntil = now + CollisionPairCooldown;
-            participant.CollisionPairCooldowns[pairKey] = groupedUntil;
-            nearest.CollisionPairCooldowns[pairKey] = groupedUntil;
+        if (TryMergeCollisionInvestigation(pairKey, currentEvidence, lapNumber, now))
             return;
-        }
         if (investigations.Count(item => item.CollisionEvidence is not null) >=
             MaximumCollisionInvestigationsPerSession)
             return;
-        if (participant.CollisionPairCooldowns.TryGetValue(pairKey, out var cooldownUntil) && cooldownUntil > now ||
-            nearest.CollisionPairCooldowns.TryGetValue(pairKey, out cooldownUntil) && cooldownUntil > now)
+        if (participant.CollisionDetectionDeduplicationUntil.TryGetValue(pairKey, out var cooldownUntil) && cooldownUntil > now ||
+            nearest.CollisionDetectionDeduplicationUntil.TryGetValue(pairKey, out cooldownUntil) && cooldownUntil > now)
             return;
 
-        var nextAllowedAt = now + CollisionPairCooldown;
-        participant.CollisionPairCooldowns[pairKey] = nextAllowedAt;
-        nearest.CollisionPairCooldowns[pairKey] = nextAllowedAt;
+        var nextAllowedAt = incidentAt + CollisionDetectionDeduplicationWindow;
+        participant.CollisionDetectionDeduplicationUntil[pairKey] = nextAllowedAt;
+        nearest.CollisionDetectionDeduplicationUntil[pairKey] = nextAllowedAt;
         var related = new[] { participant.Id, nearest.Id };
         var investigation = new RaceInvestigationSnapshot(
             Guid.NewGuid(),
@@ -2520,6 +2532,7 @@ public sealed class RaceCoordinator
             RelatedParticipantIds: related,
             CollisionEvidence: currentEvidence);
         investigations.Add(investigation);
+        StartCollisionReplay(investigation.Id, participant, nearest, currentEvidence, now);
         banner = NewBanner(
             RaceBannerKind.Information,
             "正在调查 · 疑似碰撞",
@@ -2537,7 +2550,8 @@ public sealed class RaceCoordinator
     private bool TryMergeCollisionInvestigation(
         string pairKey,
         RaceCollisionEvidenceSnapshot current,
-        int lapNumber)
+        int lapNumber,
+        DateTimeOffset observedAt)
     {
         for (var index = investigations.Count - 1; index >= 0; index--)
         {
@@ -2547,8 +2561,8 @@ public sealed class RaceCoordinator
                 CollisionPairKey(previous.ReporterParticipantId, previous.OtherParticipantId) != pairKey)
                 continue;
             var previousLastAt = previous.LastIncidentAt ?? previous.IncidentAt;
-            if (Math.Abs((current.IncidentAt - previousLastAt).TotalMilliseconds) >
-                CollisionPairCooldown.TotalMilliseconds)
+            if (Math.Abs((current.IncidentAt - previous.IncidentAt).TotalMilliseconds) >
+                CollisionDetectionDeduplicationWindow.TotalMilliseconds)
                 continue;
 
             var useCurrentGeometry =
@@ -2591,6 +2605,7 @@ public sealed class RaceCoordinator
                 LapNumber = Math.Min(existing.LapNumber, lapNumber),
                 CollisionEvidence = merged
             };
+            ExtendCollisionReplay(existing.Id, current.IncidentAt, observedAt);
             return true;
         }
         return false;
@@ -2619,7 +2634,7 @@ public sealed class RaceCoordinator
     {
         if (!telemetry.HasWorldPosition) return;
         var samples = participant.CollisionPositionSamples;
-        samples.Add(new CollisionPositionSample(
+        var sample = new CollisionPositionSample(
             now,
             telemetry.WorldX,
             telemetry.WorldY,
@@ -2627,13 +2642,61 @@ public sealed class RaceCoordinator
             telemetry.HasWorldVelocity,
             telemetry.WorldVelocityX,
             telemetry.WorldVelocityY,
-            telemetry.WorldVelocityZ));
+            telemetry.WorldVelocityZ);
+        if (samples.Count > 0 && now - samples[^1].At < CollisionReplaySampleInterval) return;
+        samples.Add(sample);
         var minimumAt = now - CollisionTrajectoryLifetime;
         var removeCount = 0;
         while (removeCount < samples.Count && samples[removeCount].At < minimumAt)
             removeCount++;
         if (removeCount > 0) samples.RemoveRange(0, removeCount);
-        if (samples.Count > 32) samples.RemoveRange(0, samples.Count - 32);
+        if (samples.Count > 48) samples.RemoveRange(0, samples.Count - 48);
+    }
+
+    private void StartCollisionReplay(
+        Guid investigationId,
+        ParticipantState reporter,
+        ParticipantState other,
+        RaceCollisionEvidenceSnapshot evidence,
+        DateTimeOffset now)
+    {
+        var replay = new CollisionReplayState(
+            investigationId,
+            evidence.IncidentAt,
+            reporter.Id,
+            other.Id,
+            reporter.DisplayName,
+            other.DisplayName,
+            reporter.ThemeColor,
+            other.ThemeColor);
+        replay.MergeSamples(reporter.Id, reporter.CollisionPositionSamples, now);
+        replay.MergeSamples(other.Id, other.CollisionPositionSamples, now);
+        collisionReplays[investigationId] = replay;
+    }
+
+    private void ExtendCollisionReplay(Guid investigationId, DateTimeOffset incidentAt, DateTimeOffset now)
+    {
+        if (!collisionReplays.TryGetValue(investigationId, out var replay)) return;
+        replay.AddIncident(incidentAt);
+        foreach (var participantId in new[] { replay.ReporterParticipantId, replay.OtherParticipantId })
+        {
+            var participant = Find(participantId);
+            if (participant is not null)
+                replay.MergeSamples(participantId, participant.CollisionPositionSamples, now);
+        }
+    }
+
+    private void RecordCollisionReplaySample(ParticipantState participant, DateTimeOffset now)
+    {
+        if (participant.CollisionPositionSamples.Count == 0) return;
+        var sample = participant.CollisionPositionSamples[^1];
+        foreach (var replay in collisionReplays.Values)
+        {
+            if (now > replay.CaptureWindowEndsAt ||
+                participant.Id != replay.ReporterParticipantId && participant.Id != replay.OtherParticipantId)
+                continue;
+            replay.AddSample(participant.Id, sample);
+        }
     }
 
     private static CollisionPositionSample? ClosestCollisionPositionSample(
@@ -3907,6 +3970,7 @@ public sealed class RaceCoordinator
         chequeredImminent = false;
         penalties.Clear();
         investigations.Clear();
+        collisionReplays.Clear();
         receivedLapEvents.Clear();
         receivedPitServiceEvents.Clear();
         startsAt = null;
@@ -4018,7 +4082,7 @@ public sealed class RaceCoordinator
         participant.LastImpactSmashableVelDiff = 0;
         participant.LastImpactSmashableMass = 0;
         participant.CollisionPositionSamples.Clear();
-        participant.CollisionPairCooldowns.Clear();
+        participant.CollisionDetectionDeduplicationUntil.Clear();
     }
 
     private void ClearYellowState()
@@ -4390,7 +4454,7 @@ public sealed class RaceCoordinator
         public double LastImpactSmashableVelDiff { get; set; }
         public double LastImpactSmashableMass { get; set; }
         public List<CollisionPositionSample> CollisionPositionSamples { get; } = [];
-        public Dictionary<string, DateTimeOffset> CollisionPairCooldowns { get; } = [];
+        public Dictionary<string, DateTimeOffset> CollisionDetectionDeduplicationUntil { get; } = [];
         public double CurrentLapSeconds { get; set; }
         public double? LastLapSeconds { get; set; }
         public double? BestLapSeconds { get; set; }
@@ -4458,6 +4522,133 @@ public sealed class RaceCoordinator
         public double? FalseStartBaselineProgress { get; set; }
         public DateTimeOffset? FalseStartCandidateStartedAt { get; set; }
         public bool FalseStartPenalized { get; set; }
+    }
+
+    private sealed class CollisionReplayState(
+        Guid investigationId,
+        DateTimeOffset incidentAt,
+        Guid reporterParticipantId,
+        Guid otherParticipantId,
+        string reporterName,
+        string otherName,
+        string reporterThemeColor,
+        string otherThemeColor)
+    {
+        private readonly List<DateTimeOffset> incidentTimes = [incidentAt];
+        private readonly List<CollisionPositionSample> reporterSamples = [];
+        private readonly List<CollisionPositionSample> otherSamples = [];
+
+        public Guid InvestigationId { get; } = investigationId;
+        public Guid ReporterParticipantId { get; } = reporterParticipantId;
+        public Guid OtherParticipantId { get; } = otherParticipantId;
+        public string ReporterName { get; } = reporterName;
+        public string OtherName { get; } = otherName;
+        public string ReporterThemeColor { get; } = reporterThemeColor;
+        public string OtherThemeColor { get; } = otherThemeColor;
+        public DateTimeOffset FirstIncidentAt { get; private set; } = incidentAt;
+        public DateTimeOffset LastIncidentAt { get; private set; } = incidentAt;
+        public DateTimeOffset StartsAt => FirstIncidentAt - CollisionReplayWindow;
+        public DateTimeOffset EndsAt => LastIncidentAt + CollisionReplayWindow;
+        public DateTimeOffset MergeWindowEndsAt => FirstIncidentAt + CollisionDetectionDeduplicationWindow;
+        public DateTimeOffset CaptureWindowEndsAt => EndsAt > MergeWindowEndsAt ? EndsAt : MergeWindowEndsAt;
+
+        public void AddIncident(DateTimeOffset at)
+        {
+            if (!incidentTimes.Contains(at))
+            {
+                incidentTimes.Add(at);
+                incidentTimes.Sort();
+            }
+            if (at < FirstIncidentAt) FirstIncidentAt = at;
+            if (at > LastIncidentAt) LastIncidentAt = at;
+        }
+
+        public void MergeSamples(
+            Guid participantId,
+            IEnumerable<CollisionPositionSample> samples,
+            DateTimeOffset observedAt)
+        {
+            foreach (var sample in samples)
+            {
+                if (sample.At < StartsAt || sample.At > observedAt || sample.At > CaptureWindowEndsAt) continue;
+                AddSample(participantId, sample);
+            }
+        }
+
+        public void AddSample(Guid participantId, CollisionPositionSample sample)
+        {
+            if (sample.At < StartsAt || sample.At > CaptureWindowEndsAt) return;
+            var target = participantId == ReporterParticipantId
+                ? reporterSamples
+                : participantId == OtherParticipantId
+                    ? otherSamples
+                    : null;
+            if (target is null) return;
+            AddOrReplace(target, sample);
+        }
+
+        public RaceCollisionReplaySnapshot Snapshot(DateTimeOffset observedAt)
+        {
+            var availableUntil = observedAt < StartsAt
+                ? StartsAt
+                : observedAt > EndsAt
+                    ? EndsAt
+                    : observedAt;
+            return new RaceCollisionReplaySnapshot(
+                InvestigationId,
+                StartsAt,
+                EndsAt,
+                availableUntil,
+                FirstIncidentAt,
+                LastIncidentAt,
+                observedAt >= EndsAt,
+                observedAt >= MergeWindowEndsAt,
+                ReporterParticipantId,
+                OtherParticipantId,
+                ReporterName,
+                OtherName,
+                ReporterThemeColor,
+                OtherThemeColor,
+                incidentTimes.ToArray(),
+                ToSnapshots(reporterSamples, availableUntil),
+                ToSnapshots(otherSamples, availableUntil));
+        }
+
+        private static void AddOrReplace(List<CollisionPositionSample> samples, CollisionPositionSample sample)
+        {
+            if (samples.Count == 0 || sample.At > samples[^1].At)
+            {
+                if (samples.Count > 0 && sample.At - samples[^1].At < CollisionReplaySampleInterval)
+                    samples[^1] = sample;
+                else
+                    samples.Add(sample);
+                return;
+            }
+            if (sample.At == samples[^1].At)
+            {
+                samples[^1] = sample;
+                return;
+            }
+            var index = samples.FindIndex(existing => existing.At >= sample.At);
+            if (index < 0) samples.Add(sample);
+            else if (samples[index].At == sample.At) samples[index] = sample;
+            else samples.Insert(index, sample);
+        }
+
+        private static RaceCollisionReplaySampleSnapshot[] ToSnapshots(
+            IEnumerable<CollisionPositionSample> samples,
+            DateTimeOffset availableUntil) =>
+            samples
+                .Where(sample => sample.At <= availableUntil)
+                .Select(sample => new RaceCollisionReplaySampleSnapshot(
+                    sample.At,
+                    sample.WorldX,
+                    sample.WorldY,
+                    sample.WorldZ,
+                    sample.WorldVelocityX,
+                    sample.WorldVelocityY,
+                    sample.WorldVelocityZ))
+                .ToArray();
     }
 
     private readonly record struct RaceProgressSample(double DistanceLaps, double ElapsedSeconds);

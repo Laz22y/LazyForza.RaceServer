@@ -330,6 +330,34 @@ public sealed record RaceCollisionEvidenceSnapshot(
     int ContactCount = 1,
     DateTimeOffset? LastIncidentAt = null);
 
+public sealed record RaceCollisionReplaySampleSnapshot(
+    DateTimeOffset At,
+    double WorldX,
+    double WorldY,
+    double WorldZ,
+    double VelocityX,
+    double VelocityY,
+    double VelocityZ);
+
+public sealed record RaceCollisionReplaySnapshot(
+    Guid InvestigationId,
+    DateTimeOffset StartsAt,
+    DateTimeOffset EndsAt,
+    DateTimeOffset AvailableUntil,
+    DateTimeOffset FirstIncidentAt,
+    DateTimeOffset LastIncidentAt,
+    bool IsPostWindowComplete,
+    bool IsFinalized,
+    Guid ReporterParticipantId,
+    Guid OtherParticipantId,
+    string ReporterName,
+    string OtherName,
+    string ReporterThemeColor,
+    string OtherThemeColor,
+    IReadOnlyList<DateTimeOffset> IncidentTimes,
+    IReadOnlyList<RaceCollisionReplaySampleSnapshot> ReporterSamples,
+    IReadOnlyList<RaceCollisionReplaySampleSnapshot> OtherSamples);
+
 public sealed record RaceParticipantSnapshot(
     Guid Id,
     int Position,

@@ -5,7 +5,9 @@ const raceLocale=raceI18n.locale;
 const loginPanel=$('#loginPanel'),setupPanel=$('#setupPanel'),dashboard=$('#dashboard');
 const loginError=$('#loginError'),setupError=$('#setupError'),actionError=$('#actionError');
 const connectionState=$('#connectionState span'),timingRows=$('#timingRows'),observerList=$('#observerList'),eventRows=$('#eventRows'),investigationRows=$('#investigationRows'),penaltyRows=$('#penaltyRows'),resultHistoryRows=$('#resultHistoryRows');
+const collisionReplayModal=$('#collisionReplayModal'),collisionReplaySvg=$('#collisionReplaySvg'),collisionReplayStatus=$('#collisionReplayStatus'),collisionReplayTitle=$('#collisionReplayTitle'),collisionReplaySubtitle=$('#collisionReplaySubtitle'),collisionReplayPlay=$('#collisionReplayPlay'),collisionReplayTimeline=$('#collisionReplayTimeline'),collisionReplayTime=$('#collisionReplayTime'),collisionReplayLegend=$('#collisionReplayLegend'),collisionReplayStats=$('#collisionReplayStats');
 let polling=null,refreshInFlight=false,eventRefreshCount=0,eventHistory=[],lastEventSequence=0,stageResults=[],teamDraft=[],timingInteractionUntil=0,penaltyInteractionUntil=0,lastState=null,activeTrackRevision=null;
+let collisionReplayState={investigationId:null,data:null,currentAt:0,playing:false,animationFrame:null,lastFrameAt:0,refreshTimer:null,requestSequence:0,returnFocus:null};
 const penaltySecondsByParticipant=new Map();
 const defaultTeamColors=['#42D7E8','#FF4057','#5A8CFF','#FFD328','#B86CFF','#34D17B','#FF8A3D','#EE4FA6','#B8F34A','#8FA3B8','#6FD6A7','#F28B82'];
 const phaseLabels={lobby:'大厅',practice:'练习赛',qualifying:'排位赛',grid:'发车区',outLap:'出场圈',formationLap:'暖胎圈',countdown:'五盏红灯',race:'正赛',suspended:'比赛暂停',finished:'比赛结束'};
@@ -68,6 +70,11 @@ $('#practiceSessionCount').addEventListener('change',togglePracticeSettings);
 $('#qualifyingSessionCount').addEventListener('change',toggleQualifyingSettings);
 $('#qualifyingQ1Eliminations').addEventListener('input',updateQualifyingRuleHint);
 $('#qualifyingQ2Eliminations').addEventListener('input',updateQualifyingRuleHint);
+$('#collisionReplayClose').addEventListener('click',closeCollisionReplay);
+collisionReplayModal.addEventListener('click',event=>{if(event.target===collisionReplayModal)closeCollisionReplay();});
+collisionReplayPlay.addEventListener('click',toggleCollisionReplayPlayback);
+collisionReplayTimeline.addEventListener('input',()=>{collisionReplayState.currentAt=replayStartsAt()+Number(collisionReplayTimeline.value)*1000;stopCollisionReplayPlayback();renderCollisionReplayFrame();});
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!collisionReplayModal.classList.contains('hidden'))closeCollisionReplay();});
 togglePracticeSettings();toggleQualifyingSettings();
 document.querySelectorAll('[data-session]').forEach(button=>button.addEventListener('click',()=>post('/api/admin/session',sessionCommand(button.dataset.session))));
 document.querySelectorAll('[data-flag]').forEach(button=>button.addEventListener('click',()=>{
@@ -184,7 +191,7 @@ function renderPenaltyControl(state){
     const title=document.createElement('div');title.className='penalty-entry-title';title.append(document.createTextNode(relatedNames.join(' ↔ ')),chip(item.status==='pending'?'正在调查':item.status==='penalized'?'已判罚':'不予处罚','review'));
     const detail=document.createElement('div');detail.className='penalty-entry-detail';detail.textContent=item.offense;
     const meta=document.createElement('div');meta.className='penalty-entry-meta investigation-time';meta.textContent=`第 ${item.lapNumber} 圈 · ${new Date(item.detectedAt).toLocaleTimeString(raceLocale,{hour12:false})}`;
-    main.append(title,detail,meta);if(item.collisionEvidence)main.append(renderCollisionEvidence(item.collisionEvidence));entry.append(main);
+    main.append(title,detail,meta);if(item.collisionEvidence)main.append(renderCollisionEvidence(item));entry.append(main);
     if(item.status==='pending'){
       const decisions=document.createElement('div');decisions.className='investigation-decisions';
       const target=document.createElement('select');target.setAttribute('aria-label','选择接受调查处理的车手');for(let index=0;index<relatedIds.length;index++)target.append(new Option(`处理：${relatedNames[index]}`,relatedIds[index]));target.value=item.participantId;holdPenaltyEditor(target);
@@ -214,11 +221,14 @@ function renderPenaltyControl(state){
   }
 }
 function emptyPenalty(message){const empty=document.createElement('div');empty.className='penalty-empty';empty.textContent=message;return empty;}
-function renderCollisionEvidence(evidence){
+function renderCollisionEvidence(investigation){
+  const evidence=investigation.collisionEvidence;
   const root=document.createElement('section');root.className='collision-evidence';
   const heading=document.createElement('div');heading.className='collision-evidence-heading';
   const title=document.createElement('strong');title.textContent='遥测关系图';
-  const note=document.createElement('span');note.textContent='位置与方向仅供复核，不表示碰撞责任';heading.append(title,note);
+  const actions=document.createElement('div');actions.className='collision-evidence-actions';
+  const note=document.createElement('span');note.textContent='位置与方向仅供复核，不表示碰撞责任';
+  const replay=actionButton('播放动态证据',()=>openCollisionReplay(investigation));replay.classList.add('collision-replay-open');actions.append(note,replay);heading.append(title,actions);
   const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 560 180');svg.setAttribute('role','img');svg.setAttribute('aria-label',`${evidence.reporterName} 与 ${evidence.otherName} 的事发位置和运动方向`);
   const background=document.createElementNS(svg.namespaceURI,'rect');background.setAttribute('width','560');background.setAttribute('height','180');background.setAttribute('rx','12');background.setAttribute('class','collision-evidence-plot');svg.append(background);
   const dx=Number(evidence.otherWorldX)-Number(evidence.reporterWorldX),dz=Number(evidence.otherWorldZ)-Number(evidence.reporterWorldZ),distance=Math.max(.01,Math.hypot(dx,dz)),ux=dx/distance,uz=dz/distance;
@@ -232,6 +242,132 @@ function renderCollisionEvidence(evidence){
   root.append(heading,svg,caption);return root;
 }
 function addCollisionCar(svg,x,y,vx,vz,color,name,side){const speed=Math.hypot(Number(vx),Number(vz)),ux=speed>.1?Number(vx)/speed:0,uy=speed>.1?Number(vz)/speed:-1;const arrow=document.createElementNS(svg.namespaceURI,'line');arrow.setAttribute('x1',String(x));arrow.setAttribute('y1',String(y));arrow.setAttribute('x2',String(x+ux*44));arrow.setAttribute('y2',String(y+uy*44));arrow.setAttribute('class','collision-motion-line');arrow.style.stroke=color||'#38d5e8';svg.append(arrow);const tip=document.createElementNS(svg.namespaceURI,'circle');tip.setAttribute('cx',String(x+ux*44));tip.setAttribute('cy',String(y+uy*44));tip.setAttribute('r','3.5');tip.style.fill=color||'#38d5e8';svg.append(tip);const car=document.createElementNS(svg.namespaceURI,'rect');car.setAttribute('x',String(x-10));car.setAttribute('y',String(y-17));car.setAttribute('width','20');car.setAttribute('height','34');car.setAttribute('rx','7');car.setAttribute('class','collision-car');car.style.fill=color||'#38d5e8';car.setAttribute('transform',`rotate(${Math.atan2(uy,ux)*180/Math.PI+90} ${x} ${y})`);svg.append(car);const label=document.createElementNS(svg.namespaceURI,'text');label.setAttribute('x',String(x+(side==='start'?-18:18)));label.setAttribute('y',String(y+33));label.setAttribute('text-anchor',side==='start'?'end':'start');label.setAttribute('class','collision-driver-label');label.textContent=name;svg.append(label);}
+
+async function openCollisionReplay(investigation){
+  const evidence=investigation.collisionEvidence;
+  collisionReplayState.returnFocus=document.activeElement;
+  collisionReplayState.investigationId=investigation.id;
+  collisionReplayState.data=null;
+  collisionReplayState.currentAt=0;
+  stopCollisionReplayPlayback();
+  clearCollisionReplayRefresh();
+  collisionReplayTitle.textContent='事故证据回放';
+  collisionReplaySubtitle.textContent=`${evidence.reporterName} ↔ ${evidence.otherName} · 双方世界坐标 X/Z 平面`;
+  collisionReplayStatus.textContent='正在读取回放证据…';
+  collisionReplaySvg.replaceChildren();collisionReplayLegend.replaceChildren();collisionReplayStats.replaceChildren();
+  collisionReplayTimeline.disabled=true;collisionReplayPlay.disabled=true;
+  collisionReplayModal.classList.remove('hidden');document.body.classList.add('collision-replay-open');$('#collisionReplayClose').focus();
+  await loadCollisionReplay(investigation.id,false);
+}
+
+function closeCollisionReplay(){
+  stopCollisionReplayPlayback();clearCollisionReplayRefresh();collisionReplayState.requestSequence++;
+  collisionReplayModal.classList.add('hidden');document.body.classList.remove('collision-replay-open');
+  const returnFocus=collisionReplayState.returnFocus;collisionReplayState={investigationId:null,data:null,currentAt:0,playing:false,animationFrame:null,lastFrameAt:0,refreshTimer:null,requestSequence:collisionReplayState.requestSequence,returnFocus:null};
+  if(returnFocus instanceof HTMLElement&&document.contains(returnFocus))returnFocus.focus();
+}
+
+async function loadCollisionReplay(investigationId,preservePosition=true){
+  const requestSequence=++collisionReplayState.requestSequence;
+  try{
+    const response=await fetch(`/api/admin/investigations/${encodeURIComponent(investigationId)}/replay`,{cache:'no-store'});
+    if(requestSequence!==collisionReplayState.requestSequence||collisionReplayState.investigationId!==investigationId)return;
+    if(!response.ok)throw new Error(response.status===404?'暂无可用轨迹样本。':'无法读取事故证据。');
+    const data=normalizeCollisionReplay(await response.json());
+    const previousAt=collisionReplayState.currentAt;
+    collisionReplayState.data=data;
+    const startsAt=replayStartsAt(),availableUntil=replayAvailableUntil();
+    collisionReplayState.currentAt=preservePosition&&previousAt?Math.min(availableUntil,Math.max(startsAt,previousAt)):startsAt;
+    collisionReplayTimeline.disabled=false;collisionReplayPlay.disabled=false;
+    collisionReplayTimeline.min='0';collisionReplayTimeline.max=String(Math.max(.05,(availableUntil-startsAt)/1000));collisionReplayTimeline.step='.05';
+    renderCollisionReplayLegend();renderCollisionReplayFrame();
+    if(!data.isFinalized||!data.isPostWindowComplete)scheduleCollisionReplayRefresh();
+  }catch(error){
+    if(requestSequence!==collisionReplayState.requestSequence)return;
+    collisionReplayStatus.textContent=error instanceof Error?error.message:'无法读取事故证据。';
+    collisionReplayPlay.disabled=true;collisionReplayTimeline.disabled=true;
+  }
+}
+
+function normalizeCollisionReplay(data){
+  const normalizeSamples=samples=>(Array.isArray(samples)?samples:[]).map(sample=>({...sample,atMs:Date.parse(sample.at)})).filter(sample=>Number.isFinite(sample.atMs)&&Number.isFinite(Number(sample.worldX))&&Number.isFinite(Number(sample.worldZ))).sort((a,b)=>a.atMs-b.atMs);
+  return{...data,startsAtMs:Date.parse(data.startsAt),endsAtMs:Date.parse(data.endsAt),availableUntilMs:Date.parse(data.availableUntil),firstIncidentAtMs:Date.parse(data.firstIncidentAt),lastIncidentAtMs:Date.parse(data.lastIncidentAt),incidentTimesMs:(Array.isArray(data.incidentTimes)?data.incidentTimes:[]).map(Date.parse).filter(Number.isFinite).sort((a,b)=>a-b),reporterSamples:normalizeSamples(data.reporterSamples),otherSamples:normalizeSamples(data.otherSamples)};
+}
+
+function scheduleCollisionReplayRefresh(){clearCollisionReplayRefresh();collisionReplayState.refreshTimer=window.setTimeout(()=>loadCollisionReplay(collisionReplayState.investigationId,true),1000);}
+function clearCollisionReplayRefresh(){if(collisionReplayState.refreshTimer)window.clearTimeout(collisionReplayState.refreshTimer);collisionReplayState.refreshTimer=null;}
+function replayStartsAt(){return collisionReplayState.data?.startsAtMs??0;}
+function replayAvailableUntil(){const data=collisionReplayState.data;return data?Math.min(data.endsAtMs,data.availableUntilMs):0;}
+
+function toggleCollisionReplayPlayback(){
+  if(!collisionReplayState.data)return;
+  if(collisionReplayState.playing){stopCollisionReplayPlayback();renderCollisionReplayFrame();return;}
+  if(collisionReplayState.currentAt>=replayAvailableUntil()-10)collisionReplayState.currentAt=replayStartsAt();
+  collisionReplayState.playing=true;collisionReplayState.lastFrameAt=performance.now();collisionReplayPlay.textContent='暂停';collisionReplayState.animationFrame=requestAnimationFrame(animateCollisionReplay);
+}
+function stopCollisionReplayPlayback(){collisionReplayState.playing=false;collisionReplayState.lastFrameAt=0;if(collisionReplayState.animationFrame)cancelAnimationFrame(collisionReplayState.animationFrame);collisionReplayState.animationFrame=null;if(collisionReplayPlay)collisionReplayPlay.textContent='播放';}
+function animateCollisionReplay(now){
+  if(!collisionReplayState.playing)return;
+  const elapsed=Math.min(100,Math.max(0,now-collisionReplayState.lastFrameAt));collisionReplayState.lastFrameAt=now;collisionReplayState.currentAt=Math.min(replayAvailableUntil(),collisionReplayState.currentAt+elapsed);renderCollisionReplayFrame();
+  if(collisionReplayState.currentAt>=replayAvailableUntil()){stopCollisionReplayPlayback();renderCollisionReplayFrame();return;}
+  collisionReplayState.animationFrame=requestAnimationFrame(animateCollisionReplay);
+}
+
+function renderCollisionReplayFrame(){
+  const data=collisionReplayState.data;if(!data)return;
+  const startsAt=replayStartsAt(),availableUntil=replayAvailableUntil(),currentAt=Math.min(availableUntil,Math.max(startsAt,collisionReplayState.currentAt));collisionReplayState.currentAt=currentAt;
+  collisionReplayTimeline.max=String(Math.max(.05,(availableUntil-startsAt)/1000));collisionReplayTimeline.value=String(Math.max(0,(currentAt-startsAt)/1000));
+  const relative=(currentAt-data.firstIncidentAtMs)/1000;collisionReplayTime.textContent=`${relative>=0?'+':'−'}${Math.abs(relative).toFixed(1)} s`;
+  if(!data.isPostWindowComplete)collisionReplayStatus.textContent='碰撞后 3 秒证据仍在采集。';
+  else if(!data.isFinalized)collisionReplayStatus.textContent='证据片段已完成；等待连续接触分组窗口结束，如再次接触会自动延长。';
+  else collisionReplayStatus.textContent='证据片段已完成。';
+  const allSamples=[...data.reporterSamples,...data.otherSamples];collisionReplaySvg.replaceChildren();
+  const background=svgNode('rect',{x:0,y:0,width:760,height:400,rx:12,class:'collision-replay-plot'});collisionReplaySvg.append(background);
+  if(allSamples.length===0){const empty=svgNode('text',{x:380,y:205,'text-anchor':'middle',class:'collision-replay-empty'});empty.textContent='暂无可用轨迹样本。';collisionReplaySvg.append(empty);renderCollisionReplayStats(null,null);return;}
+  const view=collisionReplayViewport(allSamples);drawCollisionReplayGrid(view);
+  drawCollisionReplayIncidents(data,view);
+  drawCollisionReplayTrack(data.reporterSamples,currentAt,data.reporterThemeColor,view);
+  drawCollisionReplayTrack(data.otherSamples,currentAt,data.otherThemeColor,view);
+  const reporter=collisionReplaySampleAt(data.reporterSamples,currentAt),other=collisionReplaySampleAt(data.otherSamples,currentAt);
+  if(reporter)drawCollisionReplayCar(reporter,data.reporterName,data.reporterThemeColor,view,'start');
+  if(other)drawCollisionReplayCar(other,data.otherName,data.otherThemeColor,view,'end');
+  renderCollisionReplayStats(reporter,other);
+}
+
+function collisionReplayViewport(samples){
+  let minX=Math.min(...samples.map(sample=>Number(sample.worldX))),maxX=Math.max(...samples.map(sample=>Number(sample.worldX))),minZ=Math.min(...samples.map(sample=>Number(sample.worldZ))),maxZ=Math.max(...samples.map(sample=>Number(sample.worldZ)));
+  const centerX=(minX+maxX)/2,centerZ=(minZ+maxZ)/2;let spanX=Math.max(18,maxX-minX),spanZ=Math.max(10,maxZ-minZ);spanX*=1.18;spanZ*=1.18;const scale=Math.min(660/spanX,320/spanZ);return{minX:centerX-spanX/2,minZ:centerZ-spanZ/2,scale,toX:x=>50+(Number(x)-(centerX-spanX/2))*scale,toY:z=>350-(Number(z)-(centerZ-spanZ/2))*scale};
+}
+function drawCollisionReplayGrid(view){for(let index=0;index<=10;index++){collisionReplaySvg.append(svgNode('line',{x1:50+index*66,y1:40,x2:50+index*66,y2:360,class:'collision-replay-grid'}));}for(let index=0;index<=8;index++){collisionReplaySvg.append(svgNode('line',{x1:50,y1:40+index*40,x2:710,y2:40+index*40,class:'collision-replay-grid'}));}const axes=svgNode('text',{x:700,y:386,'text-anchor':'end',class:'collision-replay-axis'});axes.textContent='X →  ·  Z ↑';collisionReplaySvg.append(axes);}
+function drawCollisionReplayTrack(samples,currentAt,color,view){
+  if(samples.length<2)return;
+  collisionReplaySegments(samples).forEach(segment=>{const complete=svgNode('polyline',{points:segment.map(sample=>`${view.toX(sample.worldX)},${view.toY(sample.worldZ)}`).join(' '),class:'collision-replay-track complete'});complete.style.stroke=color||'#42d7e8';collisionReplaySvg.append(complete);});
+  collisionReplaySegments(samples.filter(sample=>sample.atMs<=currentAt)).forEach(segment=>{const traveled=svgNode('polyline',{points:segment.map(sample=>`${view.toX(sample.worldX)},${view.toY(sample.worldZ)}`).join(' '),class:'collision-replay-track traveled'});traveled.style.stroke=color||'#42d7e8';collisionReplaySvg.append(traveled);});
+}
+function collisionReplaySegments(samples){const segments=[];let current=[];for(const sample of samples){if(current.length>0&&sample.atMs-current[current.length-1].atMs>750){if(current.length>1)segments.push(current);current=[];}current.push(sample);}if(current.length>1)segments.push(current);return segments;}
+function drawCollisionReplayIncidents(data,view){
+  data.incidentTimesMs.forEach((incidentAt,index)=>{
+    const reporter=collisionReplaySampleAt(data.reporterSamples,incidentAt),other=collisionReplaySampleAt(data.otherSamples,incidentAt);if(!reporter||!other)return;
+    const x=(view.toX(reporter.worldX)+view.toX(other.worldX))/2,y=(view.toY(reporter.worldZ)+view.toY(other.worldZ))/2;const marker=svgNode('g',{class:'collision-replay-incident'});const ring=svgNode('circle',{cx:x,cy:y,r:12+index*2});const label=svgNode('text',{x,y:y-17,'text-anchor':'middle'});label.textContent=String(index+1);marker.append(ring,label);collisionReplaySvg.append(marker);
+  });
+}
+function drawCollisionReplayCar(sample,name,color,view,side){
+  const x=view.toX(sample.worldX),y=view.toY(sample.worldZ),vx=Number(sample.velocityX),vz=Number(sample.velocityZ),speed=Math.hypot(vx,vz),angle=speed>.1?Math.atan2(-vz,vx)*180/Math.PI+90:0;
+  const group=svgNode('g',{class:'collision-replay-car',transform:`translate(${x} ${y}) rotate(${angle})`});const shadow=svgNode('circle',{cx:0,cy:0,r:18});shadow.style.fill=color||'#42d7e8';const body=svgNode('rect',{x:-8,y:-15,width:16,height:30,rx:6});body.style.fill=color||'#42d7e8';const nose=svgNode('path',{d:'M -5 -11 L 0 -16 L 5 -11 Z'});group.append(shadow,body,nose);collisionReplaySvg.append(group);
+  const label=svgNode('text',{x:x+(side==='start'?-14:14),y:y-22,'text-anchor':side==='start'?'end':'start',class:'collision-replay-driver'});label.textContent=name;collisionReplaySvg.append(label);
+}
+function collisionReplaySampleAt(samples,targetAt){
+  if(samples.length===0)return null;let right=samples.findIndex(sample=>sample.atMs>=targetAt);if(right<0)return targetAt-samples[samples.length-1].atMs<=750?samples[samples.length-1]:null;if(right===0)return samples[0].atMs-targetAt<=750?samples[0]:null;const before=samples[right-1],after=samples[right],span=after.atMs-before.atMs;if(span>750)return null;const ratio=Math.max(0,Math.min(1,(targetAt-before.atMs)/span)),mix=key=>Number(before[key])+(Number(after[key])-Number(before[key]))*ratio;return{atMs:targetAt,worldX:mix('worldX'),worldY:mix('worldY'),worldZ:mix('worldZ'),velocityX:mix('velocityX'),velocityY:mix('velocityY'),velocityZ:mix('velocityZ')};
+}
+function renderCollisionReplayLegend(){
+  const data=collisionReplayState.data;collisionReplayLegend.replaceChildren();[[data.reporterName,data.reporterThemeColor],[data.otherName,data.otherThemeColor]].forEach(([name,color])=>{const item=document.createElement('span'),mark=document.createElement('i');mark.style.backgroundColor=color||'#42d7e8';item.append(mark,document.createTextNode(name));collisionReplayLegend.append(item);});
+}
+function renderCollisionReplayStats(reporter,other){
+  const data=collisionReplayState.data,duration=Math.max(0,(data.endsAtMs-data.startsAtMs)/1000),distance=reporter&&other?Math.hypot(Number(reporter.worldX)-Number(other.worldX),Number(reporter.worldZ)-Number(other.worldZ)):null,reporterSpeed=reporter?Math.hypot(Number(reporter.velocityX),Number(reporter.velocityY),Number(reporter.velocityZ))*3.6:null,otherSpeed=other?Math.hypot(Number(other.velocityX),Number(other.velocityY),Number(other.velocityZ))*3.6:null;
+  const values=[['证据时长',`${duration.toFixed(1)} s`],['连续接触',`${data.incidentTimesMs.length} 次`],[`${data.reporterName} 速度`,reporterSpeed===null?'—':`${reporterSpeed.toFixed(0)} km/h`],[`${data.otherName} 速度`,otherSpeed===null?'—':`${otherSpeed.toFixed(0)} km/h`],['两车水平距离',distance===null?'—':`${distance.toFixed(1)} m`],['轨迹样本',`${data.reporterSamples.length+data.otherSamples.length}`]];
+  collisionReplayStats.replaceChildren();values.forEach(([label,value])=>{const item=document.createElement('span'),name=document.createElement('small'),number=document.createElement('strong');name.textContent=label;number.textContent=value;item.append(name,number);collisionReplayStats.append(item);});
+}
+function svgNode(name,attributes={}){const node=document.createElementNS('http://www.w3.org/2000/svg',name);Object.entries(attributes).forEach(([key,value])=>node.setAttribute(key,String(value)));return node;}
 function chip(label,style=''){const node=document.createElement('span');node.className=`penalty-chip ${style}`;node.textContent=label;return node;}
 function holdPenaltyEditor(node){const hold=()=>penaltyInteractionUntil=Date.now()+30000;node.addEventListener('focus',hold);node.addEventListener('pointerdown',hold);node.addEventListener('blur',()=>penaltyInteractionUntil=Date.now()+150);}
 function penaltyKindText(item){const labels={warning:'警告',time:`+${Number(item.valueSeconds??0).toFixed(0)} 秒`,driveThrough:'通过维修区',stopAndGo:`停车 ${Number(item.valueSeconds??0).toFixed(0)} 秒并通过维修区`,gridDrop:'发车位后退',disqualification:'取消资格'};return labels[item.kind]??item.kind;}

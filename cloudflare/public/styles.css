@@ -209,6 +209,8 @@ tr:hover td { background: rgba(66,215,232,.035); }
 .collision-evidence-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 7px; }
 .collision-evidence-heading strong { font-size: 11px; letter-spacing: .1em; color: #dce9f3; }
 .collision-evidence-heading span { font-size: 10px; color: #7f93a6; }
+.collision-evidence-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.collision-evidence-actions .collision-replay-open { min-height: 30px; padding: 0 10px; border-color: rgba(66,215,232,.42); color: #b9f4fb; background: rgba(66,215,232,.09); font-size: 10px; white-space: nowrap; }
 .collision-evidence svg { display: block; width: 100%; height: 140px; }
 .collision-evidence-plot { fill: #071019; stroke: #243748; stroke-width: 1; }
 .collision-distance-line { stroke: #f4c94d; stroke-width: 1.5; stroke-dasharray: 5 5; }
@@ -220,6 +222,42 @@ tr:hover td { background: rgba(66,215,232,.035); }
 .collision-evidence-stats > span { display: flex; flex-direction: column; gap: 3px; padding: 7px 9px; border-radius: 5px; background: #101d29; border: 1px solid #213344; }
 .collision-evidence-stats small { font-size: 9px; color: #7f93a6; }
 .collision-evidence-stats strong { font-size: 11px; color: #e7f1f8; font-variant-numeric: tabular-nums; }
+
+body.collision-replay-open { overflow: hidden; }
+.collision-replay-modal { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px; background: rgba(2,5,9,.86); backdrop-filter: blur(10px); }
+.collision-replay-dialog { width: min(1040px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; padding: 22px; box-shadow: 0 28px 90px rgba(0,0,0,.65); }
+.collision-replay-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 13px; }
+.collision-replay-header h2 { margin: 2px 0 3px; font-size: 22px; }
+.collision-replay-header p:last-child { margin: 0; color: var(--muted); font-size: 12px; }
+.collision-replay-header button { flex: 0 0 auto; }
+.collision-replay-status { min-height: 20px; margin: 0 0 8px; color: #a9bac9; font-size: 11px; }
+.collision-replay-stage { overflow: hidden; border: 1px solid #2a3b4c; border-radius: 10px; background: #050b11; }
+.collision-replay-stage svg { display: block; width: 100%; height: auto; max-height: min(50vh, 520px); }
+.collision-replay-plot { fill: #071019; }
+.collision-replay-grid { stroke: rgba(127,147,166,.12); stroke-width: 1; }
+.collision-replay-axis { fill: #6f8497; font: 700 11px "Segoe UI", sans-serif; letter-spacing: .06em; }
+.collision-replay-track { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.collision-replay-track.complete { stroke-width: 2; opacity: .2; }
+.collision-replay-track.traveled { stroke-width: 4; opacity: .92; filter: drop-shadow(0 0 4px rgba(255,255,255,.12)); }
+.collision-replay-car circle { opacity: .15; }
+.collision-replay-car rect { stroke: #f7fbff; stroke-width: 1.5; }
+.collision-replay-car path { fill: #f7fbff; }
+.collision-replay-driver { fill: #f0f7fc; font: 700 12px "Segoe UI", "Microsoft YaHei", sans-serif; paint-order: stroke; stroke: #061019; stroke-width: 5px; }
+.collision-replay-incident circle { fill: rgba(255,211,40,.08); stroke: #ffd328; stroke-width: 2; stroke-dasharray: 4 3; }
+.collision-replay-incident text { fill: #ffe991; font: 850 10px "Segoe UI", sans-serif; paint-order: stroke; stroke: #071019; stroke-width: 4px; }
+.collision-replay-empty { fill: #91a0b1; font: 600 13px "Segoe UI", "Microsoft YaHei", sans-serif; }
+.collision-replay-controls { display: grid; grid-template-columns: auto minmax(160px,1fr) 72px; align-items: center; gap: 12px; margin-top: 13px; }
+.collision-replay-controls button { min-width: 86px; }
+.collision-replay-controls input[type=range] { width: 100%; min-height: 30px; accent-color: var(--cyan); cursor: pointer; }
+.collision-replay-controls output { color: #eaf3fa; font: 750 12px "Cascadia Mono", "Segoe UI", monospace; text-align: right; font-variant-numeric: tabular-nums; }
+.collision-replay-legend { display: flex; flex-wrap: wrap; gap: 15px; margin-top: 12px; }
+.collision-replay-legend span { display: inline-flex; align-items: center; gap: 7px; color: #c8d4de; font-size: 11px; }
+.collision-replay-legend i { width: 24px; height: 4px; border-radius: 999px; box-shadow: 0 0 8px currentColor; }
+.collision-replay-stats { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 7px; margin-top: 10px; }
+.collision-replay-stats > span { display: grid; gap: 4px; min-width: 0; padding: 8px 9px; border: 1px solid #213344; border-radius: 5px; background: #0d1721; }
+.collision-replay-stats small { overflow: hidden; color: #7f93a6; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.collision-replay-stats strong { overflow: hidden; color: #e7f1f8; font-size: 11px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.collision-replay-disclaimer { margin: 12px 0 0; color: #7f93a6; font-size: 10px; line-height: 1.6; }
 
 @media (max-width: 1320px) {
   .command-grid { grid-template-columns: 1fr; }
@@ -240,6 +278,7 @@ tr:hover td { background: rgba(66,215,232,.035); }
   .flag-buttons { grid-column: 1 / -1; display: grid; }
   .room-fields-primary, .room-fields, .hazard-fields { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .form-grid.three, .qualifying-session-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .collision-replay-stats { grid-template-columns: repeat(3,minmax(0,1fr)); }
 }
 
 @media (max-width: 680px) {
@@ -268,7 +307,14 @@ tr:hover td { background: rgba(66,215,232,.035); }
   .settings-footer { align-items: stretch; flex-direction: column; }
   .settings-footer button { width: 100%; }
   .collision-evidence-heading { align-items: flex-start; flex-direction: column; }
+  .collision-evidence-actions { width: 100%; align-items: flex-start; flex-direction: column; }
   .collision-evidence-stats { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .collision-replay-modal { padding: 8px; }
+  .collision-replay-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 16px); padding: 15px; }
+  .collision-replay-header h2 { font-size: 19px; }
+  .collision-replay-controls { grid-template-columns: auto minmax(100px,1fr); }
+  .collision-replay-controls output { grid-column: 1 / -1; text-align: center; }
+  .collision-replay-stats { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }
 
 @media (pointer: coarse) {

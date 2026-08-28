@@ -137,13 +137,13 @@ describe("RaceCore", () => {
       ...motion, worldX: 100.8, worldVelocityX: 9, impactSequence: 2,
       impactMagnitudeMps: 4, impactWorldX: 100.8, impactWorldY: 0, impactWorldZ: 50,
       impactWorldVelocityX: 9, impactWorldVelocityY: 0, impactWorldVelocityZ: 0
-    }, new Date(started.getTime() + 3_000));
+    }, new Date(started.getTime() + 2_000));
     core.updateTelemetry(reporter, {
       ...motion, worldX: 100, worldVelocityX: 21, impactSequence: 2,
       impactMagnitudeMps: 6, impactWorldX: 100, impactWorldY: 0, impactWorldZ: 50,
       impactAgeMilliseconds: 50, impactWorldVelocityX: 21,
       impactWorldVelocityY: 0, impactWorldVelocityZ: 0
-    }, new Date(started.getTime() + 3_050));
+    }, new Date(started.getTime() + 2_050));
 
     const grouped = core.snapshot().investigations;
     expect(grouped).toHaveLength(1);
@@ -163,15 +163,100 @@ describe("RaceCore", () => {
       ...motion, worldX: 101, worldVelocityX: 10, impactSequence: 3,
       impactMagnitudeMps: 4, impactWorldX: 101, impactWorldY: 0, impactWorldZ: 50,
       impactWorldVelocityX: 10, impactWorldVelocityY: 0, impactWorldVelocityZ: 0
-    }, new Date(started.getTime() + 16_000));
+    }, new Date(started.getTime() + 3_200));
     core.updateTelemetry(reporter, {
       ...motion, worldX: 100, worldVelocityX: 20, impactSequence: 3,
       impactMagnitudeMps: 5, impactWorldX: 100, impactWorldY: 0, impactWorldZ: 50,
       impactAgeMilliseconds: 50, impactWorldVelocityX: 20,
       impactWorldVelocityY: 0, impactWorldVelocityZ: 0
-    }, new Date(started.getTime() + 16_050));
+    }, new Date(started.getTime() + 3_250));
     expect(core.snapshot().investigations).toHaveLength(2);
     expect(core.events().filter(event => event.type === "collisionInvestigationOpened")).toHaveLength(2);
+  });
+
+  it("captures replay from three seconds before the first duplicate through three seconds after the last", () => {
+    const core = createCore();
+    const reporter = connect(core, "甲"), other = connect(core, "乙");
+    core.applyRoomSettings({
+      ...core.roomSettings(), automaticCollisionInvestigationsEnabled: true
+    });
+    const started = new Date("2026-08-20T11:30:00Z");
+    core.applySession({ phase: "race", totalRaceLaps: 10 }, started);
+    const motion = { ...telemetry(), hasWorldPosition: true, worldY: 0, worldZ: 50,
+      hasWorldVelocity: true, worldVelocityY: 0, worldVelocityZ: 0 };
+
+    for (let milliseconds = 0; milliseconds < 3_000; milliseconds += 50) {
+      const progress = milliseconds / 3_000;
+      core.updateTelemetry(reporter, { ...motion, worldX: 94 + 6 * progress, worldVelocityX: 20 },
+        new Date(started.getTime() + milliseconds));
+      core.updateTelemetry(other, { ...motion, worldX: 101.2, worldVelocityX: 10 },
+        new Date(started.getTime() + milliseconds));
+    }
+    core.updateTelemetry(other, { ...motion, worldX: 100.8, worldVelocityX: 10 },
+      new Date(started.getTime() + 3_000));
+    core.updateTelemetry(reporter, {
+      ...motion, worldX: 100, worldVelocityX: 20, impactSequence: 1,
+      impactMagnitudeMps: 5, impactAgeMilliseconds: 50,
+      impactWorldX: 100, impactWorldY: 0, impactWorldZ: 50,
+      impactWorldVelocityX: 20, impactWorldVelocityY: 0, impactWorldVelocityZ: 0
+    }, new Date(started.getTime() + 3_050));
+    const investigation = core.snapshot().investigations?.[0];
+    expect(investigation).toBeDefined();
+
+    for (let milliseconds = 3_250; milliseconds < 4_000; milliseconds += 50) {
+      core.updateTelemetry(reporter, { ...motion, worldX: 100 + (milliseconds - 3_000) / 1_000,
+        worldVelocityX: 20 }, new Date(started.getTime() + milliseconds));
+      core.updateTelemetry(other, { ...motion, worldX: 100.8 + (milliseconds - 3_000) / 1_000,
+        worldVelocityX: 10 }, new Date(started.getTime() + milliseconds));
+    }
+    core.updateTelemetry(other, {
+      ...motion, worldX: 101.8, worldVelocityX: 10, impactSequence: 2,
+      impactMagnitudeMps: 4, impactWorldX: 101.8, impactWorldY: 0, impactWorldZ: 50,
+      impactWorldVelocityX: 10, impactWorldVelocityY: 0, impactWorldVelocityZ: 0
+    }, new Date(started.getTime() + 4_000));
+    core.updateTelemetry(reporter, {
+      ...motion, worldX: 101, worldVelocityX: 20, impactSequence: 2,
+      impactMagnitudeMps: 6, impactAgeMilliseconds: 50,
+      impactWorldX: 101, impactWorldY: 0, impactWorldZ: 50,
+      impactWorldVelocityX: 20, impactWorldVelocityY: 0, impactWorldVelocityZ: 0
+    }, new Date(started.getTime() + 4_050));
+
+    expect(core.collisionReplay(investigation!.id, new Date(started.getTime() + 4_400))).toMatchObject({
+      isPostWindowComplete: false,
+      isFinalized: false
+    });
+    for (let milliseconds = 4_250; milliseconds <= 7_000; milliseconds += 50) {
+      core.updateTelemetry(reporter, { ...motion, worldX: 101 + (milliseconds - 4_000) / 1_000,
+        worldVelocityX: 20 }, new Date(started.getTime() + milliseconds));
+      core.updateTelemetry(other, { ...motion, worldX: 101.8 + (milliseconds - 4_000) / 1_000,
+        worldVelocityX: 10 }, new Date(started.getTime() + milliseconds));
+    }
+
+    const replay = core.collisionReplay(investigation!.id, new Date(started.getTime() + 7_000));
+    expect(replay).toMatchObject({
+      startsAt: started.toISOString(),
+      endsAt: new Date(started.getTime() + 7_000).toISOString(),
+      availableUntil: new Date(started.getTime() + 7_000).toISOString(),
+      isPostWindowComplete: true,
+      isFinalized: true,
+      incidentTimes: [
+        new Date(started.getTime() + 3_000).toISOString(),
+        new Date(started.getTime() + 4_000).toISOString()
+      ]
+    });
+    expect(replay?.reporterSamples[0].at).toBe(started.toISOString());
+    expect(replay?.otherSamples[0].at).toBe(started.toISOString());
+    expect(Date.parse(replay!.reporterSamples.at(-1)!.at)).toBeGreaterThanOrEqual(Date.parse(replay!.endsAt) - 100);
+    expect(Date.parse(replay!.otherSamples.at(-1)!.at)).toBeGreaterThanOrEqual(Date.parse(replay!.endsAt) - 100);
+    expect(replay?.reporterSamples.length).toBeGreaterThanOrEqual(60);
+    expect(replay?.reporterSamples.length).toBeLessThanOrEqual(75);
+    expect(replay?.otherSamples.length).toBeGreaterThanOrEqual(60);
+    expect(replay?.otherSamples.length).toBeLessThanOrEqual(75);
+
+    const restored = new RaceCore({ sessionName: "测试赛事", maximumParticipants: 12,
+      totalRaceLaps: 5, minimumRequiredPitStops: 0 }, core.serialize());
+    expect(restored.collisionReplay(investigation!.id, new Date(started.getTime() + 7_000)))
+      .toMatchObject({ startsAt: replay?.startsAt, endsAt: replay?.endsAt, isFinalized: true });
   });
 
   it("does not treat parallel braking without an approach trajectory as contact", () => {

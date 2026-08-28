@@ -14,7 +14,7 @@ LazyForza 地产赛事的独立服务端。支持原生 ASP.NET 自托管和 Clo
 
 - 1–12 名车手，可单人发车；额外支持最多 12 个只读 OB 席位；
 - 1–3 节练习与排位、正赛、出场圈、暖胎圈、五盏红灯和方格旗；
-- 车队、维修区、旗语、处罚、全阶段碰撞调查、路线收益切弯证据、DNF/DSQ 和可选断线计圈恢复；
+- 车队、维修区、旗语、处罚、带动态遥测回放的全阶段碰撞调查、路线收益切弯证据、DNF/DSQ 和可选断线计圈恢复；
 - 赛道文件与主办方 Logo 托管；
 - 阶段赛果归档，返回大厅后仍可回看，并支持 PNG/CSV 导出；
 - 面向电脑宽屏和 Pad 触控的浏览器总控；
@@ -125,7 +125,7 @@ Version 0.4.3 adds a complete Chinese and English Race Control interface, isolat
 
 - 1–12 drivers with single-driver starts, plus up to 12 read-only observer slots;
 - one to three practice and qualifying sessions, races, out laps, formation laps, five red lights and the checkered flag;
-- teams, pit lanes, flags, penalties, collision investigations, shortcut evidence, DNF/DSQ and optional disconnected-lap recovery;
+- teams, pit lanes, flags, penalties, collision investigations with dynamic telemetry replay, shortcut evidence, DNF/DSQ and optional disconnected-lap recovery;
 - hosted track packages and organizer logos;
 - archived session results that remain available in the lobby, with PNG and CSV export;
 - browser Race Control designed for desktop widescreens and touch tablets;

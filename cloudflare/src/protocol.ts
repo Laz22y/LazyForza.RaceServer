@@ -196,6 +196,36 @@ export interface CollisionEvidenceSnapshot {
   lastIncidentAt?: string | null;
 }
 
+export interface CollisionReplaySampleSnapshot {
+  at: string;
+  worldX: number;
+  worldY: number;
+  worldZ: number;
+  velocityX: number;
+  velocityY: number;
+  velocityZ: number;
+}
+
+export interface CollisionReplaySnapshot {
+  investigationId: string;
+  startsAt: string;
+  endsAt: string;
+  availableUntil: string;
+  firstIncidentAt: string;
+  lastIncidentAt: string;
+  isPostWindowComplete: boolean;
+  isFinalized: boolean;
+  reporterParticipantId: string;
+  otherParticipantId: string;
+  reporterName: string;
+  otherName: string;
+  reporterThemeColor: string;
+  otherThemeColor: string;
+  incidentTimes: string[];
+  reporterSamples: CollisionReplaySampleSnapshot[];
+  otherSamples: CollisionReplaySampleSnapshot[];
+}
+
 export interface ParticipantSnapshot {
   id: string;
   position: number;
