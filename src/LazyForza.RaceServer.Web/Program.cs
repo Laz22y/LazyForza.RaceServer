@@ -48,6 +48,7 @@ builder.Services.AddSingleton(serviceProvider => new RaceCoordinator(
 builder.Services.AddSingleton<RaceWebSocketRegistry>();
 builder.Services.AddSingleton<HostedTrackPackageStore>();
 builder.Services.AddSingleton<HostedOrganizerLogoStore>();
+builder.Services.AddSingleton<RaceRuleTemplateStore>();
 builder.Services.AddSingleton<RaceBroadcastService>();
 builder.Services.AddSingleton<RaceWebSocketHandler>();
 builder.Services.AddSingleton(new AdminSessionStore(configurationStore.AdminPasswordMatches));
@@ -206,6 +207,73 @@ app.MapGet("/api/admin/state", (HttpContext context, AdminSessionStore sessions,
 
 app.MapGet("/api/admin/settings", (HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
     Authorized(context, sessions) ? Results.Ok(coordinator.RoomSettings()) : Results.Unauthorized());
+
+app.MapGet("/api/admin/rule-templates", (
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceRuleTemplateStore templates) =>
+    Authorized(context, sessions)
+        ? Results.Ok(new { templates = templates.List(), maximumTemplates = RaceRuleTemplateStore.MaximumTemplates })
+        : Results.Unauthorized());
+
+app.MapPost("/api/admin/rule-templates", (
+    RaceRuleTemplateSaveRequest request,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceRuleTemplateStore templates) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    try { return Results.Ok(new { template = templates.Create(request) }); }
+    catch (Exception exception) when (exception is InvalidDataException or IOException)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPut("/api/admin/rule-templates/{templateId:guid}", (
+    Guid templateId,
+    RaceRuleTemplateSaveRequest request,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceRuleTemplateStore templates) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    try { return Results.Ok(new { template = templates.Update(templateId, request) }); }
+    catch (KeyNotFoundException) { return Results.NotFound(new { error = "规则模板不存在。" }); }
+    catch (Exception exception) when (exception is InvalidDataException or IOException)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+});
+
+app.MapPost("/api/admin/rule-templates/{templateId:guid}/apply", (
+    Guid templateId,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceRuleTemplateStore templates,
+    RaceCoordinator coordinator,
+    RaceServerConfigurationStore settings) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    var template = templates.Find(templateId);
+    if (template is null) return Results.NotFound(new { error = "规则模板不存在。" });
+    var result = coordinator.ApplyRoomSettings(RaceRuleTemplateStore.MergeWithRoom(template, coordinator.RoomSettings()));
+    if (!result.IsAccepted) return Results.BadRequest(new { error = result.Error });
+    settings.SaveRoomSettings(coordinator.RoomSettings());
+    return Results.Ok(new { template, room = coordinator.RoomSettings() });
+});
+
+app.MapDelete("/api/admin/rule-templates/{templateId:guid}", (
+    Guid templateId,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceRuleTemplateStore templates) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    return templates.Delete(templateId)
+        ? Results.Ok()
+        : Results.NotFound(new { error = "规则模板不存在。" });
+});
 
 app.MapGet("/api/admin/events", (HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator, int? limit, long? after) =>
     Authorized(context, sessions)

@@ -25,6 +25,8 @@ describe("Race Control localization", () => {
       "utf8");
     expect(packageScript).toContain("'public/i18n.js'");
     expect(packageScript).toContain("'public/lazyforza-logo.png'");
+    expect(packageScript).toContain("'src/rule-templates.ts'");
+    expect(packageScript).toContain("'tests/rule-templates.test.ts'");
   });
 
   it("translates every fixed Chinese Web label and JavaScript literal", () => {

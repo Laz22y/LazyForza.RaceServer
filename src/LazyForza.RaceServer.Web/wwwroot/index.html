@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LazyForza 地产赛事总控</title>
-  <link rel="stylesheet" href="/styles.css?v=20260826-4">
+  <link rel="stylesheet" href="/styles.css?v=20260828-2">
   <link rel="stylesheet" href="/teams.css?v=20260820-1">
   <link rel="stylesheet" href="/events.css?v=20260820-1">
   <link rel="stylesheet" href="/results.css?v=20260823-1">
@@ -149,6 +149,14 @@
       <details id="roomConfiguration" class="panel workspace-panel">
         <summary class="workspace-summary"><span class="workspace-icon">SET</span><span><small>ROOM CONFIGURATION</small><strong>房间、赛道与自动化设置</strong></span><span id="settingsSaved" class="save-state">按需展开</span></summary>
         <article class="controls room-settings workspace-body">
+          <section class="rule-template-panel">
+            <div class="rule-template-heading">
+              <div><p class="eyebrow">RULE TEMPLATES</p><h2>赛事规则模板</h2><p class="muted compact">复用圈数、赛制、发车、进站、车队规模与自动判定规则；赛事名称、赛道和车队资料不会写入模板。</p></div>
+              <div class="rule-template-create"><label>模板名称<input id="ruleTemplateName" maxlength="64" placeholder="例如：周末冲刺赛"></label><button id="saveRuleTemplate" type="button" class="primary">保存为新模板</button></div>
+            </div>
+            <p id="ruleTemplateStatus" class="rule-template-status" aria-live="polite"></p>
+            <div id="ruleTemplateList" class="rule-template-list"><div class="rule-template-empty">尚未保存规则模板</div></div>
+          </section>
           <div class="section-heading"><div><p class="eyebrow">GENERAL</p><h2>基础房间设置</h2></div><span class="section-note">发车后需返回大厅才能修改比赛规则</span></div>
           <div class="field-grid room-fields room-fields-primary">
             <label>赛事名称<input id="sessionName" maxlength="64"></label><label>正赛圈数<input id="raceLaps" type="number" min="1" max="999"></label><label>完赛最少进站次数<input id="minimumRequiredPitStops" type="number" min="0" max="20" value="1"></label><label>赛道分段数<input id="sectorCount" type="number" min="1" max="20"></label><label class="toggle"><input id="automaticYellow" type="checkbox"><span>启用自动黄旗</span></label><label class="toggle"><input id="allowTeams" type="checkbox"><span>允许车队</span></label>
@@ -208,7 +216,7 @@
       <p class="collision-replay-disclaimer">这是各客户端上报遥测形成的轨迹证据，不是游戏画面，也不自动认定事故责任。</p>
     </section>
   </div>
-  <script src="/i18n.js?v=20260828-1" defer></script>
-  <script src="/app.js?v=20260828-1" defer></script>
+  <script src="/i18n.js?v=20260828-2" defer></script>
+  <script src="/app.js?v=20260828-2" defer></script>
 </body>
 </html>

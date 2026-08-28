@@ -24,6 +24,16 @@ import {
   verifyPassword
 } from "./passwords";
 import { inspectEstateTrackPackage } from "./track-package";
+import {
+  createRuleTemplate,
+  deleteRuleTemplate,
+  maximumRuleTemplates,
+  normalizeRuleTemplates,
+  roomSettingsFromRuleTemplate,
+  type RaceRuleTemplateSaveRequest,
+  type RaceRuleTemplateSnapshot,
+  updateRuleTemplate
+} from "./rule-templates";
 
 interface Env {
   RACE_ROOM: DurableObjectNamespace;
@@ -50,6 +60,7 @@ const maximumHostedTrackPackageBytes = 1_572_864;
 const organizerLogoKey = "organizer-logo-v1";
 const organizerLogoMetadataKey = "organizer-logo-metadata-v1";
 const maximumOrganizerLogoBytes = 262_144;
+const ruleTemplatesKey = "race-rule-templates-v1";
 const roomName = "main";
 
 interface HostedTrackPackageMetadata {
@@ -98,6 +109,7 @@ export class RaceRoom {
   private credentials: StoredCredentials | null = null;
   private hostedTrackPackage: HostedTrackPackageMetadata | null = null;
   private organizerLogo: OrganizerLogoMetadata | null = null;
+  private ruleTemplates: RaceRuleTemplateSnapshot[] = [];
   private setupInProgress = false;
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
@@ -106,6 +118,8 @@ export class RaceRoom {
       this.credentials = await this.state.storage.get<StoredCredentials>(storedCredentialsKey) ?? null;
       this.hostedTrackPackage = await this.state.storage.get<HostedTrackPackageMetadata>(hostedTrackPackageMetadataKey) ?? null;
       this.organizerLogo = await this.state.storage.get<OrganizerLogoMetadata>(organizerLogoMetadataKey) ?? null;
+      this.ruleTemplates = normalizeRuleTemplates(
+        await this.state.storage.get<RaceRuleTemplateSnapshot[]>(ruleTemplatesKey));
       this.core = new RaceCore({
         sessionName: env.SESSION_NAME,
         maximumParticipants: Number.parseInt(env.MAXIMUM_PARTICIPANTS, 10),
@@ -200,6 +214,22 @@ export class RaceRoom {
       return json(this.core.roomSettings());
     if (url.pathname === "/api/admin/settings" && request.method === "POST")
       return this.applyAdmin(request, body => this.core.applyRoomSettings(body as RoomSettings));
+    if (url.pathname === "/api/admin/rule-templates" && request.method === "GET")
+      return json({
+        templates: [...this.ruleTemplates].sort((left, right) =>
+          right.updatedAt.localeCompare(left.updatedAt) || left.name.localeCompare(right.name)),
+        maximumTemplates: maximumRuleTemplates
+      });
+    if (url.pathname === "/api/admin/rule-templates" && request.method === "POST")
+      return this.saveRuleTemplate(request);
+    const applyRuleTemplateRoute = url.pathname.match(/^\/api\/admin\/rule-templates\/([^/]+)\/apply$/);
+    if (applyRuleTemplateRoute && request.method === "POST")
+      return this.applyRuleTemplate(decodeURIComponent(applyRuleTemplateRoute[1]));
+    const ruleTemplateRoute = url.pathname.match(/^\/api\/admin\/rule-templates\/([^/]+)$/);
+    if (ruleTemplateRoute && request.method === "PUT")
+      return this.saveRuleTemplate(request, decodeURIComponent(ruleTemplateRoute[1]));
+    if (ruleTemplateRoute && request.method === "DELETE")
+      return this.removeRuleTemplate(decodeURIComponent(ruleTemplateRoute[1]));
     if (url.pathname === "/api/admin/collision-investigations" && request.method === "POST")
       return this.applyAdmin(request, body => this.core.setAutomaticCollisionInvestigations(
         Boolean((body as { enabled?: boolean }).enabled)));
@@ -512,6 +542,41 @@ export class RaceRoom {
     } catch (error) {
       return json({ error: error instanceof Error ? error.message : "请求格式无效。" }, 400);
     }
+  }
+
+  private async saveRuleTemplate(request: Request, templateId?: string): Promise<Response> {
+    try {
+      const body = await readJson(request) as RaceRuleTemplateSaveRequest;
+      const saved = templateId
+        ? updateRuleTemplate(this.ruleTemplates, templateId, body)
+        : createRuleTemplate(this.ruleTemplates, body);
+      this.ruleTemplates = saved.templates;
+      await this.state.storage.put(ruleTemplatesKey, this.ruleTemplates);
+      return json({ template: saved.template });
+    } catch (error) {
+      const status = error instanceof RangeError ? 404 : 400;
+      return json({ error: error instanceof Error ? error.message : "规则模板保存失败。" }, status);
+    }
+  }
+
+  private async applyRuleTemplate(templateId: string): Promise<Response> {
+    const template = this.ruleTemplates.find(item => item.id === templateId);
+    if (!template) return json({ error: "规则模板不存在。" }, 404);
+    const result = this.core.applyRoomSettings(
+      roomSettingsFromRuleTemplate(template, this.core.roomSettings()));
+    if (!result.ok) return json({ error: result.error }, 400);
+    await this.persist();
+    await this.scheduleAlarm();
+    this.broadcastSnapshot(true);
+    return json({ template, room: this.core.roomSettings() });
+  }
+
+  private async removeRuleTemplate(templateId: string): Promise<Response> {
+    const removed = deleteRuleTemplate(this.ruleTemplates, templateId);
+    if (!removed.deleted) return json({ error: "规则模板不存在。" }, 404);
+    this.ruleTemplates = removed.templates;
+    await this.state.storage.put(ruleTemplatesKey, this.ruleTemplates);
+    return json({ ok: true });
   }
 
   private async disconnectClient(request: Request): Promise<Response> {
