@@ -44,7 +44,7 @@
 
 协议的唯一模型源是 `protocol/race-protocol.schema.json`。`scripts/generate-protocol.mjs` 从它生成：
 
-- 客户端 `../LazyForza\src\LazyForza.Modules.EstateRace\EstateRaceProtocol.g.cs`；
+- 客户端 `../LazyForza/src/LazyForza.Modules.EstateRace/EstateRaceProtocol.g.cs`；
 - 原生服务端 `src/LazyForza.RaceServer.Protocol/RaceProtocolModels.g.cs`；
 - Cloudflare `cloudflare/src/protocol.generated.ts`。
 
