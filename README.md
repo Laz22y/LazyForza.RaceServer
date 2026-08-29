@@ -21,6 +21,7 @@ LazyForza 地产赛事的独立服务端。支持原生 ASP.NET 自托管和 Clo
 - 阶段赛果归档，返回大厅后仍可回看，并支持 PNG/CSV 导出；
 - 面向电脑宽屏和 Pad 触控的浏览器总控；
 - 可为多名总控分别创建账号：超管拥有全部权限，管理员可管理赛事但不能管理总控账号，裁判仅处理判罚与调查；
+- 独立只读令牌保护的公开实时计时页，展示排名、圈数、Delta、最佳圈、旗语、维修、处罚和阶段赛果，适配手机、Pad 与直播浏览器源；
 - JSONL 审计日志和关键赛事状态持久化。
 
 服务端不读取游戏。车手位置、圈速、维修区状态和抓地趋势由各自的 LazyForza 客户端通过 FH6 官方 UDP 推导后上传。
@@ -48,6 +49,8 @@ chmod +x ./LazyForza.RaceServer.Web
 ```
 
 默认监听 `http://0.0.0.0:24876`。首次打开网页时设置房间密码、初始超管密码和赛事基础规则，不要求同时设置其他角色。超管登录后可按需创建多个超管、管理员或裁判账号，同一角色可有多个独立名称和密码。房间密码没有最少位数限制；总控账号密码需 8–128 个字符，且不能与房间密码或其他总控账号密码相同。
+
+管理员或超管可在“公开实时计时”区生成普通浏览和直播透明背景链接。只读令牌与总控账号独立，明文只在生成时显示；轮换或停用后，旧链接立即失效。
 
 公网部署应由 Caddy、Nginx 或同类反向代理终止 TLS，让客户端连接 `wss://`。不要直接暴露明文 `ws://`。
 
@@ -135,6 +138,7 @@ Version 0.4.3 adds a complete Chinese and English Race Control interface, isolat
 - archived session results that remain available in the lobby, with PNG and CSV export;
 - browser Race Control designed for desktop widescreens and touch tablets;
 - separate Race Control accounts for multiple users: super admins have full access, administrators manage the race but not accounts, and stewards handle penalties and investigations only;
+- public live timing protected by a separate read-only token, with standings, laps, deltas, best laps, flags, pit state, penalties and stage results for phones, tablets and broadcast browser sources;
 - JSONL audit logs and persistent critical race state.
 
 The server does not read the game. Each LazyForza client derives local position, lap, pit and grip information from official FH6 UDP data and reports the required race data.
@@ -162,6 +166,8 @@ chmod +x ./LazyForza.RaceServer.Web
 ```
 
 The server listens on `http://0.0.0.0:24876` by default. On first launch, set the room password, initial super-admin password and base rules; the other roles are optional. A super admin can later create multiple named super-admin, administrator or steward accounts, including several users with the same role. Each Race Control password must contain 8–128 characters and must differ from the room password and every other Race Control password.
+
+Administrators and super admins can generate regular viewer and transparent broadcast links from the Public Live Timing panel. The read-only token is independent of Race Control accounts and is shown only when generated; rotating or disabling it invalidates every previous link immediately.
 
 For public hosting, terminate TLS through Caddy, Nginx or a similar reverse proxy and connect clients over `wss://`. Do not expose plain `ws://` publicly.
 

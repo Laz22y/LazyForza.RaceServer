@@ -33,6 +33,13 @@ import {
   verifyPassword
 } from "./passwords";
 import { controlRoleAllows, requiredControlPermission } from "./control-access";
+import {
+  bearerToken,
+  createPublicTimingAccess,
+  publicTimingAccessStatus,
+  publicTimingPayload,
+  verifyPublicTimingToken
+} from "./public-timing";
 import { inspectEstateTrackPackage } from "./track-package";
 import {
   createRuleTemplate,
@@ -123,6 +130,7 @@ export default {
       return withSecurityHeaders(await room.fetch(request));
 
     if (url.pathname.startsWith("/api/setup") || url.pathname.startsWith("/api/admin/") ||
+        url.pathname.startsWith("/api/public/") ||
         url.pathname === "/api/track-package" || url.pathname === "/api/organizer-logo")
       return withSecurityHeaders(await room.fetch(request));
 
@@ -221,6 +229,8 @@ export class RaceRoom {
       return this.downloadTrackPackage();
     if (url.pathname === "/api/organizer-logo" && request.method === "GET")
       return this.downloadOrganizerLogo();
+    if (url.pathname === "/api/public/timing" && request.method === "GET")
+      return this.publicTiming(request);
     let controlPrincipal: ControlPrincipal | null = null;
     if (url.pathname.startsWith("/api/admin/")) {
       controlPrincipal = await this.adminPrincipal(request);
@@ -238,6 +248,12 @@ export class RaceRoom {
       });
     if (url.pathname === "/api/admin/control-accounts" && request.method === "POST")
       return this.createControlAccount(request);
+    if (url.pathname === "/api/admin/public-timing" && request.method === "GET")
+      return json(publicTimingAccessStatus(this.credentials?.publicTiming));
+    if (url.pathname === "/api/admin/public-timing" && request.method === "POST")
+      return this.rotatePublicTiming();
+    if (url.pathname === "/api/admin/public-timing" && request.method === "DELETE")
+      return this.disablePublicTiming();
     const controlAccountRoute = url.pathname.match(/^\/api\/admin\/control-accounts\/([^/]+)$/);
     if (controlAccountRoute && request.method === "PUT")
       return this.updateControlAccount(decodeURIComponent(controlAccountRoute[1]), request);
@@ -613,6 +629,37 @@ export class RaceRoom {
     };
     await this.state.storage.put(storedCredentialsKey, this.credentials);
     return this.credentials;
+  }
+
+  private async publicTiming(request: Request): Promise<Response> {
+    if (!await verifyPublicTimingToken(bearerToken(request), this.credentials?.publicTiming))
+      return json({ error: "只读计时令牌无效或已停用。" }, 401);
+    return json(publicTimingPayload(this.core.snapshot(), this.core.results()), 200, {
+      "X-Robots-Tag": "noindex, nofollow"
+    });
+  }
+
+  private async rotatePublicTiming(): Promise<Response> {
+    const credentials = await this.ensureStoredCredentials();
+    const created = await createPublicTimingAccess();
+    this.credentials = { ...credentials, publicTiming: created.stored };
+    await this.state.storage.put(storedCredentialsKey, this.credentials);
+    const fragment = `#token=${created.token}`;
+    return json({
+      enabled: true,
+      generatedAt: created.stored.generatedAt,
+      viewerPath: `/timing.html${fragment}`,
+      broadcastPath: `/timing.html?overlay=1${fragment}`
+    });
+  }
+
+  private async disablePublicTiming(): Promise<Response> {
+    const credentials = await this.ensureStoredCredentials();
+    const disabled = credentials.publicTiming !== undefined;
+    const { publicTiming: _removed, ...remaining } = credentials;
+    this.credentials = remaining;
+    await this.state.storage.put(storedCredentialsKey, this.credentials);
+    return json({ disabled });
   }
 
   private async playerPasswordMatches(password: string): Promise<boolean> {

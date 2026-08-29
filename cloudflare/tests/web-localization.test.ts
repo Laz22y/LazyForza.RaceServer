@@ -8,7 +8,10 @@ const nativeUrl = (name: string) =>
 
 describe("Race Control localization", () => {
   it("keeps native and Cloudflare Web resources identical", () => {
-    for (const name of ["app.js", "i18n.js", "index.html", "styles.css"])
+    for (const name of [
+      "app.js", "i18n.js", "index.html", "styles.css",
+      "timing.html", "timing.css", "timing.js"
+    ])
       expect(readFileSync(publicUrl(name), "utf8")).toBe(readFileSync(nativeUrl(name), "utf8"));
   });
 
@@ -44,12 +47,19 @@ describe("Race Control localization", () => {
     expect(packageScript).toContain("'tests/event-projects.test.ts'");
     expect(packageScript).toContain("'src/control-access.ts'");
     expect(packageScript).toContain("'tests/control-access.test.ts'");
+    expect(packageScript).toContain("'public/timing.html'");
+    expect(packageScript).toContain("'public/timing.css'");
+    expect(packageScript).toContain("'public/timing.js'");
+    expect(packageScript).toContain("'src/public-timing.ts'");
+    expect(packageScript).toContain("'tests/public-timing.test.ts'");
   });
 
   it("translates every fixed Chinese Web label and JavaScript literal", () => {
     const translate = loadEnglishTranslator();
     const containsHan = (value: string) => /\p{Script=Han}/u.test(value);
-    const html = readFileSync(publicUrl("index.html"), "utf8");
+    const html = ["index.html", "timing.html"]
+      .map(name => readFileSync(publicUrl(name), "utf8"))
+      .join("\n");
     const htmlValues = new Set<string>();
     for (const match of html.matchAll(/>([^<>]*\p{Script=Han}[^<>]*)</gu)) {
       const value = match[1].replace(/\s+/g, " ").trim();
@@ -59,7 +69,9 @@ describe("Race Control localization", () => {
       /(?:placeholder|aria-label|title|alt)="([^"]*\p{Script=Han}[^"]*)"/gu))
       htmlValues.add(match[1]);
 
-    const app = readFileSync(publicUrl("app.js"), "utf8");
+    const app = ["app.js", "timing.js"]
+      .map(name => readFileSync(publicUrl(name), "utf8"))
+      .join("\n");
     const appValues = new Set<string>();
     for (const match of app.matchAll(/(['"])((?:\\.|(?!\1)[^\\\r\n])*)\1/g)) {
       if (containsHan(match[2])) appValues.add(match[2]);

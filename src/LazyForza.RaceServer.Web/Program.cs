@@ -62,6 +62,7 @@ app.Use(async (context, next) =>
 {
     context.Response.Headers.XContentTypeOptions = "nosniff";
     context.Response.Headers.XFrameOptions = "DENY";
+    context.Response.Headers["Referrer-Policy"] = "no-referrer";
     context.Response.Headers.ContentSecurityPolicy =
         "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:";
     await next();
@@ -222,6 +223,19 @@ app.MapPost("/api/admin/login", (RaceAdminLoginRequest request, HttpContext cont
     return Results.Ok(new { serverName = serverOptions.ServerName, principal });
 });
 
+app.MapGet("/api/public/timing", (
+    HttpContext context,
+    RaceServerConfigurationStore settings,
+    RaceCoordinator coordinator) =>
+{
+    var token = BearerToken(context.Request);
+    if (!settings.PublicTimingTokenMatches(token))
+        return Results.Json(new { error = "只读计时令牌无效或已停用。" }, statusCode: StatusCodes.Status401Unauthorized);
+    context.Response.Headers.CacheControl = "no-store";
+    context.Response.Headers["X-Robots-Tag"] = "noindex, nofollow";
+    return Results.Ok(RacePublicTimingProjection.Create(coordinator.Snapshot(), coordinator.Results()));
+});
+
 app.MapPost("/api/admin/logout", (HttpContext context, AdminSessionStore sessions) =>
 {
     context.Request.Cookies.TryGetValue(AdminSessionStore.CookieName, out var token);
@@ -286,6 +300,25 @@ app.MapDelete("/api/admin/control-accounts/{accountId:guid}", (
 
 app.MapGet("/api/admin/state", (HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
     Authorized(context, sessions) ? Results.Ok(coordinator.Snapshot()) : Results.Unauthorized());
+
+app.MapGet("/api/admin/public-timing", (RaceServerConfigurationStore settings) =>
+    Results.Ok(settings.PublicTimingStatus()));
+
+app.MapPost("/api/admin/public-timing", (RaceServerConfigurationStore settings) =>
+{
+    var secret = settings.RotatePublicTimingToken();
+    var fragment = $"#token={secret.Token}";
+    return Results.Ok(new
+    {
+        enabled = true,
+        secret.GeneratedAt,
+        viewerPath = $"/timing.html{fragment}",
+        broadcastPath = $"/timing.html?overlay=1{fragment}"
+    });
+});
+
+app.MapDelete("/api/admin/public-timing", (RaceServerConfigurationStore settings) =>
+    Results.Ok(new { disabled = settings.DisablePublicTiming() }));
 
 app.MapGet("/api/admin/settings", (HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
     Authorized(context, sessions) ? Results.Ok(coordinator.RoomSettings()) : Results.Unauthorized());
@@ -776,6 +809,15 @@ app.Run();
 static bool Authorized(HttpContext context, AdminSessionStore sessions) =>
     context.Request.Cookies.TryGetValue(AdminSessionStore.CookieName, out var token) &&
     sessions.TryGetPrincipal(token, out _);
+
+static string? BearerToken(HttpRequest request)
+{
+    var authorization = request.Headers.Authorization.ToString();
+    const string prefix = "Bearer ";
+    return authorization.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+        ? authorization[prefix.Length..].Trim()
+        : null;
+}
 
 static IResult ChangeProjectStatus(
     Guid projectId,

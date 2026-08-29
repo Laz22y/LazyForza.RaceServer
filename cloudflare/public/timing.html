@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>LazyForza 公开实时计时</title>
+  <link rel="stylesheet" href="/timing.css?v=20260829-1">
+  <script defer src="/i18n.js?v=20260829-1"></script>
+  <script defer src="/timing.js?v=20260829-1"></script>
+</head>
+<body>
+  <main class="timing-shell">
+    <header class="timing-header">
+      <div class="timing-brand">
+        <img src="/lazyforza-logo.png" alt="LazyForza">
+        <div><p>LAZYFORZA · LIVE TIMING</p><h1 id="sessionName">公开实时计时</h1><span id="trackName">等待赛事数据</span></div>
+      </div>
+      <div class="viewer-toolbar">
+        <label class="language-control"><span class="sr-only">界面语言</span><select id="languageSelect"><option value="zh-CN">简体中文</option><option value="en">English</option></select></label>
+        <span id="connectionState" class="connection-state waiting"><i></i><span>正在连接</span></span>
+      </div>
+    </header>
+
+    <section id="accessError" class="access-error hidden" role="alert"></section>
+
+    <section class="summary-grid" aria-label="赛事摘要">
+      <article class="summary phase"><span>当前阶段</span><strong id="phaseValue">—</strong><small id="phaseDetail">等待赛事数据</small></article>
+      <article id="flagSummary" class="summary flag green"><span>当前旗语</span><strong id="flagValue">GREEN</strong><small id="flagMessage">赛道正常</small></article>
+      <article class="summary fastest"><span>全场最佳圈</span><strong id="fastestLap">—</strong><small id="fastestDriver">尚无有效圈</small></article>
+      <article class="summary field"><span>参赛车手</span><strong id="driverCount">0</strong><small id="leaderDetail">等待排名</small></article>
+    </section>
+
+    <section class="timing-panel">
+      <div class="section-heading"><div><p>LIVE CLASSIFICATION</p><h2>实时排名</h2></div><span id="lastUpdated">尚未更新</span></div>
+      <div class="timing-table-wrap">
+        <table class="timing-table">
+          <thead><tr><th>排名</th><th>车手</th><th>圈数</th><th>Delta</th><th>当前圈</th><th>最佳圈</th><th>维修</th><th>处罚</th></tr></thead>
+          <tbody id="timingRows"><tr><td colspan="8" class="empty">等待赛事数据</td></tr></tbody>
+        </table>
+      </div>
+      <div id="timingCards" class="timing-cards"></div>
+    </section>
+
+    <section class="results-panel">
+      <div class="section-heading"><div><p>SESSION RESULTS</p><h2>阶段赛果</h2></div><span id="resultCount">0 份赛果</span></div>
+      <div id="resultHistory" class="result-history"><p class="empty">尚无阶段赛果</p></div>
+    </section>
+
+    <footer class="timing-footer">计时与赛果来自 LazyForza 地产赛事系统，不是 FH6 官方比赛结果。</footer>
+  </main>
+</body>
+</html>

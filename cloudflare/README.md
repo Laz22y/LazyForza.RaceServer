@@ -24,7 +24,8 @@
 - 接收客户端路线收益切弯证据，并保持正赛首圈、换位和进出维修区后的实时秒差连续；
 - WebSocket Hibernation，空闲连接不要求 Worker 一直驻留；
 - SQLite 后端 Durable Object 保存关键赛事状态；
-- 复用 .NET 自托管版的 Web 总控静态页面。
+- 复用 .NET 自托管版的 Web 总控静态页面；
+- 独立只读令牌保护的公开实时计时页，适配手机、Pad 和直播浏览器源；
 - 与自托管版一致的判罚/调查区、赛后加时结算及处罚修改和取消接口。
 
 客户端遥测默认 10 Hz，但房间快照广播最多 10 Hz。服务端不采信遥测消息中的累计圈数，只有唯一且有效的 `lapCompleted` 事件能把服务端权威圈数增加一圈。维修区只记录停留条件和次数，不能证明游戏已经更换轮胎或重置车损。
@@ -37,7 +38,7 @@
 
 Cloudflare 会把这个公开模板复制到你的 GitHub 或 GitLab 账号，自动创建 Durable Object 绑定并配置后续提交的构建部署。`cloudflare` 子目录已包含 Worker、依赖锁文件和控制面板静态资源，不依赖仓库上级目录。
 
-部署完成后直接打开 Cloudflare 分配的域名。网页第一次打开只需要设置房间密码、初始超管密码和房间基础规则，不要求同时设置管理员、裁判或赛道文件信息。超管之后可按需创建多个独立账号；管理员可管理赛事但不能管理总控账号，裁判仅处理判罚与调查。房间密码没有最少位数限制，总控账号密码仍需 8–128 个字符，密码只以加盐摘要保存在 Durable Object 中。初始化完成后，到总控页面上传 LazyForza 导出的 `.lfzestate`，服务端会自动识别并填写赛道名称、标识、地图修订和稳定特征值。完成设置后，把域名与房间密码发给车手，总控密码只交给对应工作人员。
+部署完成后直接打开 Cloudflare 分配的域名。网页第一次打开只需要设置房间密码、初始超管密码和房间基础规则，不要求同时设置管理员、裁判或赛道文件信息。超管之后可按需创建多个独立账号；管理员可管理赛事但不能管理总控账号，裁判仅处理判罚与调查。房间密码没有最少位数限制，总控账号密码仍需 8–128 个字符，密码只以加盐摘要保存在 Durable Object 中。初始化完成后，到总控页面上传 LazyForza 导出的 `.lfzestate`，服务端会自动识别并填写赛道名称、标识、地图修订和稳定特征值。公开计时链接在总控的“公开实时计时”区生成，令牌明文只显示一次，轮换或停用后旧链接立即失效。完成设置后，把域名与房间密码发给车手，总控密码只交给对应工作人员。
 
 ## PowerShell 部署
 
@@ -105,7 +106,8 @@ The Worker uses one Durable Object race room named `main`, with 1–12 drivers a
 - standings, live gaps, flags, penalties, DNF/DSQ, collision investigations, shortcut evidence and pit progress;
 - optional 30-second disconnected-lap recovery with acknowledged, deduplicated lap events;
 - hosted `.lfzestate` track packages, organizer logos, WebSocket Hibernation and persistent Durable Object state;
-- the same Chinese and English browser Race Control used by the native server.
+- the same Chinese and English browser Race Control used by the native server;
+- public live timing protected by an independent read-only token, with phone, tablet and transparent broadcast layouts.
 
 Client telemetry defaults to 10 Hz and room snapshots are broadcast at no more than 10 Hz. Only a unique valid `lapCompleted` event advances the authoritative lap count. Pit state records location and dwell conditions; it cannot prove that the game changed tires or repaired damage.
 
@@ -113,7 +115,7 @@ Client telemetry defaults to 10 Hz and room snapshots are broadcast at no more t
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Laz22y/LazyForza.RaceServer/tree/main/cloudflare)
 
-Cloudflare copies this public template to your GitHub or GitLab account, creates the Durable Object binding and configures deployment from later commits. After deployment, open the Worker domain and create the initial super-admin account; other roles are optional and can be added later. Super admins have full access, administrators manage the race but not Race Control accounts, and stewards handle penalties and investigations only. Then upload the matching `.lfzestate` package from Race Control.
+Cloudflare copies this public template to your GitHub or GitLab account, creates the Durable Object binding and configures deployment from later commits. After deployment, open the Worker domain and create the initial super-admin account; other roles are optional and can be added later. Super admins have full access, administrators manage the race but not Race Control accounts, and stewards handle penalties and investigations only. Then upload the matching `.lfzestate` package from Race Control. Public viewer and transparent broadcast links are generated in the Public Live Timing panel; rotating or disabling the separate read-only token invalidates every previous link.
 
 ### PowerShell deployment
 

@@ -95,6 +95,44 @@ public sealed class RaceControlAccessTests
     }
 
     [TestMethod]
+    public void PublicTimingTokenIsStoredAsDigestAndCanBeRotatedOrDisabled()
+    {
+        var root = TemporaryDirectory();
+        try
+        {
+            var store = ConfiguredStore(root);
+            Assert.IsFalse(store.PublicTimingStatus().Enabled);
+
+            var generatedAt = new DateTimeOffset(2026, 8, 29, 8, 30, 0, TimeSpan.Zero);
+            var first = store.RotatePublicTimingToken(generatedAt);
+            Assert.AreEqual(43, first.Token.Length);
+            Assert.AreEqual(generatedAt, first.GeneratedAt);
+            Assert.IsTrue(store.PublicTimingTokenMatches(first.Token));
+            Assert.IsFalse(store.PublicTimingTokenMatches("room-password"));
+            Assert.IsFalse(store.PublicTimingTokenMatches("owner-password"));
+
+            var settingsPath = Path.Combine(root, "server-settings.json");
+            Assert.IsFalse(File.ReadAllText(settingsPath).Contains(first.Token, StringComparison.Ordinal));
+
+            var reloaded = new RaceServerConfigurationStore(new RaceServerOptions { DataDirectory = root });
+            Assert.IsTrue(reloaded.PublicTimingTokenMatches(first.Token));
+            Assert.AreEqual(generatedAt, reloaded.PublicTimingStatus().GeneratedAt);
+
+            var second = reloaded.RotatePublicTimingToken(generatedAt.AddMinutes(1));
+            Assert.IsFalse(reloaded.PublicTimingTokenMatches(first.Token));
+            Assert.IsTrue(reloaded.PublicTimingTokenMatches(second.Token));
+
+            reloaded.DisablePublicTiming();
+            Assert.IsFalse(reloaded.PublicTimingStatus().Enabled);
+            Assert.IsFalse(reloaded.PublicTimingTokenMatches(second.Token));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [TestMethod]
     public void RolesMapToReadRaceAdjudicationAndAccountPermissions()
     {
         Assert.IsTrue(RaceControlAccess.Allows(RaceControlRole.SuperAdmin, RaceControlPermission.ManageControlAccounts));
@@ -110,6 +148,10 @@ public sealed class RaceControlAccessTests
             RaceControlAccess.RequiredPermission("POST", "/api/admin/flag"));
         Assert.AreEqual(RaceControlPermission.ManageRace,
             RaceControlAccess.RequiredPermission("POST", "/api/admin/participant"));
+        Assert.AreEqual(RaceControlPermission.View,
+            RaceControlAccess.RequiredPermission("GET", "/api/admin/public-timing"));
+        Assert.AreEqual(RaceControlPermission.ManageRace,
+            RaceControlAccess.RequiredPermission("POST", "/api/admin/public-timing"));
         Assert.AreEqual(RaceControlPermission.ManageControlAccounts,
             RaceControlAccess.RequiredPermission("DELETE", "/api/admin/control-accounts/123"));
     }

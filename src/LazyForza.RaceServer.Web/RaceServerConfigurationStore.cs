@@ -29,7 +29,7 @@ public sealed class RaceServerConfigurationStore
         Directory.CreateDirectory(root);
         settingsPath = Path.Combine(root, "server-settings.json");
         stored = Load(settingsPath);
-        if (stored is { } loaded && (loaded.Version < 2 || loaded.ControlAccounts is not { Count: > 0 }))
+        if (stored is { } loaded && (loaded.Version < 3 || loaded.ControlAccounts is not { Count: > 0 }))
         {
             stored = Upgrade(loaded);
             Save(stored);
@@ -109,6 +109,61 @@ public sealed class RaceServerConfigurationStore
         }
     }
 
+    public RacePublicTimingAccessStatus PublicTimingStatus()
+    {
+        lock (sync)
+            return new RacePublicTimingAccessStatus(
+                stored?.PublicTiming is not null,
+                stored?.PublicTiming?.GeneratedAt);
+    }
+
+    public RacePublicTimingTokenSecret RotatePublicTimingToken(DateTimeOffset? generatedAt = null)
+    {
+        lock (sync)
+        {
+            var configuration = stored ?? throw new InvalidOperationException("服务端尚未完成首次设置。");
+            var token = Base64Url(RandomNumberGenerator.GetBytes(32));
+            var timestamp = generatedAt ?? DateTimeOffset.UtcNow;
+            stored = configuration with
+            {
+                Version = 3,
+                PublicTiming = new StoredPublicTimingAccess(TokenDigest(token), timestamp)
+            };
+            Save(stored);
+            return new RacePublicTimingTokenSecret(token, timestamp);
+        }
+    }
+
+    public bool PublicTimingTokenMatches(string? token)
+    {
+        lock (sync)
+        {
+            if (stored?.PublicTiming is not { } access || string.IsNullOrWhiteSpace(token) || token.Length > 128)
+                return false;
+            try
+            {
+                var expected = Convert.FromBase64String(access.Hash);
+                var actual = TokenDigestBytes(token);
+                return expected.Length == actual.Length && CryptographicOperations.FixedTimeEquals(actual, expected);
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
+        }
+    }
+
+    public bool DisablePublicTiming()
+    {
+        lock (sync)
+        {
+            if (stored is not { PublicTiming: not null } configuration) return false;
+            stored = configuration with { Version = 3, PublicTiming = null };
+            Save(stored);
+            return true;
+        }
+    }
+
     public IReadOnlyList<RaceControlAccountSummary> ListControlAccounts()
     {
         lock (sync)
@@ -140,7 +195,7 @@ public sealed class RaceServerConfigurationStore
             var account = new StoredControlAccount(
                 Guid.NewGuid(), name, request.Role, Hash(password), now, now);
             accounts.Add(account);
-            stored = configuration with { Version = 2, ControlAccounts = accounts };
+            stored = configuration with { Version = 3, ControlAccounts = accounts };
             Save(stored);
             return Summary(account);
         }
@@ -180,7 +235,7 @@ public sealed class RaceServerConfigurationStore
                 UpdatedAt = updatedAt ?? DateTimeOffset.UtcNow
             };
             accounts[index] = account;
-            stored = configuration with { Version = 2, ControlAccounts = accounts };
+            stored = configuration with { Version = 3, ControlAccounts = accounts };
             Save(stored);
             return Summary(account);
         }
@@ -198,7 +253,7 @@ public sealed class RaceServerConfigurationStore
                 accounts.Count(item => item.Role == RaceControlRole.SuperAdmin) == 1)
                 throw new InvalidDataException("至少需要保留一个超管账号。");
             accounts.Remove(account);
-            stored = configuration with { Version = 2, ControlAccounts = accounts };
+            stored = configuration with { Version = 3, ControlAccounts = accounts };
             Save(stored);
             return true;
         }
@@ -299,7 +354,7 @@ public sealed class RaceServerConfigurationStore
         var now = DateTimeOffset.UtcNow;
         var adminDigest = Hash(adminPassword);
         return new StoredServerConfiguration(
-            2,
+            3,
             Hash(playerPassword),
             adminDigest,
             room,
@@ -309,11 +364,11 @@ public sealed class RaceServerConfigurationStore
 
     private static StoredServerConfiguration Upgrade(StoredServerConfiguration configuration)
     {
-        if (configuration.ControlAccounts is { Count: > 0 }) return configuration with { Version = 2 };
+        if (configuration.ControlAccounts is { Count: > 0 }) return configuration with { Version = 3 };
         var now = DateTimeOffset.UtcNow;
         return configuration with
         {
-            Version = 2,
+            Version = 3,
             ControlAccounts =
             [
                 new StoredControlAccount(
@@ -359,6 +414,14 @@ public sealed class RaceServerConfigurationStore
         return new StoredPassword(Convert.ToBase64String(salt), Convert.ToBase64String(hash), Iterations);
     }
 
+    private static string TokenDigest(string token) => Convert.ToBase64String(TokenDigestBytes(token));
+
+    private static byte[] TokenDigestBytes(string token) =>
+        SHA256.HashData(Encoding.UTF8.GetBytes(token));
+
+    private static string Base64Url(byte[] value) =>
+        Convert.ToBase64String(value).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
     private static bool Verify(string password, StoredPassword stored)
     {
         try
@@ -380,6 +443,7 @@ public sealed class RaceServerConfigurationStore
     }
 
     private sealed record StoredPassword(string Salt, string Hash, int Iterations);
+    private sealed record StoredPublicTimingAccess(string Hash, DateTimeOffset GeneratedAt);
     private sealed record StoredControlAccount(
         Guid Id,
         string Name,
@@ -392,5 +456,6 @@ public sealed class RaceServerConfigurationStore
         StoredPassword PlayerPassword,
         StoredPassword AdminPassword,
         RaceRoomSettingsSnapshot Room,
-        IReadOnlyList<StoredControlAccount>? ControlAccounts = null);
+        IReadOnlyList<StoredControlAccount>? ControlAccounts = null,
+        StoredPublicTimingAccess? PublicTiming = null);
 }

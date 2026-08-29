@@ -103,6 +103,13 @@ button.quiet { min-height: 34px; color: var(--muted-strong); background: transpa
 .control-account-card label { display: grid; gap: 5px; color: #8f9eae; font-size: 10px; font-weight: 700; }
 .control-account-card-actions { display: flex; justify-content: flex-end; gap: 7px; }
 .control-account-current { align-self: center; color: var(--cyan); font-size: 10px; font-weight: 760; }
+.public-timing-panel { display: grid; gap: 16px; padding: 20px; scroll-margin-top: 80px; }
+.public-timing-actions { display: flex; flex-wrap: wrap; gap: 9px; }
+.public-timing-actions .danger { border-color: rgba(255,64,87,.42); color: #ff9aa7; background: rgba(255,64,87,.06); }
+.public-timing-links { display: grid; gap: 12px; padding: 16px; border: 1px solid rgba(66,215,232,.24); border-radius: 7px; background: linear-gradient(135deg,rgba(66,215,232,.07),rgba(90,140,255,.025)); }
+.public-timing-links label > span { min-width: 0; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; }
+.public-timing-links input { min-width: 0; color: var(--cyan); font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px; }
+.public-timing-links p { margin: 0; }
 
 .race-banner { min-height: 54px; display: grid; grid-template-columns: 80px max-content minmax(0, 1fr); align-items: center; gap: 14px; padding: 0 18px; color: #071014; background: var(--cyan); border-radius: 6px; }
 .race-banner[data-kind=fastestLap] { color: #fff; background: var(--purple); }
@@ -380,6 +387,10 @@ body.collision-replay-open { overflow: hidden; }
   .control-account-create,.control-account-card { grid-template-columns: 1fr; }
   .control-account-card-actions { justify-content: stretch; }
   .control-account-card-actions button { flex: 1; }
+  .public-timing-panel { padding: 15px; }
+  .public-timing-actions { align-items: stretch; flex-direction: column; }
+  .public-timing-actions button { width: 100%; }
+  .public-timing-links label > span { grid-template-columns: 1fr; }
   .race-banner { grid-template-columns: auto 1fr; gap: 7px 12px; padding: 10px 13px; }
   #bannerDetail { grid-column: 1 / -1; white-space: normal; }
   .controls, .timing-panel, .penalty-control-panel, .workspace-body { padding: 15px; }

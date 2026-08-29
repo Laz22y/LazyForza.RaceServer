@@ -131,9 +131,9 @@ if ($CloudflareLabel -or $PackageVersion) {
     }
     foreach ($relative in @(
             'public/app.js', 'public/events.css', 'public/i18n.js', 'public/index.html', 'public/lazyforza-logo.png',
-            'public/results.css', 'public/styles.css', 'public/teams.css',
-            'src/control-access.ts', 'src/event-projects.ts', 'src/index.ts', 'src/passwords.ts', 'src/protocol.ts', 'src/race-core.ts', 'src/rule-templates.ts', 'src/track-package.ts',
-            'tests/control-access.test.ts', 'tests/event-projects.test.ts', 'tests/passwords.test.ts', 'tests/race-core.test.ts', 'tests/rule-templates.test.ts', 'tests/track-package.test.ts', 'tests/web-localization.test.ts',
+            'public/results.css', 'public/styles.css', 'public/teams.css', 'public/timing.css', 'public/timing.html', 'public/timing.js',
+            'src/control-access.ts', 'src/event-projects.ts', 'src/index.ts', 'src/passwords.ts', 'src/protocol.ts', 'src/public-timing.ts', 'src/race-core.ts', 'src/rule-templates.ts', 'src/track-package.ts',
+            'tests/control-access.test.ts', 'tests/event-projects.test.ts', 'tests/passwords.test.ts', 'tests/public-timing.test.ts', 'tests/race-core.test.ts', 'tests/rule-templates.test.ts', 'tests/track-package.test.ts', 'tests/web-localization.test.ts',
             'package-lock.json', 'package.json', 'README.md', 'tsconfig.json', 'wrangler.jsonc')) {
         $source = [System.IO.Path]::GetFullPath((Join-Path $cloudflareRoot $relative))
         if (!$source.StartsWith(

@@ -1,3 +1,8 @@
+import {
+  normalizePublicTimingAccess,
+  type StoredPublicTimingAccess
+} from "./public-timing";
+
 export interface PasswordDigest {
   salt: string;
   hash: string;
@@ -8,6 +13,7 @@ export interface StoredCredentials {
   player: PasswordDigest;
   admin: PasswordDigest;
   controlAccounts?: StoredControlAccount[];
+  publicTiming?: StoredPublicTimingAccess;
 }
 
 export type ControlRole = "superAdmin" | "administrator" | "steward";
@@ -72,8 +78,18 @@ export function normalizeStoredCredentials(credentials: StoredCredentials): {
 } {
   const source = credentials.controlAccounts ?? [];
   const accounts = source.filter(validStoredControlAccount).slice(0, maximumControlAccounts);
-  if (accounts.length > 0)
-    return { credentials: { ...credentials, controlAccounts: accounts }, changed: accounts.length !== source.length };
+  const publicTiming = normalizePublicTimingAccess(credentials.publicTiming);
+  const publicTimingChanged = credentials.publicTiming !== undefined && publicTiming === null;
+  if (accounts.length > 0) {
+    const normalized = { ...credentials, controlAccounts: accounts };
+    if (publicTiming) normalized.publicTiming = publicTiming;
+    else delete normalized.publicTiming;
+    return {
+      credentials: normalized,
+      changed: accounts.length !== source.length || publicTimingChanged ||
+        publicTiming?.generatedAt !== credentials.publicTiming?.generatedAt
+    };
+  }
   const timestamp = new Date().toISOString();
   return {
     credentials: {
@@ -85,7 +101,8 @@ export function normalizeStoredCredentials(credentials: StoredCredentials): {
         password: credentials.admin,
         createdAt: timestamp,
         updatedAt: timestamp
-      }]
+      }],
+      ...(publicTiming ? { publicTiming } : {})
     },
     changed: true
   };
