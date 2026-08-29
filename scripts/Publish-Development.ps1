@@ -3,9 +3,9 @@ param(
     [ValidateSet('all', 'win-x64', 'linux-x64', 'linux-arm64', 'osx-x64', 'osx-arm64')]
     [string]$Runtime = 'win-x64',
     [switch]$FrameworkDependent,
-    [ValidatePattern('^\d{8}-dev\.\d+$')]
+    [ValidatePattern('^(?:\d{8}-dev\.\d+|\d+\.\d+\.\d+-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)$')]
     [string]$CloudflareLabel,
-    [ValidatePattern('^\d{8}-dev\.\d+$')]
+    [ValidatePattern('^(?:\d{8}-dev\.\d+|\d+\.\d+\.\d+-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)$')]
     [string]$DevelopmentLabel,
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string]$PackageVersion,
@@ -58,8 +58,15 @@ foreach ($targetRuntime in $runtimes) {
         '--output', $publishDirectory,
         '-p:PublishSingleFile=true',
         '-p:IncludeNativeLibrariesForSelfExtract=true')
-    if ($PackageVersion) {
-        $publishArguments += "-p:Version=$PackageVersion"
+    $buildVersion = if ($PackageVersion) {
+        $PackageVersion
+    } elseif ($DevelopmentLabel -match '^\d+\.\d+\.\d+-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*$') {
+        $DevelopmentLabel
+    } else {
+        $null
+    }
+    if ($buildVersion) {
+        $publishArguments += "-p:Version=$buildVersion"
     }
     & dotnet @publishArguments
     if ($LASTEXITCODE -ne 0) {
