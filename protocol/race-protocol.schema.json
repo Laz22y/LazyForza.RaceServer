@@ -1,0 +1,726 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 2,
+  "targets": {
+    "server": { "protocolClass": "RaceProtocol", "messageTypesClass": "RaceMessageTypes" },
+    "client": { "protocolClass": "EstateRaceProtocol", "messageTypesClass": "EstateRaceMessageTypes" },
+    "typescript": {}
+  },
+  "constants": {
+    "maximumParticipants": 12,
+    "maximumObservers": 12,
+    "maximumMessageBytes": 65536,
+    "maximumDisplayNameLength": 20,
+    "maximumTeamNameLength": 24
+  },
+  "messages": {
+    "login": "login",
+    "loginAccepted": "loginAccepted",
+    "loginRejected": "loginRejected",
+    "ready": "ready",
+    "telemetry": "telemetry",
+    "lapCompleted": "lapCompleted",
+    "lapAcknowledged": "lapAcknowledged",
+    "pitServiceCompleted": "pitServiceCompleted",
+    "pitServiceAcknowledged": "pitServiceAcknowledged",
+    "snapshot": "snapshot",
+    "ping": "ping",
+    "pong": "pong",
+    "error": "error"
+  },
+  "enums": [
+    {
+      "name": "SessionPhase",
+      "targets": { "server": "RaceSessionPhase", "client": "RaceSessionPhase", "typescript": "SessionPhase" },
+      "values": ["lobby", "practice", "qualifying", "grid", "outLap", "formationLap", "countdown", "race", "suspended", "finished"]
+    },
+    {
+      "name": "ControlFlag",
+      "targets": { "server": "RaceControlFlag", "client": "RaceControlFlag", "typescript": "ControlFlag" },
+      "values": ["green", "yellow", "red", "chequered"]
+    },
+    {
+      "name": "ParticipantStatus",
+      "targets": { "server": "RaceParticipantStatus", "client": "RaceParticipantStatus", "typescript": "ParticipantStatus" },
+      "values": ["connected", "ready", "onTrack", "inPitLane", "inService", "finished", "didNotFinish", "disqualified", "disconnected"]
+    },
+    {
+      "name": "GripCondition",
+      "targets": { "server": "RaceGripCondition", "client": "RaceGripCondition", "typescript": "GripCondition" },
+      "values": ["unknown", "slightlyReduced", "moderatelyReduced", "severelyReduced", "atLimit"]
+    },
+    {
+      "name": "PenaltyKind",
+      "targets": { "server": "RacePenaltyKind", "client": "RacePenaltyKind", "typescript": "PenaltyKind" },
+      "values": ["warning", "time", "driveThrough", "stopAndGo", "gridDrop", "disqualification"]
+    },
+    {
+      "name": "TrackLimitMode",
+      "targets": { "server": "TrackLimitEnforcementMode", "typescript": "TrackLimitMode" },
+      "values": ["warningsOnly", "automatic", "disabled"]
+    },
+    {
+      "name": "BannerKind",
+      "targets": { "server": "RaceBannerKind", "client": "RaceBannerKind", "typescript": "BannerKind" },
+      "values": ["information", "fastestLap", "penalty", "yellowFlag", "redFlag", "blueFlag", "chequeredFlag", "winner"]
+    },
+    {
+      "name": "InvestigationStatus",
+      "targets": { "server": "RaceInvestigationStatus", "client": "RaceInvestigationStatus", "typescript": "InvestigationStatus" },
+      "values": ["pending", "penalized", "dismissed"]
+    }
+  ],
+  "models": [
+    {
+      "name": "ServerDescriptor",
+      "targets": {
+        "server": "RaceServerDescriptor",
+        "client": { "name": "EstateRaceServerDescriptor", "visibility": "public" },
+        "typescript": "ServerDescriptor"
+      },
+      "fields": [
+        { "name": "serverName", "type": "string" },
+        { "name": "protocolVersion", "type": "int32" },
+        { "name": "maximumParticipants", "type": "int32" },
+        { "name": "requiresPassword", "type": "boolean" },
+        { "name": "webSocketPath", "type": "string", "exclude": ["client"] },
+        { "name": "controlPanelPath", "type": "string", "exclude": ["client"] },
+        { "name": "activeTrackId", "type": "nullable<string>" },
+        { "name": "activeTrackRevision", "type": "nullable<string>" },
+        { "name": "phase", "type": "enum:SessionPhase" },
+        { "name": "serverTime", "type": "timestamp" },
+        { "name": "activeTrackName", "type": "nullable<string>", "default": null },
+        { "name": "activeTrackPackageHash", "type": "nullable<string>", "default": null },
+        { "name": "allowTeams", "type": "boolean", "default": true },
+        { "name": "sectorCount", "type": "int32", "default": 0 },
+        { "name": "driversPerTeam", "type": "int32", "default": 6 },
+        { "name": "teams", "type": "nullable<array<model:TeamDefinition>>", "default": null },
+        { "name": "trackPackageAvailable", "type": "boolean", "default": false },
+        { "name": "trackPackageSizeBytes", "type": "nullable<int64>", "default": null },
+        { "name": "trackPackageDownloadPath", "type": "nullable<string>", "default": null },
+        { "name": "trackPackageFileSha256", "type": "nullable<string>", "default": null },
+        { "name": "organizerLogoHash", "type": "nullable<string>", "default": null },
+        { "name": "organizerLogoMimeType", "type": "nullable<string>", "default": null },
+        { "name": "organizerLogoDownloadPath", "type": "nullable<string>", "default": null },
+        { "name": "supportsObservers", "type": "boolean", "default": true, "defaults": { "client": false } },
+        { "name": "maximumObservers", "type": "int32", "default": { "constant": "maximumObservers" }, "defaults": { "client": 0 } }
+      ]
+    },
+    {
+      "name": "TeamDefinition",
+      "targets": {
+        "server": "RaceTeamDefinition",
+        "client": { "name": "EstateRaceTeam", "visibility": "public", "partial": true },
+        "typescript": "TeamDefinition"
+      },
+      "fields": [
+        { "name": "id", "type": "string" },
+        { "name": "name", "type": "string" },
+        { "name": "themeColor", "type": "string" }
+      ]
+    },
+    {
+      "name": "LoginRequest",
+      "targets": { "server": "RaceLoginRequest", "client": "RaceLoginRequest", "typescript": "LoginRequest" },
+      "fields": [
+        { "name": "password", "type": "string" },
+        { "name": "displayName", "type": "string" },
+        { "name": "themeColor", "type": "string" },
+        { "name": "teamName", "type": "nullable<string>" },
+        { "name": "clientVersion", "type": "string" },
+        { "name": "resumeToken", "type": "nullable<string>" },
+        { "name": "trackId", "type": "nullable<string>" },
+        { "name": "trackRevision", "type": "nullable<string>" },
+        { "name": "trackPackageHash", "type": "nullable<string>" },
+        { "name": "sectorCount", "type": "nullable<int32>", "default": null },
+        { "name": "teamId", "type": "nullable<string>", "default": null },
+        { "name": "isObserver", "type": "boolean", "default": false }
+      ]
+    },
+    {
+      "name": "LoginAccepted",
+      "targets": { "server": "RaceLoginAccepted", "client": "RaceLoginAccepted", "typescript": "LoginAccepted" },
+      "fields": [
+        { "name": "participantId", "type": "uuid" },
+        { "name": "resumeToken", "type": "string" },
+        { "name": "snapshot", "type": "model:SessionSnapshot" },
+        { "name": "serverTime", "type": "timestamp" },
+        { "name": "isObserver", "type": "boolean", "default": false }
+      ]
+    },
+    {
+      "name": "LoginRejected",
+      "targets": { "server": "RaceLoginRejected", "client": "RaceLoginRejected", "typescript": "LoginRejected" },
+      "fields": [
+        { "name": "code", "type": "string" },
+        { "name": "message", "type": "string" }
+      ]
+    },
+    {
+      "name": "ReadyUpdate",
+      "targets": { "server": "RaceReadyUpdate", "client": "RaceReadyUpdate", "typescript": "ReadyUpdate" },
+      "fields": [{ "name": "isReady", "type": "boolean" }]
+    },
+    {
+      "name": "ClockPing",
+      "targets": { "server": "RaceClockPing", "client": "RaceClockPing", "typescript": "ClockPing" },
+      "fields": [{ "name": "clientMonotonicMilliseconds", "type": "int64" }]
+    },
+    {
+      "name": "ClockPong",
+      "targets": { "server": "RaceClockPong", "client": "RaceClockPong", "typescript": "ClockPong" },
+      "fields": [
+        { "name": "clientMonotonicMilliseconds", "type": "int64" },
+        { "name": "serverUnixMilliseconds", "type": "int64" }
+      ]
+    },
+    {
+      "name": "TelemetryUpdate",
+      "targets": { "server": "RaceTelemetryUpdate", "client": "RaceTelemetryUpdate", "typescript": "TelemetryUpdate" },
+      "fields": [
+        { "name": "clientMonotonicMilliseconds", "type": "int64" },
+        { "name": "trackProgress", "type": "float64" },
+        { "name": "lateralOffsetMeters", "type": "float64" },
+        { "name": "mapX", "type": "float64" },
+        { "name": "mapY", "type": "float64" },
+        { "name": "speedKph", "type": "float64" },
+        { "name": "completedLaps", "type": "int32" },
+        { "name": "currentSector", "type": "int32" },
+        { "name": "currentLapSeconds", "type": "float64" },
+        { "name": "isInPitLane", "type": "boolean" },
+        { "name": "isInServiceZone", "type": "boolean" },
+        { "name": "isTelemetryValid", "type": "boolean" },
+        { "name": "isPausedOrRewinding", "type": "boolean" },
+        { "name": "gripCondition", "type": "enum:GripCondition" },
+        { "name": "pitServiceElapsedSeconds", "type": "float64" },
+        { "name": "pitServiceRequirementMet", "type": "boolean" },
+        { "name": "completedPitServices", "type": "int32" },
+        { "name": "trackToleranceMeters", "type": "float64", "default": 18 },
+        { "name": "trackLengthMeters", "type": "float64", "default": 0 },
+        { "name": "pitSpeedLimitKph", "type": "float64", "default": 0 },
+        { "name": "pitLaneElapsedSeconds", "type": "float64", "default": 0 },
+        { "name": "isApproachingPit", "type": "boolean", "default": false },
+        { "name": "isOnPitRoute", "type": "boolean", "default": false },
+        { "name": "hasWorldPosition", "type": "boolean", "default": false },
+        { "name": "worldX", "type": "float64", "default": 0 },
+        { "name": "worldY", "type": "float64", "default": 0 },
+        { "name": "worldZ", "type": "float64", "default": 0 },
+        { "name": "velocityX", "type": "float64", "default": 0 },
+        { "name": "velocityY", "type": "float64", "default": 0 },
+        { "name": "velocityZ", "type": "float64", "default": 0 },
+        { "name": "impactSequence", "type": "int64", "default": 0 },
+        { "name": "impactMagnitudeMps", "type": "float64", "default": 0 },
+        { "name": "impactSpeedLossMps", "type": "float64", "default": 0 },
+        { "name": "impactWorldX", "type": "float64", "default": 0 },
+        { "name": "impactWorldY", "type": "float64", "default": 0 },
+        { "name": "impactWorldZ", "type": "float64", "default": 0 },
+        { "name": "impactAgeMilliseconds", "type": "int32", "default": 0 },
+        { "name": "hasWorldVelocity", "type": "boolean", "default": false },
+        { "name": "worldVelocityX", "type": "float64", "default": 0 },
+        { "name": "worldVelocityY", "type": "float64", "default": 0 },
+        { "name": "worldVelocityZ", "type": "float64", "default": 0 },
+        { "name": "impactWorldVelocityX", "type": "float64", "default": 0 },
+        { "name": "impactWorldVelocityY", "type": "float64", "default": 0 },
+        { "name": "impactWorldVelocityZ", "type": "float64", "default": 0 },
+        { "name": "impactSmashableVelDiff", "type": "float64", "default": 0 },
+        { "name": "impactSmashableMass", "type": "float64", "default": 0 },
+        { "name": "shortcutEvidence", "type": "nullable<model:ShortcutEvidence>", "default": null },
+        { "name": "pitServiceVisitId", "type": "nullable<uuid>", "default": null }
+      ]
+    },
+    {
+      "name": "ShortcutEvidence",
+      "targets": { "server": "RaceShortcutEvidence", "client": "RaceShortcutEvidence", "typescript": "ShortcutEvidence" },
+      "fields": [
+        { "name": "id", "type": "uuid" },
+        { "name": "detectedAtMonotonicMilliseconds", "type": "int64" },
+        { "name": "startProgress", "type": "float64" },
+        { "name": "endProgress", "type": "float64" },
+        { "name": "routeDistanceMeters", "type": "float64" },
+        { "name": "worldDistanceMeters", "type": "float64" },
+        { "name": "gainMeters", "type": "float64" },
+        { "name": "maximumLateralOffsetMeters", "type": "float64" },
+        { "name": "protectedRouteMeters", "type": "float64" },
+        { "name": "theoreticalSavingMeters", "type": "float64" },
+        { "name": "missedCriticalGates", "type": "int32" },
+        { "name": "confidence", "type": "float64" },
+        { "name": "flags", "type": "int32" }
+      ]
+    },
+    {
+      "name": "LapCompleted",
+      "targets": { "server": "RaceLapCompleted", "client": "RaceLapCompleted", "typescript": "LapCompleted" },
+      "fields": [
+        { "name": "eventId", "type": "uuid" },
+        { "name": "lapNumber", "type": "int32" },
+        { "name": "lapSeconds", "type": "float64" },
+        { "name": "sectorSeconds", "type": "array<float64>" },
+        { "name": "isValid", "type": "boolean" },
+        { "name": "invalidReason", "type": "nullable<string>" },
+        { "name": "clientMonotonicMilliseconds", "type": "int64" },
+        { "name": "isBestLapEligible", "type": "boolean", "default": true },
+        { "name": "isRecoveredAfterDisconnect", "type": "boolean", "default": false }
+      ]
+    },
+    {
+      "name": "LapAcknowledgement",
+      "targets": { "server": "RaceLapAcknowledgement", "client": "RaceLapAcknowledgement", "typescript": "LapAcknowledgement" },
+      "fields": [
+        { "name": "eventId", "type": "uuid" },
+        { "name": "isAccepted", "type": "boolean" },
+        { "name": "message", "type": "nullable<string>", "default": null }
+      ]
+    },
+    {
+      "name": "PitServiceCompleted",
+      "targets": { "server": "RacePitServiceCompleted", "client": "RacePitServiceCompleted", "typescript": "PitServiceCompleted" },
+      "fields": [
+        { "name": "eventId", "type": "uuid" },
+        { "name": "visitId", "type": "uuid" },
+        { "name": "completedPitServices", "type": "int32" },
+        { "name": "requiredSeconds", "type": "float64" },
+        { "name": "elapsedSeconds", "type": "float64" },
+        { "name": "clientMonotonicMilliseconds", "type": "int64" },
+        { "name": "raceStartedAtUnixMilliseconds", "type": "int64" },
+        { "name": "isRecoveredAfterDisconnect", "type": "boolean", "default": false }
+      ]
+    },
+    {
+      "name": "PitServiceAcknowledgement",
+      "targets": { "server": "RacePitServiceAcknowledgement", "client": "RacePitServiceAcknowledgement", "typescript": "PitServiceAcknowledgement" },
+      "fields": [
+        { "name": "eventId", "type": "uuid" },
+        { "name": "isAccepted", "type": "boolean" },
+        { "name": "message", "type": "nullable<string>", "default": null }
+      ]
+    },
+    {
+      "name": "ProtocolError",
+      "targets": { "client": "RaceProtocolError", "typescript": "ProtocolError" },
+      "fields": [
+        { "name": "code", "type": "string" },
+        { "name": "message", "type": "string" }
+      ]
+    },
+    {
+      "name": "PenaltySnapshot",
+      "targets": { "server": "RacePenaltySnapshot", "client": { "name": "EstateRacePenalty", "visibility": "public" }, "typescript": "PenaltySnapshot" },
+      "fields": [
+        { "name": "id", "type": "uuid" },
+        { "name": "participantId", "type": "uuid", "exclude": ["client"] },
+        { "name": "kind", "type": "enum:PenaltyKind" },
+        { "name": "valueSeconds", "type": "nullable<float64>" },
+        { "name": "gridPlaces", "type": "nullable<int32>" },
+        { "name": "reason", "type": "string" },
+        { "name": "issuedAt", "type": "timestamp", "exclude": ["client"] },
+        { "name": "isServed", "type": "boolean" },
+        { "name": "isRevoked", "type": "boolean" },
+        { "name": "isPostRaceAdjustment", "type": "boolean", "default": false },
+        { "name": "isAutomatic", "type": "boolean", "default": false },
+        { "name": "investigationId", "type": "nullable<uuid>", "default": null }
+      ]
+    },
+    {
+      "name": "InvestigationSnapshot",
+      "targets": { "server": "RaceInvestigationSnapshot", "client": { "name": "EstateRaceInvestigation", "visibility": "public" }, "typescript": "InvestigationSnapshot" },
+      "fields": [
+        { "name": "id", "type": "uuid" },
+        { "name": "participantId", "type": "uuid" },
+        { "name": "offense", "type": "string" },
+        { "name": "detectedAt", "type": "timestamp" },
+        { "name": "lapNumber", "type": "int32" },
+        { "name": "status", "type": "enum:InvestigationStatus" },
+        { "name": "penaltyId", "type": "nullable<uuid>", "default": null },
+        { "name": "resolvedAt", "type": "nullable<timestamp>", "default": null },
+        { "name": "relatedParticipantIds", "type": "nullable<array<uuid>>", "default": null },
+        { "name": "collisionEvidence", "type": "nullable<model:CollisionEvidenceSnapshot>", "default": null }
+      ]
+    },
+    {
+      "name": "CollisionEvidenceSnapshot",
+      "targets": { "server": "RaceCollisionEvidenceSnapshot", "client": { "name": "EstateCollisionEvidenceSnapshot", "visibility": "public" }, "typescript": "CollisionEvidenceSnapshot" },
+      "fields": [
+        { "name": "incidentAt", "type": "timestamp" },
+        { "name": "reporterParticipantId", "type": "uuid" },
+        { "name": "otherParticipantId", "type": "uuid" },
+        { "name": "reporterName", "type": "string" },
+        { "name": "otherName", "type": "string" },
+        { "name": "reporterThemeColor", "type": "string" },
+        { "name": "otherThemeColor", "type": "string" },
+        { "name": "reporterWorldX", "type": "float64" },
+        { "name": "reporterWorldY", "type": "float64" },
+        { "name": "reporterWorldZ", "type": "float64" },
+        { "name": "otherWorldX", "type": "float64" },
+        { "name": "otherWorldY", "type": "float64" },
+        { "name": "otherWorldZ", "type": "float64" },
+        { "name": "reporterVelocityX", "type": "float64" },
+        { "name": "reporterVelocityZ", "type": "float64" },
+        { "name": "otherVelocityX", "type": "float64" },
+        { "name": "otherVelocityZ", "type": "float64" },
+        { "name": "horizontalDistanceMeters", "type": "float64" },
+        { "name": "verticalDistanceMeters", "type": "float64" },
+        { "name": "relativeSpeedKph", "type": "float64" },
+        { "name": "impactMagnitudeMps", "type": "float64" },
+        { "name": "impactSpeedLossMps", "type": "float64" },
+        { "name": "approachDistanceReductionMeters", "type": "float64", "default": 0 },
+        { "name": "bothDriversReportedImpact", "type": "boolean", "default": false },
+        { "name": "contactCount", "type": "int32", "default": 1 },
+        { "name": "lastIncidentAt", "type": "nullable<timestamp>", "default": null }
+      ]
+    },
+    {
+      "name": "CollisionReplaySampleSnapshot",
+      "targets": { "server": "RaceCollisionReplaySampleSnapshot", "typescript": "CollisionReplaySampleSnapshot" },
+      "fields": [
+        { "name": "at", "type": "timestamp" },
+        { "name": "worldX", "type": "float64" },
+        { "name": "worldY", "type": "float64" },
+        { "name": "worldZ", "type": "float64" },
+        { "name": "velocityX", "type": "float64" },
+        { "name": "velocityY", "type": "float64" },
+        { "name": "velocityZ", "type": "float64" }
+      ]
+    },
+    {
+      "name": "CollisionReplaySnapshot",
+      "targets": { "server": "RaceCollisionReplaySnapshot", "typescript": "CollisionReplaySnapshot" },
+      "fields": [
+        { "name": "investigationId", "type": "uuid" },
+        { "name": "startsAt", "type": "timestamp" },
+        { "name": "endsAt", "type": "timestamp" },
+        { "name": "availableUntil", "type": "timestamp" },
+        { "name": "firstIncidentAt", "type": "timestamp" },
+        { "name": "lastIncidentAt", "type": "timestamp" },
+        { "name": "isPostWindowComplete", "type": "boolean" },
+        { "name": "isFinalized", "type": "boolean" },
+        { "name": "reporterParticipantId", "type": "uuid" },
+        { "name": "otherParticipantId", "type": "uuid" },
+        { "name": "reporterName", "type": "string" },
+        { "name": "otherName", "type": "string" },
+        { "name": "reporterThemeColor", "type": "string" },
+        { "name": "otherThemeColor", "type": "string" },
+        { "name": "incidentTimes", "type": "array<timestamp>" },
+        { "name": "reporterSamples", "type": "array<model:CollisionReplaySampleSnapshot>" },
+        { "name": "otherSamples", "type": "array<model:CollisionReplaySampleSnapshot>" }
+      ]
+    },
+    {
+      "name": "ParticipantSnapshot",
+      "targets": { "server": "RaceParticipantSnapshot", "client": { "name": "EstateRaceParticipant", "visibility": "public" }, "typescript": "ParticipantSnapshot" },
+      "fields": [
+        { "name": "id", "type": "uuid" },
+        { "name": "position", "type": "int32" },
+        { "name": "displayName", "type": "string" },
+        { "name": "themeColor", "type": "string" },
+        { "name": "teamName", "type": "nullable<string>" },
+        { "name": "status", "type": "enum:ParticipantStatus" },
+        { "name": "isConnected", "type": "boolean" },
+        { "name": "isReady", "type": "boolean" },
+        { "name": "completedLaps", "type": "int32" },
+        { "name": "currentSector", "type": "int32" },
+        { "name": "trackProgress", "type": "float64" },
+        { "name": "mapX", "type": "float64" },
+        { "name": "mapY", "type": "float64" },
+        { "name": "speedKph", "type": "float64" },
+        { "name": "currentLapSeconds", "type": "float64" },
+        { "name": "lastLapSeconds", "type": "nullable<float64>" },
+        { "name": "bestLapSeconds", "type": "nullable<float64>" },
+        { "name": "gapToLeaderSeconds", "type": "nullable<float64>" },
+        { "name": "intervalSeconds", "type": "nullable<float64>" },
+        { "name": "isInPitLane", "type": "boolean" },
+        { "name": "isInServiceZone", "type": "boolean" },
+        { "name": "pitServiceElapsedSeconds", "type": "float64" },
+        { "name": "pitServiceRequirementMet", "type": "boolean" },
+        { "name": "completedPitServices", "type": "int32" },
+        { "name": "gripCondition", "type": "enum:GripCondition" },
+        { "name": "bestSectorSeconds", "type": "array<nullable<float64>>" },
+        { "name": "penalties", "type": "array<model:PenaltySnapshot>" },
+        { "name": "lastSeenAt", "type": "timestamp" },
+        { "name": "qualifyingFinalLapPending", "type": "boolean", "default": false, "required": { "typescript": true } },
+        { "name": "raceTotalSeconds", "type": "nullable<float64>", "default": null },
+        { "name": "adjustedRaceTotalSeconds", "type": "nullable<float64>", "default": null },
+        { "name": "timePenaltySeconds", "type": "float64", "default": 0 },
+        { "name": "trackLimitWarnings", "type": "int32", "default": 0 },
+        { "name": "teamId", "type": "nullable<string>", "default": null },
+        { "name": "teamColor", "type": "nullable<string>", "default": null },
+        { "name": "pitLaneElapsedSeconds", "type": "float64", "default": 0 },
+        { "name": "pendingTimePenaltySeconds", "type": "float64", "default": 0 },
+        { "name": "isServingTimePenalty", "type": "boolean", "default": false },
+        { "name": "penaltyServiceElapsedSeconds", "type": "float64", "default": 0 },
+        { "name": "penaltyServiceRequiredSeconds", "type": "float64", "default": 0 },
+        { "name": "hasPendingDriveThrough", "type": "boolean", "default": false },
+        { "name": "penaltyServiceCompleted", "type": "boolean", "default": false },
+        { "name": "driveThroughLapsRemaining", "type": "nullable<int32>", "default": null },
+        { "name": "driveThroughReminderAt", "type": "nullable<timestamp>", "default": null },
+        { "name": "driveThroughOverdue", "type": "boolean", "default": false },
+        { "name": "isServingDriveThrough", "type": "boolean", "default": false },
+        { "name": "qualifyingEligible", "type": "boolean", "default": true },
+        { "name": "qualifyingEliminatedInSession", "type": "nullable<int32>", "default": null },
+        { "name": "qualifyingSessionBestLapSeconds", "type": "nullable<array<nullable<float64>>>", "types": { "typescript": "array<nullable<float64>>" }, "default": null },
+        { "name": "practiceFinalLapPending", "type": "boolean", "default": false },
+        { "name": "practiceSessionBestLapSeconds", "type": "nullable<array<nullable<float64>>>", "types": { "typescript": "array<nullable<float64>>" }, "default": null },
+        { "name": "raceDeltaSecondsByReference", "type": "nullable<map<uuid,float64>>", "default": null }
+      ]
+    },
+    {
+      "name": "ObserverSnapshot",
+      "targets": { "server": "RaceObserverSnapshot", "client": { "name": "EstateRaceObserver", "visibility": "public" }, "typescript": "ObserverSnapshot" },
+      "fields": [
+        { "name": "id", "type": "uuid" },
+        { "name": "displayName", "type": "string" },
+        { "name": "connectedAt", "type": "timestamp" }
+      ]
+    },
+    {
+      "name": "EventSnapshot",
+      "targets": { "server": "RaceEventSnapshot", "typescript": "RaceEventSnapshot" },
+      "fields": [
+        { "name": "sequence", "type": "int64" },
+        { "name": "occurredAt", "type": "timestamp", "names": { "server": "at" } },
+        { "name": "type", "type": "string" },
+        { "name": "message", "type": "string" },
+        { "name": "participantId", "type": "nullable<uuid>", "default": null }
+      ]
+    },
+    {
+      "name": "BannerSnapshot",
+      "targets": { "server": "RaceBannerSnapshot", "client": { "name": "EstateRaceBanner", "visibility": "public" }, "typescript": "BannerSnapshot" },
+      "fields": [
+        { "name": "id", "type": "uuid" },
+        { "name": "kind", "type": "enum:BannerKind" },
+        { "name": "title", "type": "string" },
+        { "name": "detail", "type": "nullable<string>" },
+        { "name": "participantId", "type": "nullable<uuid>" },
+        { "name": "createdAt", "type": "timestamp" },
+        { "name": "expiresAt", "type": "nullable<timestamp>" },
+        { "name": "isInvestigation", "type": "boolean", "default": false }
+      ]
+    },
+    {
+      "name": "YellowZoneSnapshot",
+      "targets": { "server": "RaceYellowZoneSnapshot", "client": { "name": "EstateRaceYellowZone", "visibility": "public" }, "typescript": "YellowZoneSnapshot" },
+      "fields": [
+        { "name": "sectorIndex", "type": "nullable<int32>" },
+        { "name": "isAutomatic", "type": "boolean" },
+        { "name": "reason", "type": "string" },
+        { "name": "participantId", "type": "nullable<uuid>" },
+        { "name": "participantName", "type": "nullable<string>" }
+      ]
+    },
+    {
+      "name": "BlueFlagSnapshot",
+      "targets": { "server": "RaceBlueFlagSnapshot", "client": { "name": "EstateRaceBlueFlag", "visibility": "public" }, "typescript": "BlueFlagSnapshot" },
+      "fields": [
+        { "name": "recipientParticipantId", "type": "uuid" },
+        { "name": "approachingParticipantId", "type": "uuid" },
+        { "name": "distanceAhead", "type": "float64" }
+      ]
+    },
+    {
+      "name": "SessionSnapshot",
+      "targets": { "server": "RaceSessionSnapshot", "client": { "name": "EstateRaceSession", "visibility": "public" }, "typescript": "SessionSnapshot" },
+      "fields": [
+        { "name": "revision", "type": "int64" },
+        { "name": "sessionName", "type": "string" },
+        { "name": "phase", "type": "enum:SessionPhase" },
+        { "name": "flag", "type": "enum:ControlFlag" },
+        { "name": "flagMessage", "type": "nullable<string>" },
+        { "name": "trackId", "type": "nullable<string>" },
+        { "name": "trackRevision", "type": "nullable<string>" },
+        { "name": "trackPackageHash", "type": "nullable<string>" },
+        { "name": "totalRaceLaps", "type": "int32" },
+        { "name": "startsAt", "type": "nullable<timestamp>" },
+        { "name": "qualifyingEndsAt", "type": "nullable<timestamp>" },
+        { "name": "fastestParticipantId", "type": "nullable<uuid>" },
+        { "name": "fastestLapSeconds", "type": "nullable<float64>" },
+        { "name": "fastestSectorSeconds", "type": "array<nullable<float64>>" },
+        { "name": "banner", "type": "nullable<model:BannerSnapshot>" },
+        { "name": "participants", "type": "array<model:ParticipantSnapshot>" },
+        { "name": "serverTime", "type": "timestamp" },
+        { "name": "yellowZones", "type": "nullable<array<model:YellowZoneSnapshot>>", "types": { "typescript": "array<model:YellowZoneSnapshot>" }, "default": null, "required": { "typescript": true } },
+        { "name": "sectorCount", "type": "int32", "default": 0, "required": { "typescript": true } },
+        { "name": "allowTeams", "type": "boolean", "default": true, "required": { "typescript": true } },
+        { "name": "trackName", "type": "nullable<string>", "default": null },
+        { "name": "blueFlags", "type": "nullable<array<model:BlueFlagSnapshot>>", "types": { "typescript": "array<model:BlueFlagSnapshot>" }, "default": null, "required": { "typescript": true } },
+        { "name": "startSequenceAt", "type": "nullable<timestamp>", "default": null },
+        { "name": "illuminatedStartLights", "type": "int32", "default": 0, "required": { "typescript": true } },
+        { "name": "startLightsOut", "type": "boolean", "default": false, "required": { "typescript": true } },
+        { "name": "qualifyingTimeExpired", "type": "boolean", "default": false, "required": { "typescript": true } },
+        { "name": "raceElapsedSeconds", "type": "nullable<float64>", "default": null },
+        { "name": "suspendedFromPhase", "type": "nullable<enum:SessionPhase>", "default": null },
+        { "name": "driversPerTeam", "type": "int32", "default": 6, "required": { "typescript": true } },
+        { "name": "teams", "type": "nullable<array<model:TeamDefinition>>", "types": { "typescript": "array<model:TeamDefinition>" }, "default": null, "required": { "typescript": true } },
+        { "name": "chequeredImminent", "type": "boolean", "default": false, "required": { "typescript": true } },
+        { "name": "fastestLapSectorSeconds", "type": "nullable<array<nullable<float64>>>", "types": { "typescript": "array<nullable<float64>>" }, "default": null },
+        { "name": "organizerLogoHash", "type": "nullable<string>", "default": null },
+        { "name": "organizerLogoMimeType", "type": "nullable<string>", "default": null },
+        { "name": "organizerLogoDownloadPath", "type": "nullable<string>", "default": null },
+        { "name": "penalties", "type": "nullable<array<model:PenaltySnapshot>>", "types": { "typescript": "array<model:PenaltySnapshot>" }, "default": null },
+        { "name": "investigations", "type": "nullable<array<model:InvestigationSnapshot>>", "types": { "typescript": "array<model:InvestigationSnapshot>" }, "default": null },
+        { "name": "qualifyingSessionNumber", "type": "int32", "default": 0 },
+        { "name": "qualifyingSessionCount", "type": "int32", "default": 1 },
+        { "name": "qualifyingSessionMinutes", "type": "nullable<array<int32>>", "types": { "typescript": "array<int32>" }, "default": null },
+        { "name": "qualifyingEliminationCounts", "type": "nullable<array<int32>>", "types": { "typescript": "array<int32>" }, "default": null },
+        { "name": "practiceEndsAt", "type": "nullable<timestamp>", "default": null },
+        { "name": "practiceTimeExpired", "type": "boolean", "default": false },
+        { "name": "practiceSessionNumber", "type": "int32", "default": 0 },
+        { "name": "practiceSessionCount", "type": "int32", "default": 1 },
+        { "name": "practiceSessionMinutes", "type": "nullable<array<int32>>", "types": { "typescript": "array<int32>" }, "default": null },
+        { "name": "observers", "type": "nullable<array<model:ObserverSnapshot>>", "types": { "typescript": "array<model:ObserverSnapshot>" }, "default": null },
+        { "name": "minimumRequiredPitStops", "type": "int32", "default": 1 },
+        { "name": "automaticCollisionInvestigationsEnabled", "type": "boolean", "default": false, "exclude": ["server", "client"] },
+        { "name": "disconnectedLapRecoveryEnabled", "type": "boolean", "default": false }
+      ]
+    },
+    {
+      "name": "StageResultParticipantSnapshot",
+      "targets": { "server": "RaceStageResultParticipantSnapshot", "typescript": "StageResultParticipantSnapshot" },
+      "fields": [
+        { "name": "id", "type": "uuid" },
+        { "name": "position", "type": "int32" },
+        { "name": "displayName", "type": "string" },
+        { "name": "themeColor", "type": "string" },
+        { "name": "teamName", "type": "nullable<string>" },
+        { "name": "teamColor", "type": "nullable<string>" },
+        { "name": "status", "type": "enum:ParticipantStatus" },
+        { "name": "completedLaps", "type": "int32" },
+        { "name": "trackProgress", "type": "float64" },
+        { "name": "bestLapSeconds", "type": "nullable<float64>" },
+        { "name": "raceTotalSeconds", "type": "nullable<float64>" },
+        { "name": "adjustedRaceTotalSeconds", "type": "nullable<float64>" },
+        { "name": "gapToLeaderSeconds", "type": "nullable<float64>" },
+        { "name": "timePenaltySeconds", "type": "float64" },
+        { "name": "penalties", "type": "array<model:PenaltySnapshot>" }
+      ]
+    },
+    {
+      "name": "StageResultSnapshot",
+      "targets": { "server": "RaceStageResultSnapshot", "typescript": "StageResultSnapshot" },
+      "fields": [
+        { "name": "id", "type": "uuid" },
+        { "name": "phase", "type": "enum:SessionPhase", "types": { "typescript": "literal:practice|qualifying|race" } },
+        { "name": "label", "type": "string" },
+        { "name": "sessionNumber", "type": "int32" },
+        { "name": "sessionCount", "type": "int32" },
+        { "name": "isComplete", "type": "boolean" },
+        { "name": "completedAt", "type": "timestamp" },
+        { "name": "sessionName", "type": "string" },
+        { "name": "trackName", "type": "nullable<string>" },
+        { "name": "fastestParticipantId", "type": "nullable<uuid>" },
+        { "name": "fastestLapSeconds", "type": "nullable<float64>" },
+        { "name": "participants", "type": "array<model:StageResultParticipantSnapshot>" }
+      ]
+    },
+    {
+      "name": "AdminLoginRequest",
+      "targets": { "server": "RaceAdminLoginRequest", "typescript": "AdminLoginRequest" },
+      "fields": [{ "name": "password", "type": "string" }]
+    },
+    {
+      "name": "AdminSessionCommand",
+      "targets": { "server": "RaceAdminSessionCommand", "typescript": "SessionCommand" },
+      "fields": [
+        { "name": "phase", "type": "enum:SessionPhase" },
+        { "name": "sessionName", "type": "nullable<string>" },
+        { "name": "totalRaceLaps", "type": "nullable<int32>" },
+        { "name": "countdownSeconds", "type": "nullable<int32>" },
+        { "name": "qualifyingMinutes", "type": "nullable<int32>" },
+        { "name": "qualifyingSessionCount", "type": "nullable<int32>", "default": null },
+        { "name": "qualifyingSessionMinutes", "type": "nullable<array<int32>>", "default": null },
+        { "name": "qualifyingEliminationCounts", "type": "nullable<array<nullable<int32>>>", "default": null },
+        { "name": "practiceSessionCount", "type": "nullable<int32>", "default": null },
+        { "name": "practiceSessionMinutes", "type": "nullable<array<int32>>", "default": null }
+      ]
+    },
+    {
+      "name": "AdminFlagCommand",
+      "targets": { "server": "RaceAdminFlagCommand", "typescript": "FlagCommand" },
+      "fields": [
+        { "name": "flag", "type": "enum:ControlFlag" },
+        { "name": "message", "type": "nullable<string>" },
+        { "name": "sectorIndex", "type": "nullable<int32>", "default": null }
+      ]
+    },
+    {
+      "name": "RoomSettings",
+      "targets": {
+        "server": ["RaceAdminRoomSettingsCommand", "RaceRoomSettingsSnapshot"],
+        "typescript": "RoomSettings"
+      },
+      "fields": [
+        { "name": "sessionName", "type": "string" },
+        { "name": "totalRaceLaps", "type": "int32" },
+        { "name": "sectorCount", "type": "int32" },
+        { "name": "automaticYellowEnabled", "type": "boolean" },
+        { "name": "slowSpeedKph", "type": "float64" },
+        { "name": "slowDurationSeconds", "type": "float64" },
+        { "name": "severeLateralOffsetMeters", "type": "float64" },
+        { "name": "recoveryDurationSeconds", "type": "float64" },
+        { "name": "allowTeams", "type": "boolean", "default": true },
+        { "name": "trackName", "type": "nullable<string>", "default": null },
+        { "name": "trackId", "type": "nullable<string>", "default": null },
+        { "name": "trackRevision", "type": "nullable<string>", "default": null },
+        { "name": "trackPackageHash", "type": "nullable<string>", "default": null },
+        { "name": "teamCount", "type": "int32", "default": 2 },
+        { "name": "driversPerTeam", "type": "int32", "default": 6 },
+        { "name": "teams", "type": "nullable<array<model:TeamDefinition>>", "types": { "typescript": "array<model:TeamDefinition>" }, "default": null },
+        { "name": "trackLimitMode", "type": "enum:TrackLimitMode", "default": { "enum": "TrackLimitMode.warningsOnly" } },
+        { "name": "minimumRequiredPitStops", "type": "int32", "default": 1 },
+        { "name": "automaticCollisionInvestigationsEnabled", "type": "boolean", "default": false },
+        { "name": "disconnectedLapRecoveryEnabled", "type": "boolean", "default": false }
+      ]
+    },
+    {
+      "name": "AdminPenaltyCommand",
+      "targets": { "server": "RaceAdminPenaltyCommand", "typescript": "PenaltyCommand" },
+      "fields": [
+        { "name": "participantId", "type": "uuid" },
+        { "name": "kind", "type": "enum:PenaltyKind" },
+        { "name": "valueSeconds", "type": "nullable<float64>" },
+        { "name": "gridPlaces", "type": "nullable<int32>" },
+        { "name": "reason", "type": "string" }
+      ]
+    },
+    {
+      "name": "AdminPenaltyUpdateCommand",
+      "targets": { "server": "RaceAdminPenaltyUpdateCommand", "typescript": "PenaltyUpdateCommand" },
+      "fields": [
+        { "name": "penaltyId", "type": "uuid" },
+        { "name": "valueSeconds", "type": "nullable<float64>" },
+        { "name": "reason", "type": "nullable<string>" },
+        { "name": "isRevoked", "type": "boolean" }
+      ]
+    },
+    {
+      "name": "AdminInvestigationCommand",
+      "targets": { "server": "RaceAdminInvestigationCommand", "typescript": "InvestigationCommand" },
+      "fields": [
+        { "name": "investigationId", "type": "uuid" },
+        { "name": "applyPenalty", "type": "boolean" },
+        { "name": "kind", "type": "nullable<enum:PenaltyKind>" },
+        { "name": "valueSeconds", "type": "nullable<float64>" },
+        { "name": "reason", "type": "nullable<string>" },
+        { "name": "participantId", "type": "nullable<uuid>", "default": null }
+      ]
+    },
+    {
+      "name": "AdminParticipantCommand",
+      "targets": { "server": "RaceAdminParticipantCommand", "typescript": "ParticipantCommand" },
+      "fields": [
+        { "name": "participantId", "type": "uuid" },
+        { "name": "status", "type": "enum:ParticipantStatus" },
+        { "name": "reason", "type": "nullable<string>", "types": { "typescript": "string" } }
+      ]
+    },
+    {
+      "name": "AdminDisconnectCommand",
+      "targets": { "server": "RaceAdminDisconnectCommand", "typescript": "DisconnectCommand" },
+      "fields": [{ "name": "clientId", "type": "uuid" }]
+    },
+    {
+      "name": "AdminCollisionInvestigationSettingsCommand",
+      "targets": { "server": "RaceAdminCollisionInvestigationSettingsCommand", "typescript": "CollisionInvestigationSettingsCommand" },
+      "fields": [{ "name": "enabled", "type": "boolean" }]
+    }
+  ]
+}

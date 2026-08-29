@@ -6,7 +6,7 @@
 
 开发或修改 Cloudflare 实现前先读仓库根目录 [`AGENTS.md`](../AGENTS.md)。Cloudflare 与原生 ASP.NET 是同一服务端的两套实现，对客户端可见的协议、比赛行为、管理接口和 Web 总控必须保持一致。
 
-这个目录提供与 LazyForza 地产赛事客户端协议 v2 兼容的 Cloudflare Workers + Durable Objects 服务端。一个 Worker 固定使用一个名为 `main` 的赛事房间，支持 1–12 名车手，并可额外连接最多 12 个只读 OB 席位。OB 不占车手名额，可在比赛进行中加入，只接收赛事数据用于观赛或转播。
+这个目录提供与 LazyForza 地产赛事客户端协议 v2 兼容的 Cloudflare Workers + Durable Objects 服务端。协议模型和 Web 静态资源由仓库根目录的单一 Schema 与原生 `wwwroot` 生成，Cloudflare 包保留已提交产物，因此仍可脱离上级目录独立构建和部署。一个 Worker 固定使用一个名为 `main` 的赛事房间，支持 1–12 名车手，并可额外连接最多 12 个只读 OB 席位。OB 不占车手名额，可在比赛进行中加入，只接收赛事数据用于观赛或转播。
 
 正式服务端 `v0.4.3` 推荐搭配 LazyForza `1.5.0`，并与 `1.4.2`–`1.4.9` 的协议 v2 主要比赛流程兼容。断线计圈恢复需要 `1.4.8` 或更高版本，并由总控主动开启。旧客户端不会使用其版本发布后新增的练习项目、进站策略预测、OB 登录、主办方 Logo、赛道文件按需下载和后续维修区路线修正；1.4.2 没有服务端车队下拉框，填写名称能匹配时按名称加入，否则由服务端自动分配空余车队。完整兼容说明见仓库根目录 `README.md`。
 
@@ -83,6 +83,7 @@ npx wrangler secret put ADMIN_PASSWORD
 ```powershell
 cd cloudflare
 npm ci
+npm run check:generated
 npm run check
 npm test
 npm run dry-run
@@ -97,7 +98,7 @@ Read the repository-level [`AGENTS.md`](../AGENTS.md) before changing the Cloudf
 
 RaceServer `0.4.3` is recommended with LazyForza `1.5.0` and remains compatible with the main protocol v2 race flow in LazyForza `1.4.2–1.4.9`. Disconnected-lap recovery requires client `1.4.8` or later and must be explicitly enabled from Race Control.
 
-The Worker uses one Durable Object race room named `main`, with 1–12 drivers and up to 12 read-only observers. It supports:
+Protocol models and browser assets are generated from the repository-level schema and native `wwwroot`. Their committed outputs keep this Cloudflare package independently buildable and deployable. The Worker uses one Durable Object race room named `main`, with 1–12 drivers and up to 12 read-only observers. It supports:
 
 - room passwords, named super-admin, administrator and steward accounts for multiple Race Control users, display names, colors, teams and reconnect recovery;
 - reusable race-rule templates that keep event, track and team details separate;
@@ -156,6 +157,7 @@ Race Control accepts `.lfzestate` packages up to 1.5 MiB and verifies their mani
 ```powershell
 cd cloudflare
 npm ci
+npm run check:generated
 npm run check
 npm test
 npm run dry-run

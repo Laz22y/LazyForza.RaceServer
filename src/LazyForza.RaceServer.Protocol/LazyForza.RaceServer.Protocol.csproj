@@ -2,4 +2,8 @@
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
   </PropertyGroup>
+  <Target Name="GenerateRaceProtocolModels" BeforeTargets="BeforeBuild" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)/../.."
+          Command="node &quot;scripts/generate-protocol.mjs&quot; --skip-client" />
+  </Target>
 </Project>

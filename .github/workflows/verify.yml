@@ -39,6 +39,8 @@ jobs:
           cache-dependency-path: cloudflare/package-lock.json
       - name: Install locked dependencies
         run: npm ci
+      - name: Verify generated sources
+        run: npm run check:generated
       - name: Type check
         run: npm run check
       - name: Test

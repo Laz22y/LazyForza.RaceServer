@@ -8,11 +8,11 @@ const nativeUrl = (name: string) =>
 
 describe("Race Control localization", () => {
   it("keeps native and Cloudflare Web resources identical", () => {
-    for (const name of [
-      "app.js", "i18n.js", "index.html", "styles.css",
-      "timing.html", "timing.css", "timing.js"
-    ])
-      expect(readFileSync(publicUrl(name), "utf8")).toBe(readFileSync(nativeUrl(name), "utf8"));
+    const nativeFiles = listFiles(new URL("../../src/LazyForza.RaceServer.Web/wwwroot/", import.meta.url));
+    const cloudflareFiles = listFiles(new URL("../public/", import.meta.url));
+    expect(cloudflareFiles).toEqual(nativeFiles);
+    for (const name of nativeFiles)
+      expect(readFileSync(publicUrl(name))).toEqual(readFileSync(nativeUrl(name)));
   });
 
   it("restores session schedule controls when project editing is canceled", () => {
@@ -39,17 +39,16 @@ describe("Race Control localization", () => {
     const packageScript = readFileSync(
       new URL("../../scripts/Publish-Development.ps1", import.meta.url),
       "utf8");
-    expect(packageScript).toContain("'public/i18n.js'");
-    expect(packageScript).toContain("'public/lazyforza-logo.png'");
+    expect(packageScript).toContain("$cloudflarePublicInputs = Get-ChildItem");
+    expect(packageScript).toContain("GetRelativePath($cloudflareRoot, $_.FullName)");
+    expect(packageScript).toContain("'src/protocol.generated.ts'");
+    expect(packageScript).toContain("'scripts/generate-repository-assets.mjs'");
     expect(packageScript).toContain("'src/rule-templates.ts'");
     expect(packageScript).toContain("'tests/rule-templates.test.ts'");
     expect(packageScript).toContain("'src/event-projects.ts'");
     expect(packageScript).toContain("'tests/event-projects.test.ts'");
     expect(packageScript).toContain("'src/control-access.ts'");
     expect(packageScript).toContain("'tests/control-access.test.ts'");
-    expect(packageScript).toContain("'public/timing.html'");
-    expect(packageScript).toContain("'public/timing.css'");
-    expect(packageScript).toContain("'public/timing.js'");
     expect(packageScript).toContain("'src/public-timing.ts'");
     expect(packageScript).toContain("'tests/public-timing.test.ts'");
   });
@@ -118,6 +117,19 @@ describe("Race Control localization", () => {
     for (const [source, expected] of cases) expect(translate(source)).toBe(expected);
   });
 });
+
+function listFiles(root: URL, current = root, prefix = ""): string[] {
+  const entries = readdirSync(current, { withFileTypes: true }) as Array<{
+    name: string;
+    isDirectory(): boolean;
+    isFile(): boolean;
+  }>;
+  return entries
+    .flatMap(entry => entry.isDirectory()
+      ? listFiles(root, new URL(`${entry.name}/`, current), `${prefix}${entry.name}/`)
+      : entry.isFile() ? [`${prefix}${entry.name}`] : [])
+    .sort();
+}
 
 function sourceFiles(roots: URL[]): URL[] {
   const files: URL[] = [];

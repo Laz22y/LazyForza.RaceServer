@@ -10,9 +10,9 @@
 
 1. 本文和任务涉及的实现；
 2. `.NET` 行为先看 `tests/LazyForza.RaceServer.Tests`，Cloudflare 行为先看 `cloudflare/tests`；
-3. 协议任务同时打开 `src/LazyForza.RaceServer.Protocol/RaceProtocolModels.cs`、客户端 `../LazyForza\src\LazyForza.Modules.EstateRace\EstateRaceWireProtocol.cs` 和 `cloudflare/src/protocol.ts`；
+3. 协议任务先打开 `protocol/race-protocol.schema.json`，再检查三端生成文件及各端手写的序列化、校验辅助逻辑；
 4. 比赛规则同时比较 `RaceCoordinator.cs` 与 `cloudflare/src/race-core.ts`；
-5. Web 总控任务同时比较原生 `wwwroot` 与 `cloudflare/public`，以及两端路由；
+5. Web 总控任务只修改原生 `wwwroot`，再检查生成后的 `cloudflare/public`、逐文件一致性测试和两端路由；
 6. 涉及真实 FH6、弱网或多机结论时阅读客户端 [`VALIDATION_WITH_FH6.md`](../LazyForza/VALIDATION_WITH_FH6.md)。
 
 不要把只在一个实现通过的功能描述为 RaceServer 已完成。
@@ -27,31 +27,33 @@
 
 | 项目/目录 | 当前职责 | 不应放入 |
 | --- | --- | --- |
-| `LazyForza.RaceServer.Protocol` | 协议 v2 常量、消息、DTO、枚举、快照和管理命令 | 房间状态、ASP.NET 路由 |
+| `LazyForza.RaceServer.Protocol` | Schema 生成的协议 v2 常量、消息、DTO、枚举、快照，以及手写校验/序列化辅助 | 房间状态、ASP.NET 路由 |
 | `LazyForza.RaceServer.Core` | 原生房间权威状态机、排名、阶段、维修、旗语、处罚、调查和结果归档 | HTTP/WebSocket 细节、HTML |
 | `LazyForza.RaceServer.Web` | ASP.NET 路由、认证会话、WebSocket 注册/广播、托管文件、原生持久化和静态总控 | Cloudflare 平台 API |
 | `LazyForza.RaceServer.Tests` | 协议/Core/Web 边界、持久化和托管文件回归 | Cloudflare 行为替代证明 |
-| `cloudflare/src/protocol.ts` | TypeScript 协议副本 | 只在 TS 存在的新语义 |
+| `cloudflare/src/protocol.generated.ts`、`protocol.ts` | Schema 生成的 TypeScript 模型与手写辅助函数 | 只在 TS 存在且未写入 Schema 的新语义 |
 | `cloudflare/src/race-core.ts` | Durable Object 端赛事状态机和序列化 | DOM 与静态页面逻辑 |
 | `cloudflare/src/index.ts` | Worker/DO 路由、认证、WebSocket Hibernation、存储与 alarm 接线 | 与原生端不兼容的接口 |
-| `cloudflare/public` | Cloudflare 总控静态资源副本 | 独有页面或文案 |
+| `cloudflare/public` | 从原生 `wwwroot` 生成的 Cloudflare Web 产物 | 手工修改、独有页面或文案 |
 | `cloudflare/tests` | TypeScript 协议、核心、密码和赛道包回归 | 原生实现替代证明 |
 | `scripts` | 部署、开发预览与正式发行 | 运行时用户数据 |
 
 `Protocol` 不依赖 `Core`/`Web`；`Core` 只依赖 `Protocol`；平台接线位于 Web 或 Cloudflare `index.ts`。不要在路由层重新实现比赛状态机。
 
-## 三套契约与两套行为
+## 单一契约 Schema 与两套行为
 
-协议没有共享代码生成器，以下副本必须人工保持兼容：
+协议的唯一模型源是 `protocol/race-protocol.schema.json`。`scripts/generate-protocol.mjs` 从它生成：
 
-- 客户端：`../LazyForza\src\LazyForza.Modules.EstateRace\EstateRaceWireProtocol.cs`、`EstateRaceModels.cs`；
-- 原生服务端：`src/LazyForza.RaceServer.Protocol/RaceProtocolModels.cs`；
-- Cloudflare：`cloudflare/src/protocol.ts`。
+- 客户端 `../LazyForza\src\LazyForza.Modules.EstateRace\EstateRaceProtocol.g.cs`；
+- 原生服务端 `src/LazyForza.RaceServer.Protocol/RaceProtocolModels.g.cs`；
+- Cloudflare `cloudflare/src/protocol.generated.ts`。
+
+生成文件必须提交，以便两个仓库和独立 Cloudflare 包脱离生成器构建，但不得手工编辑。完整双仓库开发环境运行 `node scripts/generate-protocol.mjs`；原生独立构建使用 `--skip-client`，客户端仓库不存在时也必须显式选择该参数，避免无声遗漏客户端产物。序列化、校验和通用辅助逻辑仍保留在各端手写文件中。
 
 当前协议版本为 2，JSON 使用 camelCase 属性和字符串枚举，消息上限 64 KiB；参赛车手和 OB 上限分别为 12。改变 message type、DTO 字段、枚举、默认值、可空性、错误码或序列化名称时：
 
 1. 判断旧客户端与旧服务端如何读取新消息，优先用可选字段保持协议 v2 兼容；
-2. 同步三份模型和相应序列化；
+2. 修改 Schema、重新生成三端模型，并检查相应序列化；
 3. 同步 `RaceCoordinator.cs` 与 `cloudflare/src/race-core.ts`；
 4. 同步 `RaceWebSocketHandler.cs`/`Program.cs` 与 `cloudflare/src/index.ts`；
 5. 补客户端网络流、RaceServer MSTest 和 Cloudflare Vitest；
@@ -65,16 +67,14 @@
 
 | 修改类型 | 原生端 | Cloudflare 端 | 测试 |
 | --- | --- | --- | --- |
-| 比赛阶段、排名、Delta、进站、旗语、处罚、调查、赛果 | `RaceCoordinator.cs` 和 Protocol | `race-core.ts`、必要时 `protocol.ts` | `RaceCoordinatorTests.cs` + `race-core.test.ts` |
-| 登录、恢复、WebSocket 消息 | `RaceWebSocketHandler.cs`、`RaceWebSocketRegistry.cs`、`Program.cs` | `index.ts`、`protocol.ts` | registry/协调器测试 + Vitest |
+| 比赛阶段、排名、Delta、进站、旗语、处罚、调查、赛果 | `RaceCoordinator.cs` 和 Schema/Protocol | `race-core.ts`、必要时 Schema/`protocol.ts` | `RaceCoordinatorTests.cs` + `race-core.test.ts` |
+| 登录、恢复、WebSocket 消息 | `RaceWebSocketHandler.cs`、`RaceWebSocketRegistry.cs`、`Program.cs` | `index.ts`、Schema/`protocol.ts` | registry/协调器测试 + Vitest |
 | 管理 API 或设置 | `Program.cs`、配置/认证存储 | `index.ts`、DO 存储 | 两端 API/核心行为测试 |
 | 赛道文件或 Logo | Hosted store、路由、上限/校验 | `track-package.ts`、`index.ts`、DO 存储 | 对应 .NET 与 TS 文件测试 |
-| Web 总控布局、文案、交互 | `src/...Web/wwwroot/*` | `cloudflare/public/*` | 文件一致性检查 + 两端浏览器人工检查 |
+| Web 总控布局、文案、交互 | `src/...Web/wwwroot/*` 唯一源码 | 构建生成 `cloudflare/public/*` | 递归逐文件一致性检查 + 两端浏览器人工检查 |
 | 持久化模型 | `RaceStatePersistence`、JSON 文件兼容 | `StoredRaceState`、DO key/SQLite storage | 恢复/序列化回归 |
 
-原生 `wwwroot` 和 `cloudflare/public` 当前是实体副本。相同文件必须保持逐字节一致；新增资源还要检查开发/发行脚本的 Cloudflare 打包白名单，不能只确认源码目录中存在。
-
-截至 2026-08-24，`scripts/Publish-Development.ps1` 的 Cloudflare 白名单没有列出已经被 `index.html` 引用的 `public/lazyforza-logo.png`。这是本次文档审计发现的打包缺口，未在文档任务中修改生产脚本；验证开发/发行包时必须单独检查该资源，修复时补包内容回归。
+原生 `src/LazyForza.RaceServer.Web/wwwroot` 是唯一 Web 源码，`scripts/generate-web-assets.mjs` 会完整替换 `cloudflare/public` 并逐文件、逐字节复核。原生 Web 构建和 Cloudflare `npm run build` 都会执行生成；`npm run check:generated` 只检查漂移而不修改文件。开发/发行打包脚本递归收集生成后的全部 `public` 文件，新增资源无需再维护静态名单。
 
 Cloudflare 平台允许不同的存储和 WebSocket 生命周期实现，但对客户端可见的协议、赛事结果、管理动作和错误语义必须与原生端一致。平台差异应限制在 `index.ts`/持久化接线，不应扩散到比赛规则。
 
@@ -101,6 +101,7 @@ dotnet test LazyForza.RaceServer.sln -c Release --no-build --no-restore
 
 cd cloudflare
 npm ci
+npm run check:generated
 npm run check
 npm test
 npm run dry-run
@@ -133,17 +134,13 @@ npm run dev
 
 ## Web 总控检查
 
-修改静态资源后至少确认：
+修改静态资源后从仓库根目录生成，再执行只读漂移检查：
 
 ```powershell
-$native = 'src/LazyForza.RaceServer.Web/wwwroot'
-$cloudflare = 'cloudflare/public'
-Get-ChildItem $native -File | ForEach-Object {
-    $peer = Join-Path $cloudflare $_.Name
-    if (!(Test-Path $peer) -or (Get-FileHash $_.FullName).Hash -ne (Get-FileHash $peer).Hash) {
-        Write-Error "Web asset differs: $($_.Name)"
-    }
-}
+node scripts/generate-web-assets.mjs
+cd cloudflare
+npm run check:generated
+npm test
 ```
 
 再分别从原生端和 Wrangler 打开页面，检查初始化、登录、房间设置、比赛控制、处罚/调查、事件、车手/OB、阶段赛果和 Pad 窄宽度。截图只能证明视觉状态，不证明按钮已接到正确 API。
@@ -158,4 +155,4 @@ Get-ChildItem $native -File | ForEach-Object {
 
 ## 完成检查
 
-交付前确认：修改没有只落在一套服务端；协议三份模型兼容；Web 两份资源一致；持久化能读取旧状态；弱连接不会反压其他连接；两套测试均覆盖根因；执行了 .NET Release 检查和 Cloudflare check/test/dry-run 中与风险匹配的部分；未验证的公网或实机行为已明确说明。
+交付前确认：修改没有只落在一套服务端；协议 Schema 与三端生成文件无漂移；Web 唯一源码和生成产物逐文件一致；持久化能读取旧状态；弱连接不会反压其他连接；两套测试均覆盖根因；执行了 .NET Release 检查和 Cloudflare check/test/dry-run 中与风险匹配的部分；未验证的公网或实机行为已明确说明。

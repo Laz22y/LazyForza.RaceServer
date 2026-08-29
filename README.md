@@ -85,9 +85,9 @@ chmod +x ./LazyForza.RaceServer.Web
 
 ## 本地开发
 
-需要 .NET SDK 9。Cloudflare 端另需 Node.js 20+：
+需要 .NET SDK 9 和 Node.js 20+；构建时会从 Schema 与原生 Web 源生成跨端产物：
 
-第一次接触仓库或修改跨端行为时，先读 [Coding Agent 开发入口](AGENTS.md)。其中列出协议三份副本、原生/Cloudflare 对等文件和验证矩阵。
+第一次接触仓库或修改跨端行为时，先读 [Coding Agent 开发入口](AGENTS.md)。其中列出单一协议 Schema、三端生成文件、原生/Cloudflare 对等实现和验证矩阵。
 
 ```powershell
 dotnet restore LazyForza.RaceServer.sln
@@ -96,6 +96,7 @@ dotnet test LazyForza.RaceServer.sln -c Release --no-build --no-restore
 
 cd cloudflare
 npm ci
+npm run check:generated
 npm run check
 npm test
 npm run dry-run
@@ -195,7 +196,7 @@ RaceServer `0.4.3` is recommended with LazyForza `1.5.0`. The main protocol v2 r
 
 ### Local development
 
-Requires .NET SDK 9; the Cloudflare implementation also requires Node.js 20+:
+Requires .NET SDK 9 and Node.js 20+ because builds generate cross-target artifacts from the schema and native web source:
 
 ```powershell
 dotnet restore LazyForza.RaceServer.sln
@@ -204,12 +205,13 @@ dotnet test LazyForza.RaceServer.sln -c Release --no-build --no-restore
 
 cd cloudflare
 npm ci
+npm run check:generated
 npm run check
 npm test
 npm run dry-run
 ```
 
-Protocol, Race Control API and web changes must be implemented and tested in both the native and Cloudflare versions. Read [AGENTS.md](AGENTS.md) for the contract map and validation matrix.
+Protocol models are generated from the single [protocol schema](protocol/race-protocol.schema.json). Protocol behavior, Race Control APIs and web changes must still be implemented and tested in both the native and Cloudflare versions. Read [AGENTS.md](AGENTS.md) for the contract map and validation matrix.
 
 ### Data boundaries
 

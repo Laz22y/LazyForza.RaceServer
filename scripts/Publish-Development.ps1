@@ -126,13 +126,14 @@ if ($CloudflareLabel -or $PackageVersion) {
             Remove-Item -LiteralPath $target -Recurse -Force
         }
     }
-    foreach ($directory in @('public', 'src', 'tests')) {
+    foreach ($directory in @('public', 'scripts', 'src', 'tests')) {
         New-Item -ItemType Directory -Force -Path (Join-Path $cloudflareStage $directory) | Out-Null
     }
-    foreach ($relative in @(
-            'public/app.js', 'public/events.css', 'public/i18n.js', 'public/index.html', 'public/lazyforza-logo.png',
-            'public/results.css', 'public/styles.css', 'public/teams.css', 'public/timing.css', 'public/timing.html', 'public/timing.js',
-            'src/control-access.ts', 'src/event-projects.ts', 'src/index.ts', 'src/passwords.ts', 'src/protocol.ts', 'src/public-timing.ts', 'src/race-core.ts', 'src/rule-templates.ts', 'src/track-package.ts',
+    $cloudflarePublicInputs = Get-ChildItem -LiteralPath (Join-Path $cloudflareRoot 'public') -File -Recurse |
+        ForEach-Object { [System.IO.Path]::GetRelativePath($cloudflareRoot, $_.FullName).Replace('\', '/') }
+    foreach ($relative in @($cloudflarePublicInputs) + @(
+            'src/control-access.ts', 'src/event-projects.ts', 'src/index.ts', 'src/passwords.ts', 'src/protocol.generated.ts', 'src/protocol.ts', 'src/public-timing.ts', 'src/race-core.ts', 'src/rule-templates.ts', 'src/track-package.ts',
+            'scripts/generate-repository-assets.mjs',
             'tests/control-access.test.ts', 'tests/event-projects.test.ts', 'tests/passwords.test.ts', 'tests/public-timing.test.ts', 'tests/race-core.test.ts', 'tests/rule-templates.test.ts', 'tests/track-package.test.ts', 'tests/web-localization.test.ts',
             'package-lock.json', 'package.json', 'README.md', 'tsconfig.json', 'wrangler.jsonc')) {
         $source = [System.IO.Path]::GetFullPath((Join-Path $cloudflareRoot $relative))
@@ -143,6 +144,7 @@ if ($CloudflareLabel -or $PackageVersion) {
             throw "Cloudflare development input is missing or outside its source root: $source"
         }
         $destination = Join-Path $cloudflareStage $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
         Copy-Item -LiteralPath $source -Destination $destination
     }
     Set-Content -LiteralPath (Join-Path $cloudflareStage 'BUILDINFO.txt') -Encoding UTF8 -Value @(

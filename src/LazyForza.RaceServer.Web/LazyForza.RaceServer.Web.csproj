@@ -11,4 +11,8 @@
     <Content Remove="data\**\*" />
     <None Remove="data\**\*" />
   </ItemGroup>
+  <Target Name="GenerateCloudflareWebAssets" BeforeTargets="BeforeBuild" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Exec WorkingDirectory="$(MSBuildProjectDirectory)/../.."
+          Command="node &quot;scripts/generate-web-assets.mjs&quot;" />
+  </Target>
 </Project>

@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "generate": "node scripts/generate-repository-assets.mjs",
+    "check:generated": "node scripts/generate-repository-assets.mjs --check",
+    "build": "npm run generate && tsc --noEmit",
     "check": "tsc --noEmit",
     "test": "vitest run",
     "dev": "wrangler dev",

@@ -3,6 +3,12 @@ using System.Text.Json.Serialization;
 
 namespace LazyForza.RaceServer.Protocol;
 
+public sealed record RaceEnvelope(
+    int ProtocolVersion,
+    string Type,
+    long Sequence,
+    JsonElement Payload);
+
 public static class RaceProtocolJson
 {
     public static JsonSerializerOptions Options { get; } = CreateOptions();
