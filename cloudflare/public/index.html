@@ -29,24 +29,23 @@
     </header>
 
     <section id="setupPanel" class="auth-panel panel hidden">
-      <div class="auth-intro">
+      <div id="terminalSetupNotice" class="auth-intro">
+        <span class="step-mark">等待服务器初始化</span>
+        <h2>服务器尚未完成初始化</h2>
+        <p>请在运行 RaceServer 的服务器终端完成首次设置，然后刷新此页面。</p>
+        <ul><li>Windows：<code>LazyForza.RaceServer.Web.exe init</code></li><li>Linux / macOS：<code>./LazyForza.RaceServer.Web init</code></li></ul>
+      </div>
+      <div id="terminalSetupAction" class="auth-form">
+        <p class="muted">首次设置只能由拥有服务器终端访问权限的管理员完成。此页面不会接收房间密码或超级管理员密码。</p>
+        <button id="refreshSetupStatus" type="button" class="primary wide">刷新服务器状态</button>
+      </div>
+      <div id="remoteSetupIntro" class="auth-intro hidden">
         <span class="step-mark">首次设置</span>
         <h2>创建你的赛事房间</h2>
         <p>这一步只会出现一次。设置完成后，车手使用房间密码加入；这里设置的总控密码会成为首个超管账号。</p>
         <ul><li>两个密码不要相同，也不要把总控密码发给参赛车手。</li><li>分段数需要与将要使用的地产赛道一致。</li><li>密码只保存为加盐摘要，不写入网页或赛事日志。</li></ul>
       </div>
-      <form id="setupForm" class="auth-form">
-        <div class="form-grid two">
-          <label>赛事名称<input id="setupSessionName" maxlength="64" value="地产赛事" required></label>
-          <label>赛道分段数<input id="setupSectorCount" type="number" min="1" max="20" value="3" required></label>
-          <label>正赛圈数<input id="setupRaceLaps" type="number" min="1" max="999" value="10" required></label>
-          <span></span>
-          <label>房间密码（可留空）<input id="setupPlayerPassword" type="password" maxlength="128" autocomplete="new-password"></label>
-          <label>超管密码<input id="setupAdminPassword" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
-        </div>
-        <button type="submit" class="primary wide">保存并启用房间</button>
-        <p id="setupError" class="form-error" aria-live="polite"></p>
-      </form>
+      <div id="remoteSetupFormHost" class="hidden"></div>
     </section>
 
     <section id="loginPanel" class="auth-panel panel hidden">

@@ -3,7 +3,7 @@ const raceI18n=window.RaceI18n??{t:value=>value,locale:'zh-CN',isEnglish:false};
 const tr=value=>raceI18n.t(value);
 const raceLocale=raceI18n.locale;
 const loginPanel=$('#loginPanel'),setupPanel=$('#setupPanel'),dashboard=$('#dashboard');
-const loginError=$('#loginError'),setupError=$('#setupError'),actionError=$('#actionError');
+const loginError=$('#loginError'),actionError=$('#actionError');
 const connectionState=$('#connectionState span'),timingRows=$('#timingRows'),observerList=$('#observerList'),eventRows=$('#eventRows'),investigationRows=$('#investigationRows'),penaltyRows=$('#penaltyRows'),resultHistoryRows=$('#resultHistoryRows'),eventProjectList=$('#eventProjectList');
 const collisionReplayModal=$('#collisionReplayModal'),collisionReplaySvg=$('#collisionReplaySvg'),collisionReplayStatus=$('#collisionReplayStatus'),collisionReplayTitle=$('#collisionReplayTitle'),collisionReplaySubtitle=$('#collisionReplaySubtitle'),collisionReplayPlay=$('#collisionReplayPlay'),collisionReplayTimeline=$('#collisionReplayTimeline'),collisionReplayTime=$('#collisionReplayTime'),collisionReplayLegend=$('#collisionReplayLegend'),collisionReplayStats=$('#collisionReplayStats');
 let polling=null,refreshInFlight=false,eventRefreshCount=0,eventHistory=[],lastEventSequence=0,stageResults=[],teamDraft=[],ruleTemplates=[],maximumRuleTemplates=32,eventProjects=[],maximumEventProjects=64,editingEventProjectId=null,eventProjectScheduleBeforeEdit=null,controlPrincipal=null,controlAccounts=[],maximumControlAccounts=32,publicTimingEnabled=false,timingInteractionUntil=0,penaltyInteractionUntil=0,lastState=null,activeTrackRevision=null;
@@ -20,30 +20,58 @@ async function initialize(){
     const response=await fetch('/api/setup/status',{cache:'no-store'});
     const status=await response.json();
     if(!status.isConfigured){
-      const defaults=status.defaults??{};
-      const defaultSessionName=defaults.sessionName??'地产赛事';
-      $('#setupSessionName').value=defaultSessionName==='地产赛事'?tr(defaultSessionName):defaultSessionName;
-      $('#setupRaceLaps').value=defaults.totalRaceLaps??10;
-      $('#setupSectorCount').value=defaults.sectorCount??3;
-      setupPanel.classList.remove('hidden');connectionState.textContent='等待首次设置';
+      if(status.setupMode==='terminal'){
+        $('#terminalSetupNotice').classList.remove('hidden');$('#terminalSetupAction').classList.remove('hidden');
+        $('#remoteSetupIntro').classList.add('hidden');$('#remoteSetupFormHost').classList.add('hidden');
+        connectionState.textContent='等待终端初始化';
+      }else{
+        renderRemoteSetup(status.defaults??{});connectionState.textContent='等待首次设置';
+      }
+      setupPanel.classList.remove('hidden');
     }else{loginPanel.classList.remove('hidden');connectionState.textContent='等待总控登录';}
   }catch{loginPanel.classList.remove('hidden');connectionState.textContent='无法读取服务端状态';}
 }
 
-$('#setupForm').addEventListener('submit',async event=>{
-  event.preventDefault();setupError.textContent='';
+$('#refreshSetupStatus').addEventListener('click',()=>window.location.reload());
+
+function renderRemoteSetup(defaults){
+  $('#terminalSetupNotice').classList.add('hidden');$('#terminalSetupAction').classList.add('hidden');
+  $('#remoteSetupIntro').classList.remove('hidden');
+  const host=$('#remoteSetupFormHost');
+  host.innerHTML=`<form id="setupForm" class="auth-form">
+    <div class="form-grid two">
+      <label>${tr('赛事名称')}<input id="setupSessionName" maxlength="64" required></label>
+      <label>${tr('赛道分段数')}<input id="setupSectorCount" type="number" min="1" max="20" required></label>
+      <label>${tr('正赛圈数')}<input id="setupRaceLaps" type="number" min="1" max="999" required></label>
+      <span></span>
+      <label>${tr('房间密码（可留空）')}<input id="setupPlayerPassword" type="password" maxlength="128" autocomplete="new-password"></label>
+      <label>${tr('超管密码')}<input id="setupAdminPassword" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
+    </div>
+    <button type="submit" class="primary wide">${tr('保存并启用房间')}</button>
+    <p id="setupError" class="form-error" aria-live="polite"></p>
+  </form>`;
+  host.classList.remove('hidden');
+  const defaultSessionName=defaults.sessionName??'地产赛事';
+  $('#setupSessionName').value=defaultSessionName==='地产赛事'?tr(defaultSessionName):defaultSessionName;
+  $('#setupRaceLaps').value=defaults.totalRaceLaps??10;
+  $('#setupSectorCount').value=defaults.sectorCount??3;
+  $('#setupForm').addEventListener('submit',submitRemoteSetup);
+}
+
+async function submitRemoteSetup(event){
+  event.preventDefault();const setupError=$('#setupError');setupError.textContent='';
   const submit=event.submitter??event.currentTarget.querySelector('button[type=submit]');
   if(submit.disabled)return;
   const body={playerPassword:$('#setupPlayerPassword').value,adminPassword:$('#setupAdminPassword').value,sessionName:value('#setupSessionName'),totalRaceLaps:numberValue('#setupRaceLaps'),sectorCount:numberValue('#setupSectorCount')};
   if(body.playerPassword===body.adminPassword){setupError.textContent='房间密码和总控密码不能相同。';return;}
-  submit.disabled=true;submit.textContent='正在保存…';
+  submit.disabled=true;submit.textContent=tr('正在保存…');
   try{
     const response=await request('/api/setup',body);
     if(!response.ok){setupError.textContent=await responseError(response,'首次设置未能保存。');return;}
     setupPanel.classList.add('hidden');loginPanel.classList.remove('hidden');connectionState.textContent='设置完成，请登录总控';$('#adminPassword').focus();
   }catch(error){setupError.textContent=`无法连接 Cloudflare 服务端：${error instanceof Error?error.message:'网络请求失败。'}`;}
-  finally{submit.disabled=false;submit.textContent='保存并启用房间';}
-});
+  finally{submit.disabled=false;submit.textContent=tr('保存并启用房间');}
+}
 
 $('#loginForm').addEventListener('submit',async event=>{
   event.preventDefault();loginError.textContent='';

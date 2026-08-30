@@ -181,7 +181,7 @@ export class RaceRoom {
     const url = new URL(request.url);
     if (url.pathname === "/ws") return this.acceptSocket(request);
     if (url.pathname === "/api/setup/status" && request.method === "GET")
-      return json({ isConfigured: this.isConfigured(), defaults: this.core.roomSettings() });
+      return json({ isConfigured: this.isConfigured(), setupMode: "remote", defaults: this.core.roomSettings() });
     if (url.pathname === "/api/setup" && request.method === "POST")
       return this.initialSetup(request);
     if (url.pathname === "/api/admin/login" && request.method === "POST")

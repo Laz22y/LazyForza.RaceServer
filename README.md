@@ -35,20 +35,24 @@ LazyForza 地产赛事的独立服务端。支持原生 ASP.NET 自托管和 Clo
 
 ## 原生服务端
 
-从 [Releases](https://github.com/Laz22y/LazyForza.RaceServer/releases/latest) 下载对应平台 ZIP，解压后运行：
+从 [Releases](https://github.com/Laz22y/LazyForza.RaceServer/releases/latest) 下载对应平台 ZIP。全新服务器先在服务器终端执行一次初始化，再启动服务：
 
 ```powershell
 # Windows
+./LazyForza.RaceServer.Web.exe init
 ./LazyForza.RaceServer.Web.exe
 ```
 
 ```bash
 # Linux / macOS
 chmod +x ./LazyForza.RaceServer.Web
+./LazyForza.RaceServer.Web init
 ./LazyForza.RaceServer.Web
 ```
 
-默认监听 `http://0.0.0.0:24876`。首次打开网页时设置房间密码、初始超管密码和赛事基础规则，不要求同时设置其他角色。超管登录后可按需创建多个超管、管理员或裁判账号，同一角色可有多个独立名称和密码。房间密码没有最少位数限制；总控账号密码需 8–128 个字符，且不能与房间密码或其他总控账号密码相同。
+`init` 会在本机终端中询问房间密码、初始超级管理员密码、赛事名称、正赛圈数和分段数；密码输入不回显，只以现有 PBKDF2 摘要格式写入 `data/server-settings.json`。已经存在有效配置时，`init` 会拒绝覆盖。未初始化时直接启动服务会在监听任何 HTTP / WebSocket 端口前报错退出，因此不能在浏览器或远程 API 中完成原生端首次设置。
+
+初始化后，服务默认监听 `http://0.0.0.0:24876`。超管登录网页 Race Control 后可按需创建多个超管、管理员或裁判账号，同一角色可有多个独立名称和密码。房间密码没有最少位数限制；总控账号密码需 8–128 个字符，且不能与房间密码或其他总控账号密码相同。升级时会直接读取现有 `data/server-settings.json`，不要求重新初始化。
 
 管理员或超管可在“公开实时计时”区生成普通浏览和直播透明背景链接。只读令牌与总控账号独立，明文只在生成时显示；轮换或停用后，旧链接立即失效。
 
@@ -105,6 +109,7 @@ npm run dry-run
 运行原生端：
 
 ```powershell
+dotnet run --project src/LazyForza.RaceServer.Web/LazyForza.RaceServer.Web.csproj -- init
 dotnet run --project src/LazyForza.RaceServer.Web/LazyForza.RaceServer.Web.csproj
 ```
 
@@ -153,20 +158,24 @@ The server does not read the game. Each LazyForza client derives local position,
 
 ### Native server
 
-Download the ZIP for your platform from [Releases](https://github.com/Laz22y/LazyForza.RaceServer/releases/latest), extract it and run:
+Download the ZIP for your platform from [Releases](https://github.com/Laz22y/LazyForza.RaceServer/releases/latest). On a new server, initialize it once in the server terminal before starting the service:
 
 ```powershell
 # Windows
+./LazyForza.RaceServer.Web.exe init
 ./LazyForza.RaceServer.Web.exe
 ```
 
 ```bash
 # Linux / macOS
 chmod +x ./LazyForza.RaceServer.Web
+./LazyForza.RaceServer.Web init
 ./LazyForza.RaceServer.Web
 ```
 
-The server listens on `http://0.0.0.0:24876` by default. On first launch, set the room password, initial super-admin password and base rules; the other roles are optional. A super admin can later create multiple named super-admin, administrator or steward accounts, including several users with the same role. Each Race Control password must contain 8–128 characters and must differ from the room password and every other Race Control password.
+The `init` command prompts locally for the room password, initial Super Admin password, event name, race laps and sector count. Password input is not echoed and only the existing PBKDF2 digest format is written to `data/server-settings.json`. The command refuses to overwrite valid existing credentials. Starting an uninitialized server exits with an error before any HTTP or WebSocket port is opened, so native initial setup cannot be completed in a browser or through a remote API.
+
+After initialization, the server listens on `http://0.0.0.0:24876` by default. A Super Admin can sign in to Race Control and create multiple named Super Admin, administrator or steward accounts, including several users with the same role. Each Race Control password must contain 8–128 characters and must differ from the room password and every other Race Control password. Upgrades continue to use an existing `data/server-settings.json` without requiring initialization again.
 
 Administrators and super admins can generate regular viewer and transparent broadcast links from the Public Live Timing panel. The read-only token is independent of Race Control accounts and is shown only when generated; rotating or disabling it invalidates every previous link immediately.
 
@@ -212,6 +221,13 @@ npm run dry-run
 ```
 
 Protocol models are generated from the single [protocol schema](protocol/race-protocol.schema.json). Protocol behavior, Race Control APIs and web changes must still be implemented and tested in both the native and Cloudflare versions. Read [AGENTS.md](AGENTS.md) for the contract map and validation matrix.
+
+To initialize and then run the native development server:
+
+```powershell
+dotnet run --project src/LazyForza.RaceServer.Web/LazyForza.RaceServer.Web.csproj -- init
+dotnet run --project src/LazyForza.RaceServer.Web/LazyForza.RaceServer.Web.csproj
+```
 
 ### Data boundaries
 

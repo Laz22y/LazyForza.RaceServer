@@ -28,6 +28,20 @@ describe("Race Control localization", () => {
     expect(index).not.toContain('id="controlAccess" class="panel control-access-panel hidden"');
   });
 
+  it("keeps native terminal initialization separate from Cloudflare remote setup", () => {
+    const index = readFileSync(publicUrl("index.html"), "utf8");
+    const app = readFileSync(publicUrl("app.js"), "utf8");
+    const worker = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    expect(index).toContain("请在运行 RaceServer 的服务器终端完成首次设置");
+    expect(index).not.toContain('id="setupForm"');
+    expect(index).not.toContain('id="setupPlayerPassword"');
+    expect(index).not.toContain('id="setupAdminPassword"');
+    expect(app).toContain("status.setupMode==='terminal'");
+    expect(app).toContain("renderRemoteSetup");
+    expect(worker).toContain('setupMode: "remote"');
+    expect(worker).toContain('url.pathname === "/api/setup" && request.method === "POST"');
+  });
+
   it("loads localization before the application and packages every referenced asset", () => {
     const index = readFileSync(publicUrl("index.html"), "utf8");
     expect(index.indexOf('/i18n.js')).toBeGreaterThan(0);

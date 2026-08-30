@@ -34,37 +34,14 @@ public sealed class RaceServerConfigurationStore
             stored = Upgrade(loaded);
             Save(stored);
         }
-        if (stored is null && HasExplicitPasswords(options))
-            stored = CreateConfiguration(
-                options.PlayerPassword,
-                options.AdminPassword,
-                new RaceRoomSettingsSnapshot(
-                    options.SessionName,
-                    options.TotalRaceLaps,
-                    options.SectorCount,
-                    options.AutomaticYellowEnabled,
-                    options.SlowSpeedKph,
-                    options.SlowDurationSeconds,
-                    options.SevereLateralOffsetMeters,
-                    options.RecoveryDurationSeconds,
-                    true,
-                    options.TrackName,
-                    options.TrackId,
-                    options.TrackRevision,
-                    options.TrackPackageHash,
-                    options.TeamCount,
-                    options.DriversPerTeam,
-                    options.Teams,
-                    options.TrackLimitMode,
-                    options.MinimumRequiredPitStops,
-                    options.AutomaticCollisionInvestigationsEnabled,
-                    options.DisconnectedLapRecoveryEnabled));
     }
 
     public bool IsConfigured
     {
         get { lock (sync) return stored is not null; }
     }
+
+    public string SettingsPath => settingsPath;
 
     public RaceRoomSettingsSnapshot InitialRoomSettings
     {
@@ -326,10 +303,6 @@ public sealed class RaceServerConfigurationStore
             throw new InvalidOperationException($"服务端设置文件无法读取：{path}", exception);
         }
     }
-
-    private static bool HasExplicitPasswords(RaceServerOptions options) =>
-        options.PlayerPassword != "change-me" &&
-        options.AdminPassword != "change-admin-me";
 
     private static string? ValidatePasswords(string player, string admin)
     {

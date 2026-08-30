@@ -4,7 +4,9 @@ using LazyForza.RaceServer.Core;
 using LazyForza.RaceServer.Protocol;
 using LazyForza.RaceServer.Web;
 
-var builder = WebApplication.CreateBuilder(args);
+var initializationRequested = RaceServerInitializationCommand.IsRequested(args);
+var hostArguments = initializationRequested ? args[1..] : args;
+var builder = WebApplication.CreateBuilder(hostArguments);
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.PropertyNameCaseInsensitive = true;
@@ -14,6 +16,21 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 var configured = builder.Configuration.GetSection("RaceServer").Get<RaceServerOptions>() ?? new RaceServerOptions();
 var serverOptions = configured.Normalize();
 var configurationStore = new RaceServerConfigurationStore(serverOptions);
+if (initializationRequested)
+{
+    Environment.ExitCode = RaceServerInitializationCommand.Run(
+        configurationStore,
+        new SystemRaceServerInitializationConsole());
+    return;
+}
+
+var startupExitCode = RaceServerStartup.ValidateNormalStart(configurationStore, Console.Error);
+if (startupExitCode != 0)
+{
+    Environment.ExitCode = startupExitCode;
+    return;
+}
+
 var initialRoom = configurationStore.InitialRoomSettings;
 serverOptions = serverOptions with
 {
@@ -169,43 +186,7 @@ app.MapGet("/api/track-package", async (
 
 app.Map("/ws", (HttpContext context, RaceWebSocketHandler handler) => handler.HandleAsync(context));
 
-app.MapGet("/api/setup/status", (RaceServerConfigurationStore settings) => Results.Ok(new
-{
-    isConfigured = settings.IsConfigured,
-    defaults = settings.InitialRoomSettings
-}));
-
-app.MapPost("/api/setup", (
-    RaceServerInitialSetupRequest request,
-    RaceServerConfigurationStore settings,
-    RaceCoordinator coordinator) =>
-{
-    var setup = settings.ConfigureInitial(request);
-    if (!setup.Success) return Results.BadRequest(new { error = setup.Error });
-    var room = setup.Settings!;
-    var applied = coordinator.ApplyRoomSettings(new RaceAdminRoomSettingsCommand(
-        room.SessionName,
-        room.TotalRaceLaps,
-        room.SectorCount,
-        room.AutomaticYellowEnabled,
-        room.SlowSpeedKph,
-        room.SlowDurationSeconds,
-        room.SevereLateralOffsetMeters,
-        room.RecoveryDurationSeconds,
-        room.AllowTeams,
-        room.TrackName,
-        room.TrackId,
-        room.TrackRevision,
-        room.TrackPackageHash,
-        room.TeamCount,
-        room.DriversPerTeam,
-        room.Teams,
-        room.TrackLimitMode,
-        room.MinimumRequiredPitStops,
-        room.AutomaticCollisionInvestigationsEnabled,
-        room.DisconnectedLapRecoveryEnabled));
-    return applied.IsAccepted ? Results.Ok(new { ok = true }) : Results.BadRequest(new { error = applied.Error });
-});
+app.MapNativeSetupEndpoints();
 
 app.MapPost("/api/admin/login", (RaceAdminLoginRequest request, HttpContext context, AdminSessionStore sessions) =>
 {
@@ -800,9 +781,6 @@ app.MapPost("/api/admin/disconnect", async (
     var result = coordinator.DisconnectAndReleaseClient(command.ClientId);
     return result.IsAccepted ? Results.Ok() : Results.BadRequest(new { error = result.Error });
 });
-
-if (!configurationStore.IsConfigured)
-    app.Logger.LogWarning("Race server is waiting for first-time setup in the web control panel. Do not expose it before claiming the room.");
 
 app.Run();
 
