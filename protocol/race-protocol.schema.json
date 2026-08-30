@@ -617,6 +617,24 @@
       "fields": [{ "name": "password", "type": "string" }]
     },
     {
+      "name": "PreRaceCheckWarning",
+      "targets": { "server": "RacePreRaceCheckWarning", "typescript": "PreRaceCheckWarning" },
+      "fields": [
+        { "name": "code", "type": "string" },
+        { "name": "message", "type": "string" },
+        { "name": "participantIds", "type": "array<uuid>" }
+      ]
+    },
+    {
+      "name": "PreRaceCheckReport",
+      "targets": { "server": "RacePreRaceCheckReport", "typescript": "PreRaceCheckReport" },
+      "fields": [
+        { "name": "generatedAt", "type": "timestamp" },
+        { "name": "warnings", "type": "array<model:PreRaceCheckWarning>" },
+        { "name": "canForceStart", "type": "boolean" }
+      ]
+    },
+    {
       "name": "AdminSessionCommand",
       "targets": { "server": "RaceAdminSessionCommand", "typescript": "SessionCommand" },
       "fields": [
@@ -629,7 +647,8 @@
         { "name": "qualifyingSessionMinutes", "type": "nullable<array<int32>>", "default": null },
         { "name": "qualifyingEliminationCounts", "type": "nullable<array<nullable<int32>>>", "default": null },
         { "name": "practiceSessionCount", "type": "nullable<int32>", "default": null },
-        { "name": "practiceSessionMinutes", "type": "nullable<array<int32>>", "default": null }
+        { "name": "practiceSessionMinutes", "type": "nullable<array<int32>>", "default": null },
+        { "name": "forceStart", "type": "nullable<boolean>", "default": null }
       ]
     },
     {

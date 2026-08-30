@@ -810,10 +810,28 @@
     ['OB 不能提交圈速。', 'Broadcasters cannot submit lap times.'],
     ['OB 不能提交维修停留。', 'Broadcasters cannot submit pit-service records.'],
     ['OB 只接收赛事数据，不能上传遥测或参与比赛流程。', 'Broadcasters receive race data only and cannot upload telemetry or participate in race procedures.'],
-    ['PNG 文件签名不正确。', 'Invalid PNG file signature.']
+    ['PNG 文件签名不正确。', 'Invalid PNG file signature.'],
+    ['赛事开始前检查', 'Pre-race check'],
+    ['检查结果仅作警告，不会禁止总控发车。', 'Check results are warnings only and never prevent Race Control from starting the race.'],
+    ['0 项警告', '0 warnings'],
+    ['请确认车手与赛事状态；必要时仍可强制启动发车程序。', 'Review driver and event status. Race Control may still force the start when necessary.'],
+    ['取消发车', 'Cancel start'],
+    ['忽略警告并启动', 'Ignore warnings and start'],
+    ['赛前检查读取失败。', 'Failed to load the pre-race check.'],
+    ['赛前检查发现警告。请确认后强制启动发车程序。', 'The pre-race check found warnings. Confirm them before forcing the start sequence.'],
+    ['当前赛事阶段尚未完成常规发车准备流程。', 'The current session has not completed the normal pre-start sequence.'],
+    ['当前没有参赛车手。', 'No drivers are entered in the race.'],
+    ['有参赛车手已经断开连接。', 'One or more entered drivers are disconnected.'],
+    ['有在线车手尚未确认准备。', 'One or more online drivers have not confirmed that they are ready.'],
+    ['有在线车手尚未上报有效遥测。', 'One or more online drivers have not reported valid telemetry.'],
+    ['有在线车手的遥测超过 5 秒未更新。', 'Telemetry from one or more online drivers has not updated for over 5 seconds.'],
+    ['有在线车手仍在维修区或换胎区。', 'One or more online drivers are still in the pit lane or service zone.'],
+    ['当前房间尚未配置完整赛道标识。', 'The room does not have complete track identity settings.'],
+    ['最少进站次数不少于正赛圈数，请确认规则设置。', 'The minimum pit-stop count is at least the race lap count. Review the rules.']
   ]);
 
   const patterns = [
+    [/^(\d+) 项警告$/, '$1 warnings'],
     [/^(\d+) 人已准备$/, '$1 ready'],
     [/^(\d+) 人$/, '$1'],
     [/^(\d+) 名车手$/, '$1 drivers'],

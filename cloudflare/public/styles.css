@@ -308,7 +308,22 @@ tr:hover td { background: rgba(66,215,232,.035); }
 .collision-evidence-stats small { font-size: 9px; color: #7f93a6; }
 .collision-evidence-stats strong { font-size: 11px; color: #e7f1f8; font-variant-numeric: tabular-nums; }
 
-body.collision-replay-open { overflow: hidden; }
+body.collision-replay-open, body.pre-race-check-open { overflow: hidden; }
+.pre-race-check-modal { position: fixed; inset: 0; z-index: 1010; display: grid; place-items: center; padding: 24px; background: rgba(2,5,9,.86); backdrop-filter: blur(10px); }
+.pre-race-check-dialog { width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; padding: 22px; box-shadow: 0 28px 90px rgba(0,0,0,.65); }
+.pre-race-check-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.pre-race-check-header h2 { margin: 2px 0 3px; font-size: 22px; }
+.pre-race-check-header p:last-child { margin: 0; color: var(--muted); font-size: 12px; }
+.pre-race-check-summary { margin: 18px 0 10px; display: grid; gap: 4px; padding: 13px 14px; border: 1px solid rgba(255,211,40,.34); border-radius: 6px; background: rgba(255,211,40,.07); }
+.pre-race-check-summary strong { color: var(--yellow); font-size: 14px; }
+.pre-race-check-summary span { color: #aab8c6; font-size: 10px; }
+.pre-race-check-warnings { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.pre-race-check-warnings li { min-width: 0; display: grid; grid-template-columns: 46px minmax(0,1fr); gap: 11px; align-items: start; padding: 12px; border: 1px solid #314052; border-radius: 6px; background: #0b121b; }
+.pre-race-check-warnings b { padding: 4px 5px; color: #191400; border-radius: 3px; background: var(--yellow); text-align: center; font-size: 8px; letter-spacing: .08em; }
+.pre-race-check-warnings div { min-width: 0; display: grid; gap: 4px; }
+.pre-race-check-warnings strong { color: #edf3f8; font-size: 12px; }
+.pre-race-check-warnings span { overflow-wrap: anywhere; color: #8fa0b2; font-size: 10px; }
+.pre-race-check-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 18px; }
 .collision-replay-modal { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px; background: rgba(2,5,9,.86); backdrop-filter: blur(10px); }
 .collision-replay-dialog { width: min(1040px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; padding: 22px; box-shadow: 0 28px 90px rgba(0,0,0,.65); }
 .collision-replay-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 13px; }
@@ -374,6 +389,10 @@ body.collision-replay-open { overflow: hidden; }
 }
 
 @media (max-width: 680px) {
+  .pre-race-check-modal { padding: 8px; }
+  .pre-race-check-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 16px); padding: 15px; }
+  .pre-race-check-header { gap: 12px; }
+  .pre-race-check-actions { display: grid; grid-template-columns: 1fr; }
   .shell { width: calc(100vw - 16px); padding-top: 8px; }
   .topbar { min-height: 58px; }
   .brand-copy h1 { font-size: 20px; }

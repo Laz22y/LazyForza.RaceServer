@@ -282,6 +282,12 @@ app.MapDelete("/api/admin/control-accounts/{accountId:guid}", (
 app.MapGet("/api/admin/state", (HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
     Authorized(context, sessions) ? Results.Ok(coordinator.Snapshot()) : Results.Unauthorized());
 
+app.MapGet("/api/admin/pre-race-check", (
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceCoordinator coordinator) =>
+    Authorized(context, sessions) ? Results.Ok(coordinator.PreRaceCheck()) : Results.Unauthorized());
+
 app.MapGet("/api/admin/public-timing", (RaceServerConfigurationStore settings) =>
     Results.Ok(settings.PublicTimingStatus()));
 
@@ -749,8 +755,21 @@ app.MapPost("/api/admin/collision-investigations", (
     return Results.Ok();
 });
 
-app.MapPost("/api/admin/session", (RaceAdminSessionCommand command, HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
-    AdminResult(context, sessions, () => coordinator.ApplySessionCommand(command)));
+app.MapPost("/api/admin/session", (
+    RaceAdminSessionCommand command,
+    HttpContext context,
+    AdminSessionStore sessions,
+    RaceCoordinator coordinator) =>
+{
+    if (!Authorized(context, sessions)) return Results.Unauthorized();
+    var result = coordinator.ApplySessionCommand(command);
+    if (result.IsAccepted) return Results.Ok();
+    return result.PreRaceCheck is not null
+        ? Results.Json(
+            new { error = result.Error, preRaceCheck = result.PreRaceCheck },
+            statusCode: StatusCodes.Status409Conflict)
+        : Results.BadRequest(new { error = result.Error });
+});
 
 app.MapPost("/api/admin/flag", (RaceAdminFlagCommand command, HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator) =>
     AdminResult(context, sessions, () => coordinator.ApplyFlagCommand(command)));

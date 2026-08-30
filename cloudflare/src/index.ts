@@ -261,6 +261,8 @@ export class RaceRoom {
       return this.deleteControlAccount(decodeURIComponent(controlAccountRoute[1]));
     if (url.pathname === "/api/admin/state" && request.method === "GET")
       return json(this.core.snapshot());
+    if (url.pathname === "/api/admin/pre-race-check" && request.method === "GET")
+      return json(this.core.preRaceCheck());
     if (url.pathname === "/api/admin/events" && request.method === "GET") {
       const afterText = url.searchParams.get("after");
       const after = afterText === null ? undefined : Number.parseInt(afterText, 10);
@@ -719,7 +721,10 @@ export class RaceRoom {
     try {
       const body = await readJson(request);
       const result = apply(body);
-      if (!result.ok) return json({ error: result.error }, 400);
+      if (!result.ok)
+        return result.preRaceCheck
+          ? json({ error: result.error, preRaceCheck: result.preRaceCheck }, 409)
+          : json({ error: result.error }, 400);
       await this.persist();
       await this.scheduleAlarm();
       this.broadcastSnapshot(true);

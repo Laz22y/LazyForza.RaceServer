@@ -1329,7 +1329,7 @@ public sealed class RaceCoordinatorTests
             RaceSessionPhase.FormationLap, "暖胎圈", 5, null, null)).IsAccepted);
 
         Assert.IsTrue(coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
-            RaceSessionPhase.Countdown, "起跑程序", 5, 0, null)).IsAccepted);
+            RaceSessionPhase.Countdown, "起跑程序", 5, 0, null, ForceStart: true)).IsAccepted);
         var snapshot = coordinator.Snapshot();
         var issuedAt = snapshot.StartSequenceAt!.Value;
         Assert.AreEqual(RaceSessionPhase.Countdown, snapshot.Phase);
@@ -1358,7 +1358,7 @@ public sealed class RaceCoordinatorTests
         var coordinator = CreateCoordinator();
         var participant = Join(coordinator, 1).Accepted!;
         coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
-            RaceSessionPhase.Countdown, null, 5, 0, null));
+            RaceSessionPhase.Countdown, null, 5, 0, null, ForceStart: true));
         var issuedAt = coordinator.Snapshot().StartSequenceAt!.Value;
         coordinator.Tick(issuedAt);
 
@@ -1500,7 +1500,7 @@ public sealed class RaceCoordinatorTests
         Assert.AreEqual(0, coordinator.Snapshot().Participants.Single().CompletedLaps);
 
         coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
-            RaceSessionPhase.Countdown, null, 5, 0, null));
+            RaceSessionPhase.Countdown, null, 5, 0, null, ForceStart: true));
         var countdownLap = coordinator.CompleteLap(participant.ParticipantId, new RaceLapCompleted(
             Guid.NewGuid(), 2, 60, [20, 20, 20], true, null, 50_000));
         Assert.IsFalse(countdownLap.IsAccepted);
@@ -2696,6 +2696,50 @@ public sealed class RaceCoordinatorTests
         Assert.AreEqual(1, coordinator.Snapshot().Participants.Single().CompletedPitServices);
     }
 
+    [TestMethod]
+    public void PreRaceWarningsRequireAnExplicitForceWithoutBlockingTheStartSequence()
+    {
+        var coordinator = CreateCoordinator();
+        _ = Join(coordinator, 1).Accepted!;
+        var now = DateTimeOffset.Parse("2026-08-30T08:00:00Z");
+
+        var report = coordinator.PreRaceCheck(now);
+        Assert.IsTrue(report.CanForceStart);
+        Assert.IsTrue(report.Warnings.Any(item => item.Code == "phaseNotPrepared"));
+        Assert.IsTrue(report.Warnings.Any(item => item.Code == "participantsNotReady"));
+        Assert.IsTrue(report.Warnings.Any(item => item.Code == "telemetryMissing"));
+        Assert.IsTrue(report.Warnings.Any(item => item.Code == "trackIdentityMissing"));
+
+        var blocked = coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Countdown, null, 5, 0, null), now);
+        Assert.IsFalse(blocked.IsAccepted);
+        Assert.IsNotNull(blocked.PreRaceCheck);
+        Assert.AreEqual(RaceSessionPhase.Lobby, coordinator.Snapshot(now).Phase);
+
+        var forced = coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Countdown, null, 5, 0, null, ForceStart: true), now);
+        Assert.IsTrue(forced.IsAccepted, forced.Error);
+        Assert.AreEqual(RaceSessionPhase.Countdown, coordinator.Snapshot(now).Phase);
+    }
+
+    [TestMethod]
+    public void PreRaceCheckAllowsAPreparedDriverToStartWithoutForce()
+    {
+        var coordinator = CreateCoordinator();
+        var participant = Join(coordinator, 1).Accepted!;
+        SetTrackIdentity(coordinator);
+        var now = DateTimeOffset.Parse("2026-08-30T08:10:00Z");
+        Assert.IsTrue(coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Grid, null, 5, null, null), now).IsAccepted);
+        Assert.IsTrue(coordinator.SetReady(participant.ParticipantId, true).IsAccepted);
+        Assert.IsTrue(coordinator.UpdateTelemetry(
+            participant.ParticipantId, Telemetry(1, .5), now).IsAccepted);
+
+        Assert.IsEmpty(coordinator.PreRaceCheck(now.AddSeconds(1)).Warnings);
+        Assert.IsTrue(coordinator.ApplySessionCommand(new RaceAdminSessionCommand(
+            RaceSessionPhase.Countdown, null, 5, 0, null), now.AddSeconds(1)).IsAccepted);
+    }
+
     private static RaceCoordinator CreateCoordinator(int maximumParticipants = RaceProtocol.MaximumParticipants) =>
         new(new RaceServerOptions
         {
@@ -2704,6 +2748,33 @@ public sealed class RaceCoordinatorTests
             MaximumParticipants = maximumParticipants,
             MinimumRequiredPitStops = 0
         });
+
+    private static void SetTrackIdentity(RaceCoordinator coordinator)
+    {
+        var settings = coordinator.RoomSettings();
+        var result = coordinator.ApplyRoomSettings(new RaceAdminRoomSettingsCommand(
+            settings.SessionName,
+            settings.TotalRaceLaps,
+            settings.SectorCount,
+            settings.AutomaticYellowEnabled,
+            settings.SlowSpeedKph,
+            settings.SlowDurationSeconds,
+            settings.SevereLateralOffsetMeters,
+            settings.RecoveryDurationSeconds,
+            settings.AllowTeams,
+            "测试赛道",
+            "11111111-2222-4333-8444-555555555555",
+            "1",
+            new string('A', 64),
+            settings.TeamCount,
+            settings.DriversPerTeam,
+            settings.Teams,
+            settings.TrackLimitMode,
+            settings.MinimumRequiredPitStops,
+            settings.AutomaticCollisionInvestigationsEnabled,
+            settings.DisconnectedLapRecoveryEnabled));
+        Assert.IsTrue(result.IsAccepted, result.Error);
+    }
 
     private static void SetTrackLimitMode(RaceCoordinator coordinator, TrackLimitEnforcementMode mode)
     {

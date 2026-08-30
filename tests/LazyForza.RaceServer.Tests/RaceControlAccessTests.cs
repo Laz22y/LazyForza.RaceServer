@@ -142,6 +142,8 @@ public sealed class RaceControlAccessTests
         Assert.IsFalse(RaceControlAccess.Allows(RaceControlRole.Steward, RaceControlPermission.ManageRace));
         Assert.AreEqual(RaceControlPermission.View,
             RaceControlAccess.RequiredPermission("GET", "/api/admin/state"));
+        Assert.AreEqual(RaceControlPermission.View,
+            RaceControlAccess.RequiredPermission("GET", "/api/admin/pre-race-check"));
         Assert.AreEqual(RaceControlPermission.Adjudicate,
             RaceControlAccess.RequiredPermission("POST", "/api/admin/penalty/update"));
         Assert.AreEqual(RaceControlPermission.ManageRace,

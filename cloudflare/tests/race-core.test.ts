@@ -925,7 +925,7 @@ describe("RaceCore", () => {
     expect(core.applySession({ phase: "outLap" }).ok).toBe(true);
     expect(core.applySession({ phase: "formationLap" }).ok).toBe(true);
     const now = new Date("2026-08-04T10:00:00Z");
-    expect(core.applySession({ phase: "countdown", countdownSeconds: 0 }, now).ok).toBe(true);
+    expect(core.applySession({ phase: "countdown", countdownSeconds: 0, forceStart: true }, now).ok).toBe(true);
     const start = core.snapshot(now);
     expect(start.startSequenceAt).toBe(now.toISOString());
     const duration = Date.parse(start.startsAt!) - Date.parse(start.startSequenceAt!);
@@ -944,7 +944,7 @@ describe("RaceCore", () => {
     const core = createCore();
     const participantId = connect(core, "甲");
     const now = new Date("2026-08-04T10:00:00Z");
-    core.applySession({ phase: "countdown", countdownSeconds: 0 }, now);
+    core.applySession({ phase: "countdown", countdownSeconds: 0, forceStart: true }, now);
     core.tick(now);
     core.updateTelemetry(participantId, { ...telemetry(), speedKph: 18 }, new Date(now.getTime() + 50));
     let penalties = core.snapshot().participants[0].penalties;
@@ -954,6 +954,47 @@ describe("RaceCore", () => {
     core.updateTelemetry(participantId, { ...telemetry(), trackProgress: .6 }, new Date(now.getTime() + 500));
     penalties = core.snapshot().participants[0].penalties;
     expect(penalties).toHaveLength(1);
+  });
+
+  it("reports pre-race warnings and starts only after explicit force", () => {
+    const core = createCore();
+    connect(core, "甲");
+    const now = new Date("2026-08-30T08:00:00Z");
+    const report = core.preRaceCheck(now);
+    expect(report.canForceStart).toBe(true);
+    expect(report.warnings.map(item => item.code)).toEqual(expect.arrayContaining([
+      "phaseNotPrepared", "participantsNotReady", "telemetryMissing", "trackIdentityMissing"
+    ]));
+
+    const blocked = core.applySession({ phase: "countdown", countdownSeconds: 0 }, now);
+    expect(blocked.ok).toBe(false);
+    if (blocked.ok) throw new Error("Expected pre-race warnings.");
+    expect(blocked.preRaceCheck?.warnings.length).toBeGreaterThan(0);
+    expect(core.snapshot(now).phase).toBe("lobby");
+
+    expect(core.applySession({ phase: "countdown", countdownSeconds: 0, forceStart: true }, now).ok)
+      .toBe(true);
+    expect(core.snapshot(now).phase).toBe("countdown");
+  });
+
+  it("allows a prepared driver to start without force", () => {
+    const core = createCore();
+    const participantId = connect(core, "甲");
+    expect(core.applyRoomSettings({
+      ...core.roomSettings(),
+      trackName: "测试赛道",
+      trackId: "11111111-2222-4333-8444-555555555555",
+      trackRevision: "1",
+      trackPackageHash: "A".repeat(64)
+    }).ok).toBe(true);
+    const now = new Date("2026-08-30T08:10:00Z");
+    expect(core.applySession({ phase: "grid" }, now).ok).toBe(true);
+    expect(core.setReady(participantId, { isReady: true }, now).ok).toBe(true);
+    expect(core.updateTelemetry(participantId, telemetry(), now).ok).toBe(true);
+
+    expect(core.preRaceCheck(new Date(now.getTime() + 1_000)).warnings).toHaveLength(0);
+    expect(core.applySession(
+      { phase: "countdown", countdownSeconds: 0 }, new Date(now.getTime() + 1_000)).ok).toBe(true);
   });
 
   it("keeps qualifying open for a final flying lap already in progress", () => {

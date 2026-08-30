@@ -14,6 +14,7 @@ LazyForza 地产赛事的独立服务端。支持原生 ASP.NET 自托管和 Clo
 
 - 1–12 名车手，可单人发车；额外支持最多 12 个只读 OB 席位；
 - 1–3 节练习与排位、正赛、出场圈、暖胎圈、五盏红灯和方格旗；
+- 发车前检查车手连接、准备、遥测、维修区、赛道与规则状态；检查结果仅警告，总控确认后可强制启动；
 - 车队、维修区、旗语、处罚、带动态遥测回放的全阶段碰撞调查、路线收益切弯证据、DNF/DSQ 和可选断线计圈恢复；
 - 赛道文件与主办方 Logo 托管；
 - 可保存、覆盖、应用和删除的赛事规则模板，赛事名称、赛道与车队资料保持独立；
@@ -143,6 +144,7 @@ Version 0.4.3 adds a complete Chinese and English Race Control interface, isolat
 - reusable event projects with create, update, copy, activate, complete and archive workflows; `.lfzevent` packages carry room rules, schedules, teams, track, logo, session results and race logs between native and Cloudflare servers;
 - archived session results that remain available in the lobby, with PNG and CSV export;
 - browser Race Control designed for desktop widescreens and touch tablets;
+- warning-only pre-race checks for driver connectivity, readiness, telemetry, pit state, track identity and race rules, with an explicit force-start action;
 - separate Race Control accounts for multiple users: super admins have full access, administrators manage the race but not accounts, and stewards handle penalties and investigations only;
 - public live timing protected by a separate read-only token, with standings, laps, deltas, best laps, flags, pit state, penalties and stage results for phones, tablets and broadcast browser sources;
 - JSONL audit logs and persistent critical race state.

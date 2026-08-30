@@ -28,6 +28,15 @@ describe("Race Control localization", () => {
     expect(index).not.toContain('id="controlAccess" class="panel control-access-panel hidden"');
   });
 
+  it("shows pre-race warnings and requires an explicit force-start action", () => {
+    const index = readFileSync(publicUrl("index.html"), "utf8");
+    const app = readFileSync(publicUrl("app.js"), "utf8");
+    expect(index).toContain('id="preRaceCheckModal"');
+    expect(index).toContain('id="preRaceCheckForceStart"');
+    expect(app).toContain("fetch('/api/admin/pre-race-check'");
+    expect(app).toContain("forceStart:true");
+  });
+
   it("keeps native terminal initialization separate from Cloudflare remote setup", () => {
     const index = readFileSync(publicUrl("index.html"), "utf8");
     const app = readFileSync(publicUrl("app.js"), "utf8");

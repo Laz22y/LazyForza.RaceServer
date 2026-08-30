@@ -20,6 +20,8 @@ import {
   type PenaltyUpdateCommand,
   type PenaltyKind,
   type PenaltySnapshot,
+  type PreRaceCheckReport,
+  type PreRaceCheckWarning,
   type InvestigationCommand,
   type InvestigationSnapshot,
   type CollisionEvidenceSnapshot,
@@ -276,7 +278,11 @@ export interface StoredRaceState {
   resultHistory?: StageResultSnapshot[];
 }
 
-export type CommandResult = { ok: true } | { ok: false; error: string };
+export type CommandResult = { ok: true } | {
+  ok: false;
+  error: string;
+  preRaceCheck?: PreRaceCheckReport;
+};
 export type LoginResult =
   | { ok: true; participantId: string; resumeToken: string; resumed: boolean; isObserver: boolean }
   | { ok: false; code: string; message: string };
@@ -292,6 +298,7 @@ const fallbackTeamColors = [
   "#42D7E8", "#FF4057", "#5A8CFF", "#FFD328", "#B86CFF", "#34D17B",
   "#FF8A3D", "#EE4FA6", "#B8F34A", "#8FA3B8", "#6FD6A7", "#F28B82"
 ];
+const preRaceTelemetryFreshnessMilliseconds = 5_000;
 
 function normalizeTeams(requestedCount: number, configured?: TeamDefinition[] | null): TeamDefinition[] {
   const count = clampInteger(requestedCount, 1, 12), source = Array.isArray(configured) ? configured : [];
@@ -1170,6 +1177,53 @@ export class RaceCore {
     return accepted();
   }
 
+  preRaceCheck(now = new Date()): PreRaceCheckReport {
+    const warnings: PreRaceCheckWarning[] = [];
+    const active = this.state.participants.filter(participant => participant.reservationActive !== false);
+    const add = (code: string, message: string, affected: ParticipantState[] = []) =>
+      warnings.push({ code, message, participantIds: affected.map(participant => participant.id) });
+
+    if (!(["grid", "outLap", "formationLap"] as SessionPhase[]).includes(this.state.phase))
+      add("phaseNotPrepared", "当前赛事阶段尚未完成常规发车准备流程。");
+    if (active.length === 0)
+      add("noParticipants", "当前没有参赛车手。");
+
+    const disconnected = active.filter(participant => !participant.isConnected);
+    if (disconnected.length > 0)
+      add("participantsDisconnected", "有参赛车手已经断开连接。", disconnected);
+
+    const notReady = this.state.phase === "outLap" || this.state.phase === "formationLap"
+      ? []
+      : active.filter(participant => participant.isConnected && !participant.isReady);
+    if (notReady.length > 0)
+      add("participantsNotReady", "有在线车手尚未确认准备。", notReady);
+
+    const missingTelemetry = active.filter(participant => participant.isConnected &&
+      (participant.telemetryValid !== true || participant.awaitingFreshTelemetryAfterResume === true ||
+       !participant.lastTelemetryReceivedAt));
+    if (missingTelemetry.length > 0)
+      add("telemetryMissing", "有在线车手尚未上报有效遥测。", missingTelemetry);
+
+    const staleTelemetry = active.filter(participant => participant.isConnected &&
+      participant.telemetryValid === true && participant.awaitingFreshTelemetryAfterResume !== true &&
+      participant.lastTelemetryReceivedAt &&
+      now.getTime() - Date.parse(participant.lastTelemetryReceivedAt) > preRaceTelemetryFreshnessMilliseconds);
+    if (staleTelemetry.length > 0)
+      add("telemetryStale", "有在线车手的遥测超过 5 秒未更新。", staleTelemetry);
+
+    const inPit = active.filter(participant => participant.isConnected &&
+      (participant.isInPitLane || participant.isInServiceZone));
+    if (inPit.length > 0)
+      add("participantsInPit", "有在线车手仍在维修区或换胎区。", inPit);
+
+    if (!this.state.trackName || !this.state.trackId || !this.state.trackPackageHash)
+      add("trackIdentityMissing", "当前房间尚未配置完整赛道标识。");
+    if (this.state.minimumRequiredPitStops >= this.state.totalRaceLaps)
+      add("pitStopRuleUnusual", "最少进站次数不少于正赛圈数，请确认规则设置。");
+
+    return { generatedAt: now.toISOString(), warnings, canForceStart: true };
+  }
+
   setAutomaticCollisionInvestigations(enabled: boolean, now = new Date()): CommandResult {
     this.state.automaticCollisionInvestigationsEnabled = enabled;
     if (!enabled) {
@@ -1192,6 +1246,11 @@ export class RaceCore {
   }
 
   applySession(command: SessionCommand, now = new Date()): CommandResult {
+    if (command.phase === "countdown" && command.forceStart !== true) {
+      const preRaceCheck = this.preRaceCheck(now);
+      if (preRaceCheck.warnings.length > 0)
+        return preRaceWarnings(preRaceCheck);
+    }
     const sessionName = cleanText(command.sessionName, 64);
     if (sessionName) this.state.sessionName = sessionName;
     if (command.totalRaceLaps !== null && command.totalRaceLaps !== undefined)
@@ -3883,6 +3942,9 @@ export class RaceCore {
 
 function accepted(): CommandResult { return { ok: true }; }
 function rejected(error: string): CommandResult { return { ok: false, error }; }
+function preRaceWarnings(preRaceCheck: PreRaceCheckReport): CommandResult {
+  return { ok: false, error: "赛前检查发现警告。请确认后强制启动发车程序。", preRaceCheck };
+}
 function terminal(status: ParticipantStatus): boolean {
   return status === "finished" || status === "didNotFinish" || status === "disqualified";
 }

@@ -58,6 +58,7 @@ describe("Race Control access", () => {
     expect(controlRoleAllows("steward", "adjudicate")).toBe(true);
     expect(controlRoleAllows("steward", "manageRace")).toBe(false);
     expect(requiredControlPermission("GET", "/api/admin/state")).toBe("view");
+    expect(requiredControlPermission("GET", "/api/admin/pre-race-check")).toBe("view");
     expect(requiredControlPermission("POST", "/api/admin/penalty/update")).toBe("adjudicate");
     expect(requiredControlPermission("POST", "/api/admin/flag")).toBe("manageRace");
     expect(requiredControlPermission("POST", "/api/admin/participant")).toBe("manageRace");

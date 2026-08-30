@@ -16,10 +16,15 @@ public sealed record RaceJoinResult(
         new(false, null, new RaceLoginRejected(code, message));
 }
 
-public sealed record RaceCommandResult(bool IsAccepted, string? Error = null)
+public sealed record RaceCommandResult(
+    bool IsAccepted,
+    string? Error = null,
+    RacePreRaceCheckReport? PreRaceCheck = null)
 {
     public static RaceCommandResult Accepted { get; } = new(true);
     public static RaceCommandResult Reject(string error) => new(false, error);
+    public static RaceCommandResult PreRaceWarnings(RacePreRaceCheckReport report) =>
+        new(false, "赛前检查发现警告。请确认后强制启动发车程序。", report);
 }
 
 public sealed class RaceCoordinator
@@ -48,6 +53,7 @@ public sealed class RaceCoordinator
     private static readonly TimeSpan CollisionReplaySampleInterval = TimeSpan.FromMilliseconds(100);
     private static readonly TimeSpan MinimumTelemetrySnapshotInterval = TimeSpan.FromMilliseconds(100);
     private static readonly TimeSpan DisconnectedLapRecoveryGrace = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan PreRaceTelemetryFreshness = TimeSpan.FromSeconds(5);
     private const int ShortcutDistanceGainFlag = 1;
     private const int ShortcutProtectedArcFlag = 2;
     private const int ShortcutMissedGateFlag = 4;
@@ -201,6 +207,12 @@ public sealed class RaceCoordinator
     {
         lock (sync)
             return BuildSnapshot(observedAt ?? DateTimeOffset.UtcNow);
+    }
+
+    public RacePreRaceCheckReport PreRaceCheck(DateTimeOffset? evaluatedAt = null)
+    {
+        lock (sync)
+            return BuildPreRaceCheck(evaluatedAt ?? DateTimeOffset.UtcNow);
     }
 
     public RaceCollisionReplaySnapshot? CollisionReplay(
@@ -1014,6 +1026,12 @@ public sealed class RaceCoordinator
         lock (sync)
         {
             var now = invokedAt ?? DateTimeOffset.UtcNow;
+            if (command.Phase == RaceSessionPhase.Countdown && command.ForceStart != true)
+            {
+                var preRaceCheck = BuildPreRaceCheck(now);
+                if (preRaceCheck.Warnings.Count > 0)
+                    return RaceCommandResult.PreRaceWarnings(preRaceCheck);
+            }
             if (!string.IsNullOrWhiteSpace(command.SessionName))
                 sessionName = command.SessionName.Trim()[..Math.Min(64, command.SessionName.Trim().Length)];
             if (command.TotalRaceLaps is int laps)
@@ -1170,6 +1188,60 @@ public sealed class RaceCoordinator
         }
         Publish(snapshot, important: true, audit);
         return RaceCommandResult.Accepted;
+    }
+
+    private RacePreRaceCheckReport BuildPreRaceCheck(DateTimeOffset now)
+    {
+        var warnings = new List<RacePreRaceCheckWarning>();
+        var active = participants.Where(candidate => candidate.ReservationActive).ToArray();
+
+        void Add(string code, string message, IEnumerable<ParticipantState>? affected = null) =>
+            warnings.Add(new RacePreRaceCheckWarning(
+                code,
+                message,
+                affected?.Select(candidate => candidate.Id).ToArray() ?? []));
+
+        if (phase is not (RaceSessionPhase.Grid or RaceSessionPhase.OutLap or RaceSessionPhase.FormationLap))
+            Add("phaseNotPrepared", "当前赛事阶段尚未完成常规发车准备流程。");
+        if (active.Length == 0)
+            Add("noParticipants", "当前没有参赛车手。");
+
+        var disconnected = active.Where(candidate => !candidate.IsConnected).ToArray();
+        if (disconnected.Length > 0)
+            Add("participantsDisconnected", "有参赛车手已经断开连接。", disconnected);
+
+        var notReady = phase is RaceSessionPhase.OutLap or RaceSessionPhase.FormationLap
+            ? []
+            : active.Where(candidate => candidate.IsConnected && !candidate.IsReady).ToArray();
+        if (notReady.Length > 0)
+            Add("participantsNotReady", "有在线车手尚未确认准备。", notReady);
+
+        var missingTelemetry = active.Where(candidate =>
+            candidate.IsConnected &&
+            (!candidate.TelemetryValid || candidate.AwaitingFreshTelemetryAfterResume ||
+             candidate.LastTelemetryReceivedAt == default)).ToArray();
+        if (missingTelemetry.Length > 0)
+            Add("telemetryMissing", "有在线车手尚未上报有效遥测。", missingTelemetry);
+
+        var staleTelemetry = active.Where(candidate =>
+            candidate.IsConnected && candidate.TelemetryValid && !candidate.AwaitingFreshTelemetryAfterResume &&
+            candidate.LastTelemetryReceivedAt != default &&
+            now - candidate.LastTelemetryReceivedAt > PreRaceTelemetryFreshness).ToArray();
+        if (staleTelemetry.Length > 0)
+            Add("telemetryStale", "有在线车手的遥测超过 5 秒未更新。", staleTelemetry);
+
+        var inPit = active.Where(candidate =>
+            candidate.IsConnected && (candidate.IsInPitLane || candidate.IsInServiceZone)).ToArray();
+        if (inPit.Length > 0)
+            Add("participantsInPit", "有在线车手仍在维修区或换胎区。", inPit);
+
+        if (string.IsNullOrWhiteSpace(trackName) || string.IsNullOrWhiteSpace(trackId) ||
+            string.IsNullOrWhiteSpace(trackPackageHash))
+            Add("trackIdentityMissing", "当前房间尚未配置完整赛道标识。");
+        if (minimumRequiredPitStops >= totalRaceLaps)
+            Add("pitStopRuleUnusual", "最少进站次数不少于正赛圈数，请确认规则设置。");
+
+        return new RacePreRaceCheckReport(now, warnings, true);
     }
 
     public RaceCommandResult SetAutomaticCollisionInvestigations(bool enabled)
