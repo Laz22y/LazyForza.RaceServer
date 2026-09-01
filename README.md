@@ -6,7 +6,7 @@
 
 LazyForza 地产赛事的独立服务端。支持原生 ASP.NET 自托管和 Cloudflare Durable Objects，两套实现保持同一协议与 Web 总控功能。
 
-0.4.3 为 Web 总控加入完整中英文界面，并改善弱网广播隔离、实时秒差、换胎停留确认和疑似违规操作区布局。总控语言由各浏览器独立保存，不影响房间协议或客户端语言。
+0.5.0 新增令牌保护的公开实时计时、赛事规则模板、可迁移赛事项目、多角色总控账号和发车前检查；原生首次初始化改为仅限服务器终端，并恢复换胎出站后的实时 Delta。
 
 [客户端下载](https://github.com/Laz22y/LazyForza/releases/latest) · [完整文档](https://laz22y.github.io/LazyForza/docs/#race-server) · [服务端 Releases](https://github.com/Laz22y/LazyForza.RaceServer/releases/latest)
 
@@ -79,9 +79,10 @@ chmod +x ./LazyForza.RaceServer.Web
 
 ## 兼容性
 
-当前正式服务端为 `v0.4.3`：
+当前正式服务端为 `v0.5.0`：
 
-- LazyForza `1.5.0`：推荐版本，完整支持中英文客户端、弱网隔离、稳定实时秒差和可靠换胎停留确认；
+- LazyForza `1.5.1`：推荐版本，完整支持当前协议模型、服务器收藏与连接测试；
+- LazyForza `1.5.0`：协议 v2 主要赛事流程兼容，但不具备其版本发布后新增的全部客户端能力；
 - LazyForza `1.4.9`：支持路线收益切弯证据、碰撞识别和维修区轨迹保护；
 - LazyForza `1.4.8`：完整支持弱网状态提示与可选断线计圈恢复；
 - LazyForza `1.4.7`：支持增强碰撞证据与其发布时的全部赛事交互；
@@ -130,7 +131,7 @@ dotnet run --project src/LazyForza.RaceServer.Web/LazyForza.RaceServer.Web.cspro
 
 LazyForza RaceServer is the independent server for estate racing. Native ASP.NET self-hosting and Cloudflare Durable Objects provide the same protocol, race behavior and browser Race Control.
 
-Version 0.4.3 adds a complete Chinese and English Race Control interface, isolates slow connections from room broadcasts, stabilizes live gaps, improves tire-change dwell confirmation and fixes overlap in non-collision investigation controls. Each browser stores its own interface language; room protocol and client language remain independent.
+Version 0.5.0 adds token-protected public live timing, reusable rule templates, portable event projects, multi-role Race Control accounts and warning-only pre-race checks. Native first setup is now restricted to the server terminal, and live Delta resumes correctly after a tire-change pit exit.
 
 [Client downloads](https://github.com/Laz22y/LazyForza/releases/latest) · [Documentation](https://laz22y.github.io/LazyForza/docs/#race-server) · [Server releases](https://github.com/Laz22y/LazyForza.RaceServer/releases/latest)
 
@@ -203,7 +204,7 @@ Race Control accepts `.lfzestate` packages up to 1.5 MiB. The server verifies th
 
 ### Compatibility
 
-RaceServer `0.4.3` is recommended with LazyForza `1.5.0`. The main protocol v2 race flow remains compatible with LazyForza `1.4.2–1.4.9`; features introduced after a client version are unavailable to that older client. Disconnected-lap recovery requires client `1.4.8` or later and must be enabled from Race Control.
+RaceServer `0.5.0` is recommended with LazyForza `1.5.1`. The main protocol v2 race flow remains compatible with LazyForza `1.4.2–1.5.0`; features introduced after a client version are unavailable to that older client. Disconnected-lap recovery requires client `1.4.8` or later and must be enabled from Race Control.
 
 ### Local development
 
