@@ -1773,6 +1773,66 @@ public sealed class RaceCoordinatorTests
     }
 
     [TestMethod]
+    public void DirectPairwiseRaceDeltaResumesBeforeDelayedPitLapEvent()
+    {
+        var coordinator = CreateCoordinator();
+        var leader = Join(coordinator, 1).Accepted!;
+        var pitting = Join(coordinator, 2).Accepted!;
+        var started = DateTimeOffset.Parse("2026-09-01T14:51:34Z");
+        Assert.IsTrue(coordinator.ApplySessionCommand(
+            new RaceAdminSessionCommand(RaceSessionPhase.Race, "实机进站时序", 6, null, null),
+            started).IsAccepted);
+
+        // The first grid crossing arms timing without a lap event, so live
+        // progress is already one physical lap ahead of authoritative laps.
+        coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(0, .98), started.AddSeconds(1));
+        coordinator.UpdateTelemetry(pitting.ParticipantId, Telemetry(0, .97), started.AddSeconds(2));
+        coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(0, .01), started.AddSeconds(3));
+        coordinator.UpdateTelemetry(pitting.ParticipantId, Telemetry(0, .01), started.AddSeconds(4));
+        coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(0, .75), started.AddSeconds(45));
+        coordinator.UpdateTelemetry(pitting.ParticipantId, Telemetry(0, .75), started.AddSeconds(47));
+
+        coordinator.UpdateTelemetry(pitting.ParticipantId, Telemetry(0, .80) with
+        {
+            IsApproachingPit = true,
+            IsOnPitRoute = true,
+            IsInPitLane = true
+        }, started.AddSeconds(48));
+        coordinator.UpdateTelemetry(pitting.ParticipantId, Telemetry(0, .80) with
+        {
+            IsTelemetryValid = false,
+            IsPausedOrRewinding = true,
+            IsOnPitRoute = true,
+            IsInPitLane = true,
+            IsInServiceZone = true
+        }, started.AddSeconds(54));
+
+        coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(0, .95), started.AddSeconds(55));
+        coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(0, .10), started.AddSeconds(60));
+        CompleteLap(coordinator, leader.ParticipantId, 1, 60, started.AddSeconds(60.1));
+        coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(1, .20), started.AddSeconds(66));
+        coordinator.UpdateTelemetry(pitting.ParticipantId, Telemetry(0, .10) with
+        {
+            IsOnPitRoute = true
+        }, started.AddSeconds(70));
+        coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(1, .80), started.AddSeconds(75));
+        coordinator.UpdateTelemetry(pitting.ParticipantId, Telemetry(0, .20), started.AddSeconds(76));
+
+        var beforeLapEvent = coordinator.Snapshot(started.AddSeconds(76));
+        var pittingBeforeLapEvent = beforeLapEvent.Participants.Single(item => item.Id == pitting.ParticipantId);
+        Assert.AreEqual(10,
+            pittingBeforeLapEvent.RaceDeltaSecondsByReference![leader.ParticipantId],
+            .001,
+            "实机中圈完成事件可能晚于出站；Delta 必须先按已确认的维修通行恢复。");
+
+        CompleteLap(coordinator, pitting.ParticipantId, 1, 85, started.AddSeconds(80));
+        var afterLapEvent = coordinator.Snapshot(started.AddSeconds(80));
+        Assert.IsTrue(afterLapEvent.Participants.Single(item => item.Id == pitting.ParticipantId)
+                .RaceDeltaSecondsByReference!.ContainsKey(leader.ParticipantId),
+            "迟到的圈完成事件不能再次补圈并破坏已经恢复的 Delta。");
+    }
+
+    [TestMethod]
     public void ReconnectedDriverWaitsForFreshTelemetryBeforeAffectingLiveOrder()
     {
         var coordinator = CreateCoordinator();

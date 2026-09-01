@@ -1246,6 +1246,62 @@ describe("RaceCore", () => {
     expect(trailingSnapshot.raceDeltaSecondsByReference?.[leader]).toBeCloseTo(7, 3);
   });
 
+  it("resumes direct pairwise Delta before a delayed pit lap event", () => {
+    const core = createCore();
+    const leader = connect(core, "甲"), pitting = connect(core, "乙");
+    const started = new Date("2026-09-01T14:51:34Z");
+    core.applySession({ phase: "race", totalRaceLaps: 6 }, started);
+
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .98 },
+      new Date(started.getTime() + 1_000));
+    core.updateTelemetry(pitting, { ...telemetry(), trackProgress: .97 },
+      new Date(started.getTime() + 2_000));
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .01 },
+      new Date(started.getTime() + 3_000));
+    core.updateTelemetry(pitting, { ...telemetry(), trackProgress: .01 },
+      new Date(started.getTime() + 4_000));
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .75 },
+      new Date(started.getTime() + 45_000));
+    core.updateTelemetry(pitting, { ...telemetry(), trackProgress: .75 },
+      new Date(started.getTime() + 47_000));
+
+    core.updateTelemetry(pitting, {
+      ...telemetry(), trackProgress: .80,
+      isApproachingPit: true, isOnPitRoute: true, isInPitLane: true
+    }, new Date(started.getTime() + 48_000));
+    core.updateTelemetry(pitting, {
+      ...telemetry(), trackProgress: .80,
+      isTelemetryValid: false, isPausedOrRewinding: true,
+      isOnPitRoute: true, isInPitLane: true, isInServiceZone: true
+    }, new Date(started.getTime() + 54_000));
+
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .95 },
+      new Date(started.getTime() + 55_000));
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .10 },
+      new Date(started.getTime() + 60_000));
+    core.completeLap(leader, lap("leader-1", 60, true, 1),
+      new Date(started.getTime() + 60_100));
+    core.updateTelemetry(leader, { ...telemetry(), completedLaps: 1, trackProgress: .20 },
+      new Date(started.getTime() + 66_000));
+    core.updateTelemetry(pitting, {
+      ...telemetry(), trackProgress: .10, isOnPitRoute: true
+    }, new Date(started.getTime() + 70_000));
+    core.updateTelemetry(leader, { ...telemetry(), completedLaps: 1, trackProgress: .80 },
+      new Date(started.getTime() + 75_000));
+    core.updateTelemetry(pitting, { ...telemetry(), trackProgress: .20 },
+      new Date(started.getTime() + 76_000));
+
+    const beforeLapEvent = core.snapshot(new Date(started.getTime() + 76_000))
+      .participants.find(item => item.id === pitting)!;
+    expect(beforeLapEvent.raceDeltaSecondsByReference?.[leader]).toBeCloseTo(10, 3);
+
+    core.completeLap(pitting, lap("pitting-1", 85, true, 1),
+      new Date(started.getTime() + 80_000));
+    const afterLapEvent = core.snapshot(new Date(started.getTime() + 80_000))
+      .participants.find(item => item.id === pitting)!;
+    expect(afterLapEvent.raceDeltaSecondsByReference?.[leader]).toBeDefined();
+  });
+
   it("waits for fresh telemetry before a reconnected driver affects live order", () => {
     const core = createCore();
     const weakLogin = core.login(login("弱网"));

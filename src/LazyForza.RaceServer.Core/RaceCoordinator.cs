@@ -498,6 +498,9 @@ public sealed class RaceCoordinator
                 audits.Add(new RaceAuditEntry(now, "pitServiceCompleted", $"{participant.DisplayName} 完成换胎停留。", participant.Id));
             if (wasInPitLane && !participant.IsInPitLane)
                 audits.Add(new RaceAuditEntry(now, "pitExited", $"{participant.DisplayName} 离开维修区。", participant.Id));
+            if (phase == RaceSessionPhase.Race &&
+                (participant.IsInPitLane || participant.IsInServiceZone))
+                MarkRaceProgressPitTransit(participant);
             if (!normalized.IsTelemetryValid || normalized.IsPausedOrRewinding)
             {
                 participant.TelemetryValid = false;
@@ -3600,6 +3603,13 @@ public sealed class RaceCoordinator
         }
 
         var progress = Math.Clamp(participant.TrackProgress, 0, 1);
+        if (participant.RaceProgressPitTransitActive)
+        {
+            participant.RaceProgressLapOffset = Math.Max(
+                participant.RaceProgressLapOffset,
+                participant.RaceProgressPitEntryLapOffset + 1);
+            participant.RaceProgressPitTransitActive = false;
+        }
         if (participant.RaceProgressContinuityReady &&
             progress < participant.LastRaceProgress - 0.75)
             participant.RaceProgressLapOffset++;
@@ -3608,6 +3618,13 @@ public sealed class RaceCoordinator
         var distance = participant.RaceProgressLapOffset + progress;
         if (!double.IsFinite(distance) || distance < 0) return;
         AppendRaceProgressSample(participant, distance, RaceElapsedSeconds(now));
+    }
+
+    private static void MarkRaceProgressPitTransit(ParticipantState participant)
+    {
+        if (participant.RaceProgressPitTransitActive) return;
+        participant.RaceProgressPitTransitActive = true;
+        participant.RaceProgressPitEntryLapOffset = participant.RaceProgressLapOffset;
     }
 
     private void ReconcileRaceProgressAtCompletedLap(
@@ -3619,7 +3636,12 @@ public sealed class RaceCoordinator
         // supplies the missing wrap (including a finish reached through pit lane).
         var crossingAlreadyObserved = participant.LastRaceProgress <= 0.25;
         var eventOffset = participant.RaceProgressLapOffset + (crossingAlreadyObserved ? 0 : 1);
-        participant.RaceProgressLapOffset = Math.Max(eventOffset, participant.CompletedLaps);
+        var pitTransitOffset = participant.RaceProgressPitTransitActive
+            ? participant.RaceProgressPitEntryLapOffset + 1
+            : 0;
+        participant.RaceProgressLapOffset = Math.Max(
+            Math.Max(eventOffset, participant.CompletedLaps),
+            pitTransitOffset);
         var finishDistance = (double)participant.RaceProgressLapOffset;
         participant.LastRaceProgress = 0;
         participant.RaceProgressContinuityReady = false;
@@ -4002,6 +4024,8 @@ public sealed class RaceCoordinator
             participant.RaceProgressLapOffset = 0;
             participant.LastRaceProgress = 0;
             participant.RaceProgressContinuityReady = false;
+            participant.RaceProgressPitTransitActive = false;
+            participant.RaceProgressPitEntryLapOffset = 0;
             participant.RaceTotalSeconds = null;
             participant.TrackLimitWarnings = 0;
             ResetTrackLimitExcursion(participant);
@@ -4086,6 +4110,8 @@ public sealed class RaceCoordinator
             participant.RaceProgressLapOffset = 0;
             participant.LastRaceProgress = 0;
             participant.RaceProgressContinuityReady = false;
+            participant.RaceProgressPitTransitActive = false;
+            participant.RaceProgressPitEntryLapOffset = 0;
             participant.RaceTotalSeconds = null;
             participant.TrackLimitWarnings = 0;
             ResetTrackLimitExcursion(participant);
@@ -4536,6 +4562,8 @@ public sealed class RaceCoordinator
         public int RaceProgressLapOffset { get; set; }
         public double LastRaceProgress { get; set; }
         public bool RaceProgressContinuityReady { get; set; }
+        public bool RaceProgressPitTransitActive { get; set; }
+        public int RaceProgressPitEntryLapOffset { get; set; }
         public double? RaceTotalSeconds { get; set; }
         public double TrackToleranceMeters { get; set; } = 18;
         public int TrackLimitWarnings { get; set; }

@@ -189,6 +189,8 @@ interface RaceProgressTracker {
   lastProgress: number;
   lapOffset: number;
   ready: boolean;
+  pitTransitActive: boolean;
+  pitEntryLapOffset: number;
 }
 
 interface CollisionPositionSample {
@@ -794,6 +796,8 @@ export class RaceCore {
       this.recordEvent("pitServiceCompleted", `${participant.displayName} 完成换胎停留。`, participant.id, now);
     if (wasInPitLane && !participant.isInPitLane)
       this.recordEvent("pitExited", `${participant.displayName} 离开维修区。`, participant.id, now);
+    if (this.state.phase === "race" && (participant.isInPitLane || participant.isInServiceZone))
+      this.markRaceProgressPitTransit(participant.id);
     if (!update.isTelemetryValid || update.isPausedOrRewinding) {
       participant.progressContinuityReady = false;
       const raceProgress = this.liveProgressTrackers.get(participant.id);
@@ -3616,7 +3620,9 @@ export class RaceCore {
     const tracker = this.liveProgressTrackers.get(participant.id) ?? {
       lastProgress: 0,
       lapOffset: 0,
-      ready: false
+      ready: false,
+      pitTransitActive: false,
+      pitEntryLapOffset: 0
     };
     if (isPitRoute) {
       tracker.ready = false;
@@ -3625,6 +3631,10 @@ export class RaceCore {
     }
 
     const progress = clamp(participant.trackProgress, 0, 1);
+    if (tracker.pitTransitActive) {
+      tracker.lapOffset = Math.max(tracker.lapOffset, tracker.pitEntryLapOffset + 1);
+      tracker.pitTransitActive = false;
+    }
     if (tracker.ready && progress < tracker.lastProgress - .75) tracker.lapOffset++;
     tracker.lastProgress = progress;
     tracker.ready = true;
@@ -3635,15 +3645,33 @@ export class RaceCore {
     this.appendRaceProgressSample(participant.id, distanceLaps, elapsedSeconds);
   }
 
+  private markRaceProgressPitTransit(participantId: string): void {
+    const tracker = this.liveProgressTrackers.get(participantId) ?? {
+      lastProgress: 0,
+      lapOffset: 0,
+      ready: false,
+      pitTransitActive: false,
+      pitEntryLapOffset: 0
+    };
+    if (!tracker.pitTransitActive) {
+      tracker.pitTransitActive = true;
+      tracker.pitEntryLapOffset = tracker.lapOffset;
+    }
+    this.liveProgressTrackers.set(participantId, tracker);
+  }
+
   private reconcileRaceProgressAtCompletedLap(participant: ParticipantState, now: Date): void {
     const tracker = this.liveProgressTrackers.get(participant.id) ?? {
       lastProgress: 0,
       lapOffset: 0,
-      ready: false
+      ready: false,
+      pitTransitActive: false,
+      pitEntryLapOffset: 0
     };
     const crossingAlreadyObserved = tracker.lastProgress <= .25;
     const eventOffset = tracker.lapOffset + (crossingAlreadyObserved ? 0 : 1);
-    tracker.lapOffset = Math.max(eventOffset, participant.completedLaps);
+    const pitTransitOffset = tracker.pitTransitActive ? tracker.pitEntryLapOffset + 1 : 0;
+    tracker.lapOffset = Math.max(eventOffset, participant.completedLaps, pitTransitOffset);
     const finishDistance = tracker.lapOffset;
     tracker.lastProgress = 0;
     tracker.ready = false;
