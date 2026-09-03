@@ -8,7 +8,7 @@
 
 这个目录提供与 LazyForza 地产赛事客户端协议 v2 兼容的 Cloudflare Workers + Durable Objects 服务端。协议模型和 Web 静态资源由仓库根目录的单一 Schema 与原生 `wwwroot` 生成，Cloudflare 包保留已提交产物，因此仍可脱离上级目录独立构建和部署。一个 Worker 固定使用一个名为 `main` 的赛事房间，支持 1–12 名车手，并可额外连接最多 12 个只读 OB 席位。OB 不占车手名额，可在比赛进行中加入，只接收赛事数据用于观赛或转播。
 
-正式服务端 `v0.5.0` 推荐搭配 LazyForza `1.5.1`，并与 `1.4.2`–`1.5.0` 的协议 v2 主要比赛流程兼容。断线计圈恢复需要 `1.4.8` 或更高版本，并由总控主动开启。旧客户端不会使用其版本发布后新增的练习项目、进站策略预测、OB 登录、主办方 Logo、赛道文件按需下载和后续维修区路线修正；1.4.2 没有服务端车队下拉框，填写名称能匹配时按名称加入，否则由服务端自动分配空余车队。完整兼容说明见仓库根目录 `README.md`。
+正式服务端 `v0.5.0` 推荐搭配 LazyForza `1.5.2`，并与 `1.4.2`–`1.5.1` 的协议 v2 主要比赛流程兼容。断线计圈恢复需要 `1.4.8` 或更高版本，并由总控主动开启。旧客户端不会使用其版本发布后新增的练习项目、进站策略预测、OB 登录、主办方 Logo、赛道文件按需下载和后续维修区路线修正；1.4.2 没有服务端车队下拉框，填写名称能匹配时按名称加入，否则由服务端自动分配空余车队。完整兼容说明见仓库根目录 `README.md`。
 
 实现范围：
 
@@ -97,7 +97,7 @@ npm run dev
 
 Read the repository-level [`AGENTS.md`](../AGENTS.md) before changing the Cloudflare implementation. Cloudflare Durable Objects and native ASP.NET are equal RaceServer targets and must keep the same client protocol, race behavior, management API and Race Control features.
 
-RaceServer `0.5.0` is recommended with LazyForza `1.5.1` and remains compatible with the main protocol v2 race flow in LazyForza `1.4.2–1.5.0`. Disconnected-lap recovery requires client `1.4.8` or later and must be explicitly enabled from Race Control.
+RaceServer `0.5.0` is recommended with LazyForza `1.5.2` and remains compatible with the main protocol v2 race flow in LazyForza `1.4.2–1.5.1`. Disconnected-lap recovery requires client `1.4.8` or later and must be explicitly enabled from Race Control.
 
 Protocol models and browser assets are generated from the repository-level schema and native `wwwroot`. Their committed outputs keep this Cloudflare package independently buildable and deployable. The Worker uses one Durable Object race room named `main`, with 1–12 drivers and up to 12 read-only observers. It supports:
 

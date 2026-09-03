@@ -81,7 +81,8 @@ chmod +x ./LazyForza.RaceServer.Web
 
 当前正式服务端为 `v0.5.0`：
 
-- LazyForza `1.5.1`：推荐版本，完整支持当前协议模型、服务器收藏与连接测试；
+- LazyForza `1.5.2`：推荐版本，完整支持当前协议模型、服务器收藏与连接测试；
+- LazyForza `1.5.1`：完整支持当前协议模型、服务器收藏与连接测试；
 - LazyForza `1.5.0`：协议 v2 主要赛事流程兼容，但不具备其版本发布后新增的全部客户端能力；
 - LazyForza `1.4.9`：支持路线收益切弯证据、碰撞识别和维修区轨迹保护；
 - LazyForza `1.4.8`：完整支持弱网状态提示与可选断线计圈恢复；
@@ -204,7 +205,7 @@ Race Control accepts `.lfzestate` packages up to 1.5 MiB. The server verifies th
 
 ### Compatibility
 
-RaceServer `0.5.0` is recommended with LazyForza `1.5.1`. The main protocol v2 race flow remains compatible with LazyForza `1.4.2–1.5.0`; features introduced after a client version are unavailable to that older client. Disconnected-lap recovery requires client `1.4.8` or later and must be enabled from Race Control.
+RaceServer `0.5.0` is recommended with LazyForza `1.5.2`. The main protocol v2 race flow remains compatible with LazyForza `1.4.2–1.5.1`; features introduced after a client version are unavailable to that older client. Disconnected-lap recovery requires client `1.4.8` or later and must be enabled from Race Control.
 
 ### Local development
 
