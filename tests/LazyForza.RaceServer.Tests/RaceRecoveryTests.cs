@@ -15,6 +15,24 @@ namespace LazyForza.RaceServer.Tests;
 public sealed class RaceRecoveryTests
 {
     [TestMethod]
+    public void RebuiltCoordinatorPreservesReviewReceiptAndLapSequence()
+    {
+        using var data = new TestData();
+        var original = data.Create();
+        var joined = original.TryJoin(Login()).Accepted!;
+        StartRace(original);
+        var lap = Lap() with { SectorSeconds = [20,20,25], StageId = original.Snapshot().StageId };
+        Assert.AreEqual(RaceLapValidationStatus.PendingReview, original.CompleteLap(joined.ParticipantId, lap).LapValidationStatus);
+        var rebuilt = data.Restore();
+        Assert.AreEqual(lap.StageId, rebuilt.Snapshot().StageId);
+        Assert.AreEqual(RaceLapValidationStatus.PendingReview, rebuilt.CompleteLap(joined.ParticipantId, lap).LapValidationStatus);
+        Assert.IsTrue(rebuilt.ApplyFlagCommand(new(RaceControlFlag.Green, null)).IsAccepted);
+        Assert.IsFalse(rebuilt.CompleteLap(joined.ParticipantId, lap with { EventId = Guid.NewGuid() }).IsAccepted);
+        Assert.AreEqual(1, rebuilt.Snapshot().Participants.Single().CompletedLaps);
+        Assert.HasCount(1, rebuilt.Snapshot().Investigations!);
+    }
+
+    [TestMethod]
     public void ReconstructedCoordinatorPreservesIdentityResultsPenaltiesAndDeduplication()
     {
         using var data = new TestData();

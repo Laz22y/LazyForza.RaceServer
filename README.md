@@ -89,6 +89,16 @@ chmod +x ./LazyForza.RaceServer.Web
 
 总控可上传不超过 1.5 MiB 的 `.lfzestate`。服务端校验文件清单与 SHA-256；客户端缺少匹配赛道时，由车手确认下载并再次校验。
 
+## 圈完成校验（当前源码）
+
+原生与 Cloudflare 共用同一组校验契约测试。圈事件携带快照提供的可选 `stageId`；阶段不符、已处理或倒退的圈序、分段数量不符、非有限／负时间等明确错误会被拒绝且不计圈。有效圈仍限定 3–21600 秒。首个圈序作为基线；此后的缺号进入待审核，客户端放弃无效圈后允许同圈序重新完成。
+
+回执的可选 `validationStatus` 区分 `verified`、`insufficientEvidence`、`pendingReview`、`rejected`。分段合计按客户端非负分段时长规则核对（容差为 0.05 秒与圈时的 0.1% 中较大者），正常进站耗时仍包含在圈时内。合计矛盾、圈序缺口或充分连续遥测中的进度矛盾生成待审核调查，不自动判作弊或处罚；这些事件仍按原有有效圈规则计圈及更新成绩，管理员通过调查流程裁定。客户端主动报告的无效圈仍可获成功命令回执，但状态为 `rejected`，且不计入有效圈。
+
+进度核对使用事件原始客户端时间窗，不用消息到达间隔。至少 8 个可靠样本、首尾误差不超过 1.5 秒、相邻间隔不超过 2 秒且无进站／暂停／明显进度跳变时才交叉核对；累计进度落在 0.65–1.35 圈之外进入待审核。这些容差只用于筛选待核查证据，不能证明 FH6 中作弊。缺少阶段标识、零时长分段或不连续／进站样本时记为证据不足。在线迟到事件不受断线补圈开关控制；标记为离线补圈的事件仍遵守原有开关和恢复窗口。
+
+协议保持 v2。`stageId`（快照与圈事件）及 `validationStatus`（回执）由现有 Schema 生成三端模型，默认均为空。旧客户端忽略新属性，缺少阶段标识时仍能按既有流程提交，但无法可靠识别跨阶段旧消息；新客户端连接旧服务端时使用原有快照阶段推断，旧服务端忽略事件的新属性，不提供新增校验保证。新服务端保留已接收事件的原回执分类，重试及跨阶段重放不重复计圈／创建调查。原生恢复文件 v1 新增可选参与者字段，旧文件缺少这些字段时使用空证据和既有去重集合；已有持久化提交后才成功回执的约束不变。
+
 ## 兼容性
 
 当前正式服务端为 `v0.5.0`：
@@ -226,6 +236,16 @@ Requires Node.js 20+, npm and PowerShell 7. Open the Worker domain after deploym
 Drivers need the server domain or IP, room password, matching estate circuit, display name and optional team. The WebSocket endpoint is `/ws`. Observers receive race snapshots only and do not upload telemetry or participate in standings or penalties.
 
 Race Control accepts `.lfzestate` packages up to 1.5 MiB. The server verifies the manifest and SHA-256; clients without the matching track confirm the download and verify it again.
+
+### Lap completion validation (current source)
+
+Both authority implementations run shared validation fixtures. Optional snapshot/lap `stageId` isolates stages; stale/reused lap numbers, wrong sector counts and invalid times are rejected without counting. Valid laps remain limited to 3–21600 seconds. The first lap number establishes a baseline; gaps create a review, and an abandoned invalid lap may reuse its number.
+
+Optional acknowledgement `validationStatus` is `verified`, `insufficientEvidence`, `pendingReview` or `rejected`. Sector totals use non-negative client segment durations, including pit time, with tolerance max(0.05 seconds, 0.1% of lap time). Gaps, inconsistent totals and adequately sampled progress contradictions open investigations, without automatic penalties or cheating claims. Pending-review laps still count and update results under existing valid-lap rules. Client-declared invalid laps may receive a successful command acknowledgement with `rejected` status but never count as valid laps.
+
+Progress checks use the original client event window, never arrival spacing. They require at least 8 reliable samples, endpoints within 1.5 seconds, gaps at most 2 seconds and no pit, pause or major progress jump. Accumulated progress outside 0.65–1.35 laps triggers review. Missing stage IDs, zero-duration sectors and incomplete/pit evidence are insufficient evidence. Offline recovery retains its existing opt-in and grace-window rules.
+
+Wire protocol remains v2: all new fields are nullable and generated from the existing Schema for all three targets. Older peers ignore them. New servers accept legacy unstamped events with reduced evidence and cannot guarantee their stage origin; old servers provide no new validation guarantee. Accepted event classifications survive retries, stage transitions and persistence without duplicate laps or investigations. Native recovery v1 adds optional participant fields; older files retain their existing deduplication fallback and empty evidence. Successful acknowledgements still follow persistence.
 
 ### Compatibility
 

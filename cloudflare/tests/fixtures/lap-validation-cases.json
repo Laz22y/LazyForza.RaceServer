@@ -1,0 +1,182 @@
+[
+  {
+    "name": "continuous-full-lap",
+    "status": "verified",
+    "canAccept": true,
+    "samples": "full"
+  },
+  {
+    "name": "continuous-stationary",
+    "status": "pendingReview",
+    "canAccept": true,
+    "samples": "stationary"
+  },
+  {
+    "name": "pit-entry-service-exit",
+    "status": "insufficientEvidence",
+    "canAccept": true,
+    "samples": "pit"
+  },
+  {
+    "name": "telemetry-gap",
+    "status": "insufficientEvidence",
+    "canAccept": true,
+    "samples": "gap"
+  },
+  {
+    "name": "paused-telemetry",
+    "status": "insufficientEvidence",
+    "canAccept": true,
+    "samples": "paused"
+  },
+  {
+    "name": "no-telemetry",
+    "status": "insufficientEvidence",
+    "canAccept": true
+  },
+  {
+    "name": "legacy-no-stage",
+    "status": "insufficientEvidence",
+    "canAccept": true,
+    "samples": "full",
+    "legacy": true
+  },
+  {
+    "name": "cross-stage",
+    "status": "rejected",
+    "canAccept": false,
+    "wrongStage": true
+  },
+  {
+    "name": "wrong-sector-count",
+    "status": "rejected",
+    "canAccept": false,
+    "sectors": [
+      30,
+      30
+    ]
+  },
+  {
+    "name": "negative-sector",
+    "status": "rejected",
+    "canAccept": false,
+    "sectors": [
+      -1,
+      21,
+      40
+    ]
+  },
+  {
+    "name": "zero-sector",
+    "status": "insufficientEvidence",
+    "canAccept": true,
+    "samples": "full",
+    "sectors": [
+      0,
+      20,
+      40
+    ]
+  },
+  {
+    "name": "sum-mismatch",
+    "status": "pendingReview",
+    "canAccept": true,
+    "sectors": [
+      20,
+      20,
+      25
+    ]
+  },
+  {
+    "name": "sum-rounding",
+    "status": "verified",
+    "canAccept": true,
+    "samples": "full",
+    "sectors": [
+      20,
+      20,
+      20.05
+    ]
+  },
+  {
+    "name": "too-short",
+    "status": "rejected",
+    "canAccept": false,
+    "seconds": 2,
+    "sectors": [
+      1,
+      0,
+      1
+    ]
+  },
+  {
+    "name": "too-long",
+    "status": "rejected",
+    "canAccept": false,
+    "seconds": 21601
+  },
+  {
+    "name": "invalid-abandoned",
+    "status": "rejected",
+    "canAccept": true,
+    "valid": false,
+    "seconds": 0,
+    "sectors": []
+  },
+  {
+    "name": "duplicate-sequence",
+    "status": "rejected",
+    "canAccept": false,
+    "lastNumber": 1,
+    "lastValid": true
+  },
+  {
+    "name": "out-of-order",
+    "status": "rejected",
+    "canAccept": false,
+    "lastNumber": 3,
+    "lastValid": true,
+    "number": 2
+  },
+  {
+    "name": "sequence-gap",
+    "status": "pendingReview",
+    "canAccept": true,
+    "lastNumber": 1,
+    "lastValid": true,
+    "number": 3
+  },
+  {
+    "name": "same-number-after-abandon",
+    "status": "insufficientEvidence",
+    "canAccept": true,
+    "lastNumber": 1,
+    "lastValid": false
+  },
+  {
+    "name": "next-after-invalid",
+    "status": "insufficientEvidence",
+    "canAccept": true,
+    "lastNumber": 1,
+    "lastValid": false,
+    "number": 2
+  },
+  {
+    "name": "legacy-stationary",
+    "status": "insufficientEvidence",
+    "canAccept": true,
+    "samples": "stationary",
+    "legacy": true
+  },
+  {
+    "name": "missing-sector-progress",
+    "status": "insufficientEvidence",
+    "canAccept": true,
+    "samples": "stationary",
+    "sectors": [
+      0,
+      20,
+      40
+    ]
+  }
+]

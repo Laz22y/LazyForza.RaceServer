@@ -20,7 +20,8 @@ public sealed record RaceCommandResult(
     bool IsAccepted,
     string? Error = null,
     RacePreRaceCheckReport? PreRaceCheck = null,
-    bool IsDeferred = false)
+    bool IsDeferred = false,
+    RaceLapValidationStatus? LapValidationStatus = null)
 {
     public static RaceCommandResult Accepted { get; } = new(true);
     public static RaceCommandResult Defer(string message) => new(false, message, IsDeferred: true);
@@ -488,6 +489,7 @@ public sealed partial class RaceCoordinator
                 return RaceCommandResult.Accepted;
             }
             var normalized = RaceProtocolValidation.NormalizeTelemetry(update);
+            ObserveLapValidationTelemetry(participant, update);
             participant.LastSeenAt = now;
             var wasInPitLane = participant.IsInPitLane;
             var wasInServiceZone = participant.IsInServiceZone;
@@ -619,12 +621,18 @@ public sealed partial class RaceCoordinator
         DateTimeOffset? receivedAt = null)
     {
         RaceSessionSnapshot snapshot;
+        RaceLapValidationStatus validationStatus;
         var audits = new List<RaceAuditEntry>();
         lock (sync)
         {
             var now = receivedAt ?? DateTimeOffset.UtcNow;
             var participant = Find(participantId);
             if (participant is null) return RaceCommandResult.Reject("参赛者不存在。");
+            if (participant.LapReceiptStatuses.TryGetValue(completed.EventId, out var priorStatus))
+            {
+                CommitRecoveryLocked();
+                return RaceCommandResult.Accepted with { LapValidationStatus = priorStatus };
+            }
             if (receivedLapEvents.Contains(completed.EventId))
             {
                 CommitRecoveryLocked();
@@ -651,10 +659,24 @@ public sealed partial class RaceCoordinator
             if (phase == RaceSessionPhase.Practice && practiceTimeExpired &&
                 !participant.PracticeFinalLapPending && !completed.IsRecoveredAfterDisconnect)
                 return RaceCommandResult.Reject("练习赛计时已结束，该车手没有待完成的最后一圈。");
-            if (completed.IsValid &&
-                (completed.LapSeconds is < 3 or > 21_600 || !double.IsFinite(completed.LapSeconds)))
-                return RaceCommandResult.Reject("圈速超出允许范围。");
+            PrepareLapValidation(participant);
+            var validation = LapCompletionValidator.Validate(completed, activeResultStageId, sectorCount,
+                participant.LastReportedLapNumber, participant.LastReportedLapWasValid, participant.LapValidationSamples);
+            if (!validation.CanAccept)
+                return RaceCommandResult.Reject(validation.Reason) with { LapValidationStatus = RaceLapValidationStatus.Rejected };
+            validationStatus = validation.Status;
+            participant.LastReportedLapNumber = completed.LapNumber;
+            participant.LastReportedLapWasValid = completed.IsValid;
+            participant.LapReceiptStatuses[completed.EventId] = validationStatus;
             receivedLapEvents.Add(completed.EventId);
+            if (validationStatus == RaceLapValidationStatus.PendingReview)
+            {
+                investigations.Add(new RaceInvestigationSnapshot(Guid.NewGuid(), participant.Id,
+                    $"{validation.Reason} EventId={completed.EventId}; lap={completed.LapNumber}; seconds={completed.LapSeconds:R}; sectors={string.Join(",", completed.SectorSeconds)}",
+                    now, completed.LapNumber, RaceInvestigationStatus.Pending));
+            }
+            audits.Add(new RaceAuditEntry(now, "lapValidation", validation.Reason, participant.Id,
+                new { completed.EventId, completed.StageId, validation.Status, completed.LapNumber }));
 
             participant.LastSeenAt = now;
             participant.DisconnectedLapRecoveryUntil = null;
@@ -768,7 +790,7 @@ public sealed partial class RaceCoordinator
                 completed));
         }
         Publish(snapshot, important: true, audits);
-        return RaceCommandResult.Accepted;
+        return RaceCommandResult.Accepted with { LapValidationStatus = validationStatus };
     }
 
     public RaceCommandResult CompletePitService(
@@ -3957,7 +3979,8 @@ public sealed partial class RaceCoordinator
                     candidate.ConnectedAt))
                 .ToArray(),
             minimumRequiredPitStops,
-            disconnectedLapRecoveryEnabled);
+            disconnectedLapRecoveryEnabled,
+            activeResultStageId);
     }
 
     private List<ParticipantState> OrderParticipants(DateTimeOffset now)
@@ -4450,6 +4473,27 @@ public sealed partial class RaceCoordinator
     private static bool ConstantTimeEquals(string left, string right) =>
         CryptographicOperations.FixedTimeEquals(Hash(left), Hash(right));
 
+    private void PrepareLapValidation(ParticipantState participant)
+    {
+        if (participant.LapValidationStageId == activeResultStageId) return;
+        participant.LapValidationStageId = activeResultStageId;
+        participant.LastReportedLapNumber = null;
+        participant.LastReportedLapWasValid = false;
+        participant.LapValidationSamples.Clear();
+    }
+
+    private void ObserveLapValidationTelemetry(ParticipantState participant, RaceTelemetryUpdate update)
+    {
+        PrepareLapValidation(participant);
+        if (phase is not (RaceSessionPhase.Practice or RaceSessionPhase.Qualifying or RaceSessionPhase.Race)) return;
+        var samples = participant.LapValidationSamples;
+        if (samples.Count > 0 && update.ClientMonotonicMilliseconds <= samples[^1].At) samples.Clear();
+        samples.Add(new LapValidationSample(update.ClientMonotonicMilliseconds, update.TrackProgress,
+            update.IsTelemetryValid && !update.IsPausedOrRewinding && double.IsFinite(update.TrackProgress) && update.TrackProgress is >= 0 and <= 1,
+            update.IsInPitLane || update.IsInServiceZone || update.IsApproachingPit || update.IsOnPitRoute));
+        if (samples.Count > 4096) samples.RemoveRange(0, samples.Count - 4096);
+    }
+
     private void IncrementRevision() => revision++;
 
     private bool ShouldPublishTelemetrySnapshot(bool important)
@@ -4540,6 +4584,11 @@ public sealed partial class RaceCoordinator
         string? teamId = null,
         string? teamColor = null)
     {
+        public Guid? LapValidationStageId { get; set; }
+        public int? LastReportedLapNumber { get; set; }
+        public bool LastReportedLapWasValid { get; set; }
+        public List<LapValidationSample> LapValidationSamples { get; set; } = [];
+        public Dictionary<Guid, RaceLapValidationStatus> LapReceiptStatuses { get; set; } = [];
         public Guid Id { get; } = id;
         public string ResumeToken { get; } = resumeToken;
         public string DisplayName { get; set; } = displayName;

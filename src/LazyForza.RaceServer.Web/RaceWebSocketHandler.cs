@@ -160,7 +160,8 @@ public sealed class RaceWebSocketHandler(
                     participantId,
                     socket,
                     RaceMessageTypes.LapAcknowledged,
-                    new RaceLapAcknowledgement(completed.EventId, result.IsAccepted, result.Error),
+                    new RaceLapAcknowledgement(completed.EventId, result.IsAccepted, result.Error,
+                        result.LapValidationStatus ?? (result.IsAccepted ? RaceLapValidationStatus.InsufficientEvidence : RaceLapValidationStatus.Rejected)),
                     cancellationToken);
             }
             case RaceMessageTypes.PitServiceCompleted:

@@ -9,6 +9,59 @@ namespace LazyForza.RaceServer.Tests;
 [TestClass]
 public sealed class RaceCoordinatorTests
 {
+    [TestMethod]
+    public void LapValidationIsIdempotentOrderedAndIsolatedByStage()
+    {
+        var coordinator = CreateCoordinator();
+        var id = Join(coordinator, 1).Accepted!.ParticipantId;
+        var now = DateTimeOffset.UtcNow;
+        Assert.IsTrue(coordinator.ApplySessionCommand(new(RaceSessionPhase.Practice, null, null, null, null), now).IsAccepted);
+        var stage = coordinator.Snapshot().StageId;
+        Assert.IsNotNull(stage);
+        var lap = new RaceLapCompleted(Guid.NewGuid(), 1, 60, [20,20,20], true, null, 60000, StageId: stage);
+        var result = coordinator.CompleteLap(id, lap, now.AddMinutes(10));
+        Assert.IsTrue(result.IsAccepted, result.Error);
+        Assert.AreEqual(RaceLapValidationStatus.InsufficientEvidence, result.LapValidationStatus);
+        Assert.AreEqual(result.LapValidationStatus, coordinator.CompleteLap(id, lap, now.AddMinutes(20)).LapValidationStatus);
+        Assert.IsFalse(coordinator.CompleteLap(id, lap with { EventId = Guid.NewGuid() }).IsAccepted);
+        var gap = lap with { EventId = Guid.NewGuid(), LapNumber = 3 };
+        Assert.AreEqual(RaceLapValidationStatus.PendingReview, coordinator.CompleteLap(id, gap).LapValidationStatus);
+        Assert.AreEqual(RaceLapValidationStatus.PendingReview, coordinator.CompleteLap(id, gap).LapValidationStatus);
+        Assert.IsFalse(coordinator.CompleteLap(id, lap with { EventId = Guid.NewGuid(), LapNumber = 2 }).IsAccepted);
+        Assert.AreEqual(2, coordinator.Snapshot().Participants.Single().CompletedLaps);
+        Assert.HasCount(1, coordinator.Snapshot().Investigations!);
+        Assert.HasCount(0, coordinator.Snapshot().Penalties!);
+        Assert.IsTrue(coordinator.ApplySessionCommand(new(RaceSessionPhase.Lobby, null, null, null, null)).IsAccepted);
+        Assert.IsTrue(coordinator.ApplySessionCommand(new(RaceSessionPhase.Practice, null, null, null, null)).IsAccepted);
+        Assert.AreNotEqual(stage, coordinator.Snapshot().StageId);
+        Assert.IsFalse(coordinator.CompleteLap(id, lap with { EventId = Guid.NewGuid(), LapNumber = 4 }).IsAccepted);
+        Assert.IsTrue(coordinator.CompleteLap(id, lap).IsAccepted);
+        Assert.AreEqual(0, coordinator.Snapshot().Participants.Single().CompletedLaps);
+        Assert.IsTrue(coordinator.CompleteLap(id, lap with { EventId = Guid.NewGuid(), StageId = coordinator.Snapshot().StageId }).IsAccepted);
+    }
+
+    [DataTestMethod]
+    [DataRow(false, false, RaceLapValidationStatus.Verified)]
+    [DataRow(true, false, RaceLapValidationStatus.InsufficientEvidence)]
+    [DataRow(false, true, RaceLapValidationStatus.PendingReview)]
+    public void DelayedLapUsesClientWindowAndTreatsPitEvidenceConservatively(bool pit, bool stationary, RaceLapValidationStatus expected)
+    {
+        var coordinator = CreateCoordinator();
+        var id = Join(coordinator, 1).Accepted!.ParticipantId;
+        var now = DateTimeOffset.UtcNow;
+        Assert.IsTrue(coordinator.ApplySessionCommand(new(RaceSessionPhase.Practice, null, null, null, null), now).IsAccepted);
+        for (var i = 0; i <= 60; i++)
+            coordinator.UpdateTelemetry(id, Telemetry(0, stationary ? .2 : i == 60 ? 0 : i / 60d) with
+            { ClientMonotonicMilliseconds = i * 1000, IsInPitLane = pit && i is >= 20 and <= 40 }, now.AddSeconds(i));
+        var lap = new RaceLapCompleted(Guid.NewGuid(), 1, 60, [20,20,20], true, null, 60000, StageId: coordinator.Snapshot().StageId);
+        var result = coordinator.CompleteLap(id, lap, now.AddHours(2));
+        Assert.IsTrue(result.IsAccepted, result.Error);
+        Assert.AreEqual(expected, result.LapValidationStatus);
+        Assert.AreEqual(1, coordinator.Snapshot().Participants.Single().CompletedLaps);
+        Assert.HasCount(stationary ? 1 : 0, coordinator.Snapshot().Investigations!);
+        Assert.HasCount(0, coordinator.Snapshot().Penalties!);
+    }
+
     [DataTestMethod]
     [DataRow(RaceSessionPhase.Practice)]
     [DataRow(RaceSessionPhase.Qualifying)]

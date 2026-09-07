@@ -14,4 +14,7 @@
     <ProjectReference Include="..\..\src\LazyForza.RaceServer.Core\LazyForza.RaceServer.Core.csproj" />
     <ProjectReference Include="..\..\src\LazyForza.RaceServer.Web\LazyForza.RaceServer.Web.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Include="../../cloudflare/tests/fixtures/lap-validation-cases.json" Link="lap-validation-cases.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

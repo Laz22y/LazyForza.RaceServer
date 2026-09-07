@@ -1,3 +1,4 @@
+import type { LapAcknowledgement } from "./protocol";
 import { RaceCore, type CommandResult, type StoredRaceState } from "./race-core";
 import {
   type FlagCommand,
@@ -395,7 +396,7 @@ export class RaceRoom {
       }
 
       let result: CommandResult;
-      let lapAcknowledgement: { eventId: string; isAccepted: boolean; message?: string | null } | null = null;
+      let lapAcknowledgement: LapAcknowledgement | null = null;
       let pitServiceAcknowledgement: { eventId: string; isAccepted: boolean; message?: string | null } | null = null;
       // Durable Object alarms may be delivered late. Active client traffic also
       // advances the race clock, but doing so once per telemetry packet makes
@@ -418,7 +419,8 @@ export class RaceRoom {
         lapAcknowledgement = {
           eventId: completed.eventId,
           isAccepted: result.ok,
-          message: result.ok ? null : result.error
+          message: result.ok ? null : result.error,
+          validationStatus: result.lapValidationStatus ?? (result.ok ? "insufficientEvidence" : "rejected")
         };
         important = true;
       } else if (envelope.type === "pitServiceCompleted") {

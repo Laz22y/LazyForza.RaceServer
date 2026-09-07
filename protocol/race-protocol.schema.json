@@ -30,6 +30,11 @@
   },
   "enums": [
     {
+      "name": "LapValidationStatus",
+      "targets": { "server": "RaceLapValidationStatus", "client": "RaceLapValidationStatus", "typescript": "LapValidationStatus" },
+      "values": ["verified", "insufficientEvidence", "pendingReview", "rejected"]
+    },
+    {
       "name": "SessionPhase",
       "targets": { "server": "RaceSessionPhase", "client": "RaceSessionPhase", "typescript": "SessionPhase" },
       "values": ["lobby", "practice", "qualifying", "grid", "outLap", "formationLap", "countdown", "race", "suspended", "finished"]
@@ -259,7 +264,8 @@
         { "name": "invalidReason", "type": "nullable<string>" },
         { "name": "clientMonotonicMilliseconds", "type": "int64" },
         { "name": "isBestLapEligible", "type": "boolean", "default": true },
-        { "name": "isRecoveredAfterDisconnect", "type": "boolean", "default": false }
+        { "name": "isRecoveredAfterDisconnect", "type": "boolean", "default": false },
+        { "name": "stageId", "type": "nullable<uuid>", "default": null }
       ]
     },
     {
@@ -268,7 +274,8 @@
       "fields": [
         { "name": "eventId", "type": "uuid" },
         { "name": "isAccepted", "type": "boolean" },
-        { "name": "message", "type": "nullable<string>", "default": null }
+        { "name": "message", "type": "nullable<string>", "default": null },
+        { "name": "validationStatus", "type": "nullable<enum:LapValidationStatus>", "default": null }
       ]
     },
     {
@@ -569,7 +576,8 @@
         { "name": "observers", "type": "nullable<array<model:ObserverSnapshot>>", "types": { "typescript": "array<model:ObserverSnapshot>" }, "default": null },
         { "name": "minimumRequiredPitStops", "type": "int32", "default": 1 },
         { "name": "automaticCollisionInvestigationsEnabled", "type": "boolean", "default": false, "exclude": ["server", "client"] },
-        { "name": "disconnectedLapRecoveryEnabled", "type": "boolean", "default": false }
+        { "name": "disconnectedLapRecoveryEnabled", "type": "boolean", "default": false },
+        { "name": "stageId", "type": "nullable<uuid>", "default": null }
       ]
     },
     {

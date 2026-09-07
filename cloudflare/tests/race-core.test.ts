@@ -3,6 +3,50 @@ import { defaultQualifyingEliminations, RaceCore } from "../src/race-core";
 import type { LapCompleted, LoginRequest, SessionCommand, TelemetryUpdate } from "../src/protocol";
 
 describe("RaceCore", () => {
+  it("keeps lap receipts idempotent and sequences isolated by stage across reconstruction", () => {
+    let core = createCore();
+    const id = connect(core, "校验");
+    expect(core.applySession({phase: "practice"}).ok).toBe(true);
+    const stageId = core.snapshot().stageId;
+    expect(stageId).toBeTruthy();
+    const first = {...lap("first",60,true,1), stageId};
+    expect(core.completeLap(id, first).lapValidationStatus).toBe("insufficientEvidence");
+    expect(core.completeLap(id, first).lapValidationStatus).toBe("insufficientEvidence");
+    expect(core.completeLap(id, {...first,eventId:"duplicate-sequence"}).ok).toBe(false);
+    const gap = {...first,eventId:"gap",lapNumber:3};
+    expect(core.completeLap(id,gap).lapValidationStatus).toBe("pendingReview");
+    core = new RaceCore({sessionName:"测试赛事",maximumParticipants:12,totalRaceLaps:5}, JSON.parse(JSON.stringify(core.serialize())));
+    expect(core.completeLap(id,gap).lapValidationStatus).toBe("pendingReview");
+    expect(core.completeLap(id,{...first,eventId:"late-second",lapNumber:2}).ok).toBe(false);
+    expect(core.snapshot().participants[0].completedLaps).toBe(2);
+    expect(core.snapshot().investigations).toHaveLength(1);
+    expect(core.snapshot().penalties).toHaveLength(0);
+    expect(core.applySession({phase:"lobby"}).ok).toBe(true);
+    expect(core.applySession({phase:"practice"}).ok).toBe(true);
+    expect(core.snapshot().stageId).not.toBe(stageId);
+    expect(core.completeLap(id,{...first,eventId:"old-stage",lapNumber:4}).ok).toBe(false);
+    expect(core.completeLap(id,first).ok).toBe(true);
+    expect(core.snapshot().participants[0].completedLaps).toBe(0);
+    expect(core.completeLap(id,{...first,eventId:"new-stage",stageId:core.snapshot().stageId}).ok).toBe(true);
+  });
+
+  it.each([
+    [false,false,"verified"], [true,false,"insufficientEvidence"], [false,true,"pendingReview"]
+  ] as const)("uses original client time for delayed laps (pit=%s, stationary=%s)", (pit,stationary,expected) => {
+    const core = createCore(), id = connect(core,"延迟圈");
+    const now = new Date();
+    expect(core.applySession({phase:"practice"},now).ok).toBe(true);
+    for(let i=0;i<=60;i++) core.updateTelemetry(id, {...telemetry(),clientMonotonicMilliseconds:i*1000,
+      trackProgress:stationary?.2:i===60?0:i/60,isInPitLane:pit&&i>=20&&i<=40},new Date(now.getTime()+i*1000));
+    const result = core.completeLap(id,{...lap("delayed",60,true,1),clientMonotonicMilliseconds:60000,
+      stageId:core.snapshot().stageId},new Date(now.getTime()+7200000));
+    expect(result.ok).toBe(true);
+    expect(result.lapValidationStatus).toBe(expected);
+    expect(core.snapshot().participants[0].completedLaps).toBe(1);
+    expect(core.snapshot().investigations).toHaveLength(stationary?1:0);
+    expect(core.snapshot().penalties).toHaveLength(0);
+  });
+
   it.each(["practice", "qualifying", "race"] as const)(
     "opens collision investigations during %s",
     phase => {
@@ -431,7 +475,7 @@ describe("RaceCore", () => {
 
     expect(core.completeLap(first, event).ok).toBe(true);
     expect(core.completeLap(first, event).ok).toBe(true);
-    expect(core.completeLap(first, lap("lap-invalid", 79, false, 1)).ok).toBe(true);
+    expect(core.completeLap(first, lap("lap-invalid", 79, false, 1)).ok).toBe(false);
 
     const participant = core.snapshot().participants.find(candidate => candidate.id === first)!;
     expect(participant.completedLaps).toBe(1);
@@ -1955,7 +1999,7 @@ function lap(eventId: string, lapSeconds: number, isValid: boolean, lapNumber: n
     eventId,
     lapNumber,
     lapSeconds,
-    sectorSeconds: [lapSeconds / 2, lapSeconds / 2],
+    sectorSeconds: [lapSeconds / 3, lapSeconds / 3, lapSeconds / 3],
     isValid,
     invalidReason: isValid ? null : "test-invalid",
     clientMonotonicMilliseconds: 10_000

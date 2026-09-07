@@ -166,3 +166,9 @@ npm run dev
 ```
 
 Local tests and dry-runs do not prove public-network reachability or real FH6 multi-PC behavior. Test HTTPS, the WebSocket handshake, 10 Hz state updates and short reconnect recovery from the drivers' actual networks before an event.
+
+## 当前源码的圈校验兼容
+
+原生与 Cloudflare 的圈完成校验和回执分类保持一致，规则及旧协议限制见上级 [README](../README.md#圈完成校验当前源码)。可选 `stageId` 与 `validationStatus` 保持协议 v2；旧客户端缺少阶段证据仍可提交。待审核圈创建调查并沿用现有计圈规则，不自动处罚。Durable Object 保存圈序和回执分类，重建后重复事件不再次计圈或创建调查。共享测试数据位于 `tests/fixtures/lap-validation-cases.json`，随独立 Cloudflare 包保留。
+
+The current source shares native lap validation and optional protocol v2 fields. Review findings do not automatically penalize drivers; accepted laps retain existing scoring rules. Durable Object state preserves sequence and receipt classification across reconstruction. Shared fixtures are included in this standalone package; see the parent README for compatibility and evidence limits.

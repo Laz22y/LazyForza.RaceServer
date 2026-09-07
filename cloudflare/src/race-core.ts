@@ -1,3 +1,5 @@
+import { validateLap, type LapValidationSample } from "./lap-validation";
+import type { LapValidationStatus } from "./protocol";
 import {
   type BannerKind,
   type BannerSnapshot,
@@ -65,6 +67,11 @@ export interface RaceConfiguration {
 }
 
 interface ParticipantState {
+  lapValidationStageId?: string | null;
+  lastReportedLapNumber?: number | null;
+  lastReportedLapWasValid?: boolean;
+  lapValidationSamples?: LapValidationSample[];
+  lapReceiptStatuses?: Record<string, LapValidationStatus>;
   id: string;
   resumeToken: string;
   displayName: string;
@@ -280,7 +287,8 @@ export interface StoredRaceState {
   resultHistory?: StageResultSnapshot[];
 }
 
-export type CommandResult = { ok: true } | {
+export type CommandResult = { ok: true; lapValidationStatus?: LapValidationStatus } | {
+  lapValidationStatus?: LapValidationStatus;
   ok: false;
   error: string;
   preRaceCheck?: PreRaceCheckReport;
@@ -396,6 +404,25 @@ function normalizeCollisionReplays(
 }
 
 export class RaceCore {
+  private prepareLapValidation(participant: ParticipantState): void {
+    if (participant.lapValidationStageId === this.state.activeResultStageId) return;
+    participant.lapValidationStageId = this.state.activeResultStageId;
+    participant.lastReportedLapNumber = null;
+    participant.lastReportedLapWasValid = false;
+    participant.lapValidationSamples = [];
+  }
+
+  private observeLapValidationTelemetry(participant: ParticipantState, update: TelemetryUpdate): void {
+    this.prepareLapValidation(participant);
+    if (!["practice", "qualifying", "race"].includes(this.state.phase)) return;
+    const samples = participant.lapValidationSamples ??= [];
+    if (samples.length && update.clientMonotonicMilliseconds <= samples[samples.length - 1].at) samples.length = 0;
+    samples.push({ at: update.clientMonotonicMilliseconds, progress: update.trackProgress,
+      reliable: update.isTelemetryValid && !update.isPausedOrRewinding && Number.isFinite(update.trackProgress) && update.trackProgress >= 0 && update.trackProgress <= 1,
+      pit: Boolean(update.isInPitLane || update.isInServiceZone || update.isApproachingPit || update.isOnPitRoute) });
+    if (samples.length > 4096) samples.splice(0, samples.length - 4096);
+  }
+
   private static readonly maximumLiveGapSamples = 3_600;
   private static readonly liveGapHistoryLaps = 1.25;
   private static readonly liveGapProgressJitter = .002;
@@ -780,6 +807,7 @@ export class RaceCore {
   updateTelemetry(participantId: string, update: TelemetryUpdate, now = new Date()): CommandResult {
     const participant = this.find(participantId);
     if (!participant) return rejected("车手不存在。");
+    this.observeLapValidationTelemetry(participant, update);
     participant.isConnected = true;
     participant.lastSeenAt = now.toISOString();
     const wasInPitLane = participant.isInPitLane;
@@ -874,8 +902,11 @@ export class RaceCore {
   completeLap(participantId: string, completed: LapCompleted, now = new Date()): CommandResult {
     const participant = this.find(participantId);
     if (!participant) return rejected("车手不存在。");
-    const eventId = cleanText(completed.eventId, 80);
+    const eventId = cleanText(completed.eventId, 80)?.toLowerCase();
     if (!eventId) return rejected("圈速事件编号无效。");
+    const priorStatus = Object.hasOwn(participant.lapReceiptStatuses ?? {}, eventId)
+      ? participant.lapReceiptStatuses![eventId] : undefined;
+    if (priorStatus) return { ok: true, lapValidationStatus: priorStatus };
     if (this.state.receivedLapEvents.includes(eventId)) return accepted();
     if (completed.isRecoveredAfterDisconnect) {
       if (!this.state.disconnectedLapRecoveryEnabled)
@@ -895,12 +926,22 @@ export class RaceCore {
     if (this.state.phase === "practice" && this.state.practiceTimeExpired &&
         !participant.practiceFinalLapPending && !completed.isRecoveredAfterDisconnect)
       return rejected("练习赛计时已结束，该车手没有待完成的最后一圈。");
-    if (completed.isValid &&
-        (!Number.isFinite(completed.lapSeconds) || completed.lapSeconds < 3 || completed.lapSeconds > 21_600))
-      return rejected("圈速数值超出有效范围。");
+    this.prepareLapValidation(participant);
+    const validation = validateLap(completed, this.state.activeResultStageId, this.state.sectorCount,
+      participant.lastReportedLapNumber, participant.lastReportedLapWasValid ?? false, participant.lapValidationSamples ?? []);
+    if (!validation.canAccept) return { ok: false, error: validation.reason, lapValidationStatus: "rejected" };
+    participant.lastReportedLapNumber = completed.lapNumber;
+    participant.lastReportedLapWasValid = completed.isValid;
+    participant.lapReceiptStatuses ??= {};
+    Object.defineProperty(participant.lapReceiptStatuses, eventId, { value: validation.status, enumerable: true, writable: true, configurable: true });
     this.state.receivedLapEvents.push(eventId);
-    if (this.state.receivedLapEvents.length > 20_000)
-      this.state.receivedLapEvents.splice(0, this.state.receivedLapEvents.length - 10_000);
+    if (validation.status === "pendingReview") {
+      this.state.investigations ??= [];
+      this.state.investigations.push({ id: crypto.randomUUID(), participantId: participant.id,
+        offense: `${validation.reason} EventId=${eventId}; lap=${completed.lapNumber}; seconds=${completed.lapSeconds}; sectors=${completed.sectorSeconds.join(",")}`,
+        detectedAt: now.toISOString(), lapNumber: completed.lapNumber, status: "pending" });
+    }
+    this.recordEvent("lapValidation", validation.reason, participant.id, now);
     if (!completed.isValid) {
       participant.disconnectedLapRecoveryUntil = null;
       this.recordEvent("lapInvalid", `${participant.displayName} 的本圈无效：${cleanText(completed.invalidReason, 120) ?? "客户端判定无效"}。`, participant.id, now);
@@ -911,7 +952,7 @@ export class RaceCore {
       this.completeQualifyingIfReady(now);
       this.completePracticeIfReady(now);
       this.touch();
-      return accepted();
+      return { ok: true, lapValidationStatus: validation.status };
     }
     const priorFastest = this.fastestLap();
     const bestLapEligible = completed.isBestLapEligible !== false && !participant.lapHasTrackLimitIncident;
@@ -988,7 +1029,7 @@ export class RaceCore {
     this.completeQualifyingIfReady(now);
     this.completePracticeIfReady(now);
     this.touch();
-    return accepted();
+    return { ok: true, lapValidationStatus: validation.status };
   }
 
   completePitService(
@@ -1789,6 +1830,7 @@ export class RaceCore {
           connectedAt: observer.connectedAt
         })),
       serverTime: now.toISOString(),
+      stageId: this.state.activeResultStageId ?? null,
       yellowZones: this.yellowZones(),
       sectorCount: this.state.sectorCount,
       allowTeams: this.state.allowTeams,
