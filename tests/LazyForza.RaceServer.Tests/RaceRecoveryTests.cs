@@ -289,7 +289,7 @@ public sealed class RaceRecoveryTests
         }
     }
 
-    private sealed class TestData : IDisposable
+    internal sealed class TestData : IDisposable
     {
         public RaceServerOptions Options { get; } = new()
         {
@@ -312,12 +312,12 @@ public sealed class RaceRecoveryTests
         }
         public void AppendAudit(RaceAuditEntry entry) => inner.AppendAudit(entry);
     }
-    private sealed class NativeHost(Process process, HttpClient client, Uri address, Task<string> stdout, Task<string> stderr) : IAsyncDisposable
+    internal sealed class NativeHost(Process process, HttpClient client, Uri address, Task<string> stdout, Task<string> stderr) : IAsyncDisposable
     {
-        private HttpClient Client => client;
+        public HttpClient Client => client;
         private Task<string> Output => stdout;
         private Task<string> Errors => stderr;
-        public static async Task<NativeHost> Start(string directory, CancellationToken token)
+        public static async Task<NativeHost> Start(string directory, CancellationToken token, params string[] extraArguments)
         {
             using var listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
@@ -328,6 +328,7 @@ public sealed class RaceRecoveryTests
                 WindowStyle = ProcessWindowStyle.Hidden, RedirectStandardOutput = true, RedirectStandardError = true };
             foreach (var arg in new[] { typeof(FileRaceStatePersistence).Assembly.Location, "--urls", address.ToString(), "--RaceServer:DataDirectory", directory })
                 info.ArgumentList.Add(arg);
+            foreach (var argument in extraArguments) info.ArgumentList.Add(argument);
             var process = Process.Start(info)!;
             var host = new NativeHost(process, new HttpClient { BaseAddress = address }, address,
                 process.StandardOutput.ReadToEndAsync(), process.StandardError.ReadToEndAsync());
@@ -349,8 +350,12 @@ public sealed class RaceRecoveryTests
         public async Task<ClientWebSocket> Connect(CancellationToken token)
         {
             var socket = new ClientWebSocket();
-            await socket.ConnectAsync(new UriBuilder(address) { Scheme = "ws", Path = "/ws" }.Uri, token);
-            return socket;
+            try
+            {
+                await socket.ConnectAsync(new UriBuilder(address) { Scheme = "ws", Path = "/ws" }.Uri, token);
+                return socket;
+            }
+            catch { socket.Dispose(); throw; }
         }
         public async Task Post<T>(string path, T value, CancellationToken token)
         {

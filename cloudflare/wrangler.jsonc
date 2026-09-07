@@ -28,6 +28,7 @@
     }
   ],
   "vars": {
+    "INGRESS_LIMITS": "{}",
     "SERVER_NAME": "LazyForza 地产赛事",
     "SESSION_NAME": "地产赛事",
     "MAXIMUM_PARTICIPANTS": "12",

@@ -223,6 +223,9 @@
     ['赛事恢复失败，服务器未启动，原文件已保留。', 'Race recovery failed. The server did not start and the original file was preserved.'],
     ['赛事状态未能持久保存；关闭连接，不发送成功回执。', 'Race state could not be persisted. Closing the connection without a successful acknowledgement.'],
     ['赛事状态文件不可写；关闭连接，不发送成功回执。', 'The race state file is not writable. Closing the connection without a successful acknowledgement.'],
+    ['登录超时，请重新连接。', 'Login timed out. Please reconnect.'],
+    ['消息超过大小上限。', 'The message exceeds the size limit.'],
+    ['消息分片过多。', 'Too many message fragments.'],
     ['圈事件编号、圈序或客户端时间无效。', 'Invalid lap event identity, sequence or client time.'],
     ['圈事件不属于当前赛事阶段。', 'The lap event does not belong to the current stage.'],
     ['圈序已经处理或已过期。', 'This lap sequence has already been processed or is out of date.'],
@@ -854,6 +857,7 @@
   ]);
 
   const patterns = [
+    [/^请求过于频繁，请在 (\d+) 秒后重试。$/, 'Too many requests. Retry in $1 seconds.'],
     [/^(\d+) 项警告$/, '$1 warnings'],
     [/^(\d+) 人已准备$/, '$1 ready'],
     [/^(\d+) 人$/, '$1'],

@@ -89,6 +89,36 @@ chmod +x ./LazyForza.RaceServer.Web
 
 总控可上传不超过 1.5 MiB 的 `.lfzestate`。服务端校验文件清单与 SHA-256；客户端缺少匹配赛道时，由车手确认下载并再次校验。
 
+## 入口保护（当前源码）
+
+原生与 Cloudflare 版均限制登录失败窗口、未认证连接名额和每连接消息／字节预算。原生版使用 `RaceServer:Ingress` 配置。可通过 `appsettings.json` 的 `RaceServer.Ingress` 对象或 `RaceServer__Ingress__字段名` 环境变量设置；启动时拒绝无效配置。下表列出默认值：
+
+| 字段 | 默认值 | 含义 |
+| --- | --- | --- |
+| LoginFailureLimit | 5 | 同来源、同登录身份的窗口额度 |
+| SourceLoginFailureLimit | 120 | 同来源、同登录通道的总额度，限制轮换名字绕过 |
+| LoginFailureWindowSeconds | 60 | 固定窗口；超限请求不延长锁定 |
+| MaximumConcurrentLogins | 32 | 同时验证密码的上限 |
+| MaximumFailureBuckets | 4096 | 有界失败记录数量；过期回收 |
+| MaximumUnauthenticatedConnections | 64 | 全局尚未登录的 WebSocket 上限 |
+| MaximumUnauthenticatedPerSource | 32 | 单来源尚未登录的 WebSocket 上限 |
+| LoginTimeoutSeconds | 12 | 建立 WebSocket 后的登录期限 |
+| MessagesPerSecond / MessageBurst | 60 / 120 | 每连接消息令牌补充速率与突发容量 |
+| BytesPerSecond / ByteBurst | 131072 / 262144 | 每连接字节预算，包含分片数据 |
+| TrustedProxyAddresses | 空数组 | 明确信任的直接反向代理 IP 地址 |
+
+成功验证密码会归还登录额度；已认证连接不占未认证名额。玩家按来源加名字／恢复令牌摘要隔离，总控使用独立通道。少量输错密码不会阻断同一 NAT 下其他玩家或踢掉已连接玩家；来源总额度是短时极端滥用兜底，仍可能在同出口持续攻击时暂时限制新登录。不要把来源额度调到小于正常多人重连规模。应用限速不能替代公网反向代理／防火墙对分布式攻击的防护。
+
+HTTP 登录或 WebSocket 握手超限返回 `429`、`Retry-After` 和 JSON `retryAfterSeconds`。WebSocket 消息预算耗尽返回 `rateLimited` 及重试秒数，使用关闭码 `1013`；登录错误／超时使用 `1008`，消息过大使用 `1009`。关闭和超时会释放名额；单个连接的消息预算不影响其他玩家。失败记录仅在原生进程内保存，重启清空；赛事恢复文件不包含这些短期传输额度。
+
+默认只使用 TCP 直接对端地址，忽略任意 `Forwarded`、`X-Forwarded-For`、`CF-Connecting-IP`。需要反代来源分流时，显式设置 `TrustedProxyAddresses`，并让这些代理**覆盖** `X-Forwarded-For` 为单个真实客户端 IP；多地址链不会被直接采信。限制源站仅由指定代理访问，勿配置信任任意地址。未配置代理信任时，以代理地址聚合额度，部署者应按共享出口人数调整上限。
+
+Cloudflare 使用可选环境变量 `INGRESS_LIMITS`（JSON 字符串），字段名为表中名称的 camelCase 形式，默认额度相同；不使用 `TrustedProxyAddresses`。示例及独立部署步骤见 [Cloudflare README](cloudflare/README.md#入口保护配置)。它仅在平台请求元数据存在且不是 Worker 子请求时采用 `CF-Connecting-IP`；不信任任意 `X-Forwarded-For` 或自定义来源头。来源不可确认时归为 `unknown`，保持同出口的身份隔离；代理、Service Binding 或额外 Worker 链路必须验证实际元数据保留情况，并配合边缘规则，不能通过随意注入 IP 头绕过回退。Cloudflare 的来源头语义见 [官方说明](https://developers.cloudflare.com/fundamentals/reference/http-headers/)。
+
+Cloudflare 将失败窗口写入独立的 `ingress-failures-v1` 存储，将登录截止时间与消息令牌保存在 WebSocket attachment 中，因此 Hibernation／对象重建不会刷新额度。既有连接缺少字段时获得一次默认额度及登录期限；未认证连接由 alarm 清理，正在关闭的连接仍占名额直至平台确认关闭。HTTP 登录请求体限制为 64 KiB，读取超时释放验证名额；消息预算在 JSON 解析前检查。
+
+协议仍为 v2：从 Schema 生成的 `LoginRejected` 与通用错误载荷增加可选 `retryAfterSeconds`，旧客户端仍可读取原有 `code`／`message`。旧客户端可能不按新字段自动退避，重试提示也包含秒数文字；不要将未知错误码视为赛事事件的成功确认。
+
 ## 圈完成校验（当前源码）
 
 原生与 Cloudflare 共用同一组校验契约测试。圈事件携带快照提供的可选 `stageId`；阶段不符、已处理或倒退的圈序、分段数量不符、非有限／负时间等明确错误会被拒绝且不计圈。有效圈仍限定 3–21600 秒。首个圈序作为基线；此后的缺号进入待审核，客户端放弃无效圈后允许同圈序重新完成。
@@ -236,6 +266,14 @@ Requires Node.js 20+, npm and PowerShell 7. Open the Worker domain after deploym
 Drivers need the server domain or IP, room password, matching estate circuit, display name and optional team. The WebSocket endpoint is `/ws`. Observers receive race snapshots only and do not upload telemetry or participate in standings or penalties.
 
 Race Control accepts `.lfzestate` packages up to 1.5 MiB. The server verifies the manifest and SHA-256; clients without the matching track confirm the download and verify it again.
+
+### Ingress protection (current source)
+
+Native `RaceServer:Ingress` and Cloudflare `INGRESS_LIMITS` configure failure windows, pending WebSocket capacity and per-connection message/byte token budgets. The JSON Cloudflare variable uses camelCase versions of the native option names; defaults and an example are listed above and in the Cloudflare README. Successful authentication refunds the failure reservation, player identities are isolated within a shared exit, and administrator attempts use a separate channel. A larger source-wide threshold bounds identity rotation; extreme abuse may temporarily delay new logins from that exit but never disconnect existing players.
+
+HTTP throttling returns 429 with `Retry-After` and `retryAfterSeconds`. WebSockets receive a retry error before close code 1013; invalid/timed-out login uses 1008 and oversize messages use 1009. Short-lived native failure counters reset on process restart. Cloudflare persists failure windows separately and retains socket budgets/deadlines in attachments across Hibernation; alarms expire pending logins. Old protocol v2 readers ignore optional retry fields and still receive human-readable hints.
+
+Native ignores proxy headers unless the immediate peer appears in `TrustedProxyAddresses`; configure that proxy to overwrite X-Forwarded-For with exactly one address and firewall direct origin access. Cloudflare uses platform metadata with CF-Connecting-IP and rejects Worker-subrequest identity assumptions; unknown sources fall back to a shared bucket with identity isolation. No arbitrary custom IP header is trusted. Validate real proxy/Worker chains and use edge protections for distributed abuse. Automated tests and local dry-run do not establish public-deployment security or real multi-machine FH6 validation.
 
 ### Lap completion validation (current source)
 

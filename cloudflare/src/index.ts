@@ -1,4 +1,6 @@
-import type { LapAcknowledgement } from "./protocol";
+import type { LapAcknowledgement, ErrorPayload, LoginRejected } from "./protocol";
+import { ingressOptions, LoginFailureBudget, consumeMessage, connectionAllowed, loginIdentity,
+  transportSource, type IngressOptions, type MessageBudgetState } from "./ingress-protection";
 import { RaceCore, type CommandResult, type StoredRaceState } from "./race-core";
 import {
   type FlagCommand,
@@ -74,6 +76,7 @@ import {
 } from "./event-projects";
 
 interface Env {
+  INGRESS_LIMITS?: string;
   RACE_ROOM: DurableObjectNamespace;
   ASSETS: Fetcher;
   PLAYER_PASSWORD?: string;
@@ -85,6 +88,11 @@ interface Env {
 }
 
 interface SocketAttachment {
+  source?: string;
+  loginDeadline?: number;
+  budget?: MessageBudgetState;
+  closed?: boolean;
+  authenticating?: boolean;
   participantId?: string;
   isObserver?: boolean;
 }
@@ -140,6 +148,8 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 export class RaceRoom {
+  private ingress: IngressOptions;
+  private loginBudget!: LoginFailureBudget;
   private core!: RaceCore;
   private readonly initialized: Promise<void>;
   private serverSequence = 0;
@@ -154,7 +164,15 @@ export class RaceRoom {
   private setupInProgress = false;
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
+    this.ingress = ingressOptions(env.INGRESS_LIMITS);
     this.initialized = this.state.blockConcurrencyWhile(async () => {
+      this.loginBudget = new LoginFailureBudget(this.ingress,
+        await this.state.storage.get<ReturnType<LoginFailureBudget["serialize"]>>("ingress-failures-v1") ?? []);
+      for (const socket of this.state.getWebSockets()) {
+        const attachment = attachmentOf(socket);
+        if (!attachment.participantId && attachment.loginDeadline === undefined)
+          socket.serializeAttachment({...attachment, loginDeadline: Date.now() + this.ingress.loginTimeoutSeconds * 1000});
+      }
       const stored = await this.state.storage.get<StoredRaceState>(storedStateKey);
       const loadedCredentials = await this.state.storage.get<StoredCredentials>(storedCredentialsKey) ?? null;
       if (loadedCredentials) {
@@ -359,20 +377,43 @@ export class RaceRoom {
   async webSocketMessage(webSocket: WebSocket, message: string | ArrayBuffer): Promise<void> {
     await this.initialized;
     try {
+      const incoming = attachmentOf(webSocket);
+      if (incoming.closed) return;
+      if (!incoming.participantId && Date.now() >= (incoming.loginDeadline ?? 0)) {
+        this.closeLimited(webSocket,"loginTimeout","登录超时，请重新连接。",undefined,1008);
+        await this.scheduleAlarm();
+        return;
+      }
+      const size = typeof message === "string" ? new TextEncoder().encode(message).byteLength : message.byteLength;
+      const budget = consumeMessage(this.ingress,incoming.budget,size,Date.now());
+      webSocket.serializeAttachment({...incoming,budget:budget.state});
+      if (!budget.allowed) {
+        this.closeLimited(webSocket,"rateLimited",retryMessage(budget.retryAfterSeconds),budget.retryAfterSeconds);
+        await this.scheduleAlarm();
+        return;
+      }
+      if (typeof message !== "string") {
+        this.closeLimited(webSocket,"invalidMessage","消息格式无效。",undefined,1008);
+        return;
+      }
       const text = typeof message === "string" ? message : new TextDecoder().decode(message);
       if (new TextEncoder().encode(text).byteLength > maximumMessageBytes) {
-        webSocket.close(1009, "Message too large");
+        this.closeLimited(webSocket,"messageTooLarge","消息超过大小上限。",undefined,1009);
         return;
       }
       const envelope = JSON.parse(text) as RaceEnvelope;
       if (envelope.protocolVersion !== protocolVersion) {
+        if (!incoming.participantId) {
+          this.closeLimited(webSocket,"protocolMismatch","客户端与服务端协议版本不一致。",undefined,1008);
+          return;
+        }
         this.send(webSocket, "error", { code: "protocolMismatch", message: "客户端与服务端协议版本不一致。" });
         return;
       }
       const attachment = attachmentOf(webSocket);
       if (!attachment.participantId) {
         if (envelope.type !== "login") {
-          this.send(webSocket, "loginRejected", { code: "loginRequired", message: "请先登录比赛服务端。" });
+          this.closeLimited(webSocket,"loginRequired","请先登录比赛服务端。",undefined,1008);
           return;
         }
         await this.loginSocket(webSocket, envelope.payload as LoginRequest);
@@ -462,17 +503,16 @@ export class RaceRoom {
         this.send(webSocket, "lapAcknowledged", lapAcknowledgement);
       else if (pitServiceAcknowledgement)
         this.send(webSocket, "pitServiceAcknowledged", pitServiceAcknowledgement);
-    } catch (error) {
-      this.send(webSocket, "error", {
-        code: "invalidMessage",
-        message: error instanceof Error ? error.message.slice(0, 160) : "消息格式无效。"
-      });
+    } catch {
+      this.closeLimited(webSocket,"invalidMessage","消息格式无效。",undefined,1008);
     }
   }
 
   async webSocketClose(webSocket: WebSocket, code: number, reason: string): Promise<void> {
     await this.initialized;
-    const participantId = attachmentOf(webSocket).participantId;
+    const attachment = attachmentOf(webSocket);
+    webSocket.serializeAttachment({...attachment,closed:true});
+    const participantId = attachment.participantId;
     try { webSocket.close(code, reason); } catch { /* already closed */ }
     if (participantId && !this.hasAnotherSocket(participantId, webSocket) && this.core.disconnect(participantId)) {
       await this.persist();
@@ -487,6 +527,7 @@ export class RaceRoom {
 
   async alarm(): Promise<void> {
     await this.initialized;
+    this.expireLogins();
     this.lastCoreTickAt = Date.now();
     if (this.core.tick()) {
       await this.persist();
@@ -546,10 +587,16 @@ export class RaceRoom {
 
   private async adminLogin(request: Request): Promise<Response> {
     if (!this.isConfigured()) return json({ error: "服务端尚未完成首次设置。" }, 503);
+    const begun = this.loginBudget.begin(transportSource(request),"admin","admin",Date.now());
+    if (!begun.ticket) return tooManyRequests(begun.retryAfterSeconds);
+    let valid = false;
     try {
-      const body = await readJson(request) as { password?: string };
-      const principal = await this.authenticateAdminPassword(body.password ?? "");
+      await this.persistLoginBudget();
+      const body = await readJson(request, this.ingress.loginTimeoutSeconds * 1000) as { password?: string };
+      const principal = typeof body.password === "string" && body.password.length <= 128
+        ? await this.authenticateAdminPassword(body.password) : null;
       if (!principal) return json({ error: "总控密码不正确。" }, 401);
+      valid = true;
       const expires = Date.now() + 12 * 60 * 60 * 1_000;
       const accountVersion = this.controlAccountSessionVersion(principal.id);
       if (!accountVersion) return json({ error: "总控账号不存在。" }, 401);
@@ -559,8 +606,11 @@ export class RaceRoom {
       return json({ serverName: this.env.SERVER_NAME, principal }, 200, {
         "Set-Cookie": `${adminCookieName}=${value}.${signature}; Path=/; Max-Age=43200; HttpOnly; Secure; SameSite=Strict`
       });
-    } catch {
-      return json({ error: "登录请求格式无效。" }, 400);
+    } catch (error) {
+      return json({ error: "登录请求格式无效。" }, error instanceof RequestBodyLimitError ? error.status : 400);
+    } finally {
+      this.loginBudget.complete(begun.ticket,valid);
+      await this.persistLoginBudget();
     }
   }
 
@@ -672,27 +722,61 @@ export class RaceRoom {
       : secureEquals(password, this.env.PLAYER_PASSWORD ?? "");
   }
 
-  private acceptSocket(request: Request): Response {
+  private async acceptSocket(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket")
       return json({ error: "WebSocket upgrade required" }, 426);
+    this.expireLogins();
+    const source = transportSource(request);
+    const pending = this.state.getWebSockets().map(socket=>({...attachmentOf(socket),closed:socket.readyState===WebSocket.CLOSED}));
+    if (!connectionAllowed(this.ingress,pending,source)) return tooManyRequests(this.ingress.loginTimeoutSeconds);
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
-    server.serializeAttachment({} satisfies SocketAttachment);
+    server.serializeAttachment({source,loginDeadline:Date.now()+this.ingress.loginTimeoutSeconds*1000} satisfies SocketAttachment);
     this.state.acceptWebSocket(server);
+    await this.scheduleAlarm();
     return new Response(null, { status: 101, webSocket: client });
   }
 
   private async loginSocket(webSocket: WebSocket, request: LoginRequest): Promise<void> {
-    if (!this.isConfigured() || !await this.playerPasswordMatches(request?.password ?? "")) {
-      this.send(webSocket, "loginRejected", { code: "invalidPassword", message: "比赛密码不正确。" });
+    const attachment=attachmentOf(webSocket);
+    if (attachment.closed || attachment.authenticating) return;
+    webSocket.serializeAttachment({...attachment,authenticating:true});
+    const identity=await loginIdentity(request?.displayName,request?.resumeToken);
+    const begun=this.loginBudget.begin(attachment.source??"unknown","player",identity,Date.now());
+    if (!begun.ticket) {
+      this.closeLimited(webSocket,"rateLimited",retryMessage(begun.retryAfterSeconds),begun.retryAfterSeconds);
       return;
     }
+    let valid=false;
+    try {
+      await this.persistLoginBudget();
+      valid=this.isConfigured() && typeof request?.password === "string" && request.password.length <= 128 && await this.playerPasswordMatches(request.password);
+      if (!valid) {
+        this.closeLimited(webSocket,"invalidPassword","比赛密码不正确。",undefined,1008);
+        return;
+      }
+      if (attachmentOf(webSocket).closed || webSocket.readyState!==WebSocket.OPEN) return;
+      if (Date.now()>=(attachment.loginDeadline??0)) {
+        this.closeLimited(webSocket,"loginTimeout","登录超时，请重新连接。",undefined,1008);
+        return;
+      }
+      await this.finishSocketLogin(webSocket,request);
+    } finally {
+      this.loginBudget.complete(begun.ticket,valid);
+      await this.persistLoginBudget();
+      await this.scheduleAlarm();
+    }
+  }
+
+  private async finishSocketLogin(webSocket: WebSocket, request: LoginRequest): Promise<void> {
     const result = this.core.login(request);
     if (!result.ok) {
-      this.send(webSocket, "loginRejected", { code: result.code, message: result.message });
+      this.closeLimited(webSocket,result.code,result.message,undefined,1008);
       return;
     }
     webSocket.serializeAttachment({
+      ...attachmentOf(webSocket),
+      authenticating: false,
       participantId: result.participantId,
       isObserver: result.isObserver
     } satisfies SocketAttachment);
@@ -1234,7 +1318,7 @@ export class RaceRoom {
   }
 
   private authenticatedSockets(): WebSocket[] {
-    return this.state.getWebSockets().filter(webSocket => Boolean(attachmentOf(webSocket).participantId));
+    return this.state.getWebSockets().filter(webSocket => webSocket.readyState === WebSocket.OPEN && !attachmentOf(webSocket).closed && Boolean(attachmentOf(webSocket).participantId));
   }
 
   private hasAnotherSocket(participantId: string, closed: WebSocket): boolean {
@@ -1256,8 +1340,34 @@ export class RaceRoom {
     if (Date.now() - this.lastTelemetryPersistedAt >= 2_000) await this.persist();
   }
 
+  private persistLoginBudget(): Promise<void> {
+    return this.state.storage.put("ingress-failures-v1",this.loginBudget.serialize());
+  }
+
+  private expireLogins(): void {
+    for (const socket of this.state.getWebSockets()) {
+      const attachment=attachmentOf(socket);
+      if (!attachment.participantId && !attachment.closed && Date.now()>=(attachment.loginDeadline??Infinity))
+        this.closeLimited(socket,"loginTimeout","登录超时，请重新连接。",undefined,1008);
+    }
+  }
+
+  private closeLimited(socket: WebSocket, code: string, message: string, retryAfterSeconds?: number, closeCode=1013): void {
+    const attachment=attachmentOf(socket);
+    if (attachment.closed) return;
+    const payload: ErrorPayload | LoginRejected={code,message,retryAfterSeconds};
+    try { this.send(socket,attachment.participantId?"error":"loginRejected",payload); }
+    finally {
+      socket.serializeAttachment({...attachment,closed:true});
+      try { socket.close(closeCode,code); } catch { /* already closed */ }
+    }
+  }
+
   private async scheduleAlarm(): Promise<void> {
-    const next = this.core.nextAlarmMilliseconds();
+    const deadlines=this.state.getWebSockets().map(socket=>attachmentOf(socket))
+      .filter(item=>!item.participantId&&!item.closed&&item.loginDeadline!==undefined).map(item=>item.loginDeadline!);
+    const raceNext=this.core.nextAlarmMilliseconds();
+    const next=deadlines.length?Math.min(...deadlines,raceNext??Infinity):raceNext;
     if (next === null) {
       await this.state.storage.deleteAlarm();
       return;
@@ -1351,12 +1461,37 @@ function attachmentOf(webSocket: WebSocket): SocketAttachment {
   return (webSocket.deserializeAttachment() as SocketAttachment | null) ?? {};
 }
 
-async function readJson(request: Request): Promise<unknown> {
+class RequestBodyLimitError extends Error {
+  constructor(readonly status: number) { super("Request body limit exceeded."); }
+}
+
+async function readJson(request: Request, timeoutMilliseconds = 12_000): Promise<unknown> {
   const contentLength = Number.parseInt(request.headers.get("Content-Length") ?? "0", 10);
-  if (contentLength > maximumMessageBytes) throw new Error("请求内容过大。");
-  const text = await request.text();
-  if (new TextEncoder().encode(text).byteLength > maximumMessageBytes) throw new Error("请求内容过大。");
-  return JSON.parse(text);
+  if (contentLength > maximumMessageBytes) throw new RequestBodyLimitError(413);
+  const reader = request.body?.getReader();
+  if (!reader) throw new Error("请求格式无效。");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new RequestBodyLimitError(408)), timeoutMilliseconds);
+  });
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const part = await Promise.race([reader.read(), timeout]);
+      if (part.done) break;
+      size += part.value.byteLength;
+      if (size > maximumMessageBytes) throw new RequestBodyLimitError(413);
+      chunks.push(part.value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } finally {
+    clearTimeout(timer);
+    void reader.cancel().catch(() => { /* request already closed */ });
+  }
 }
 
 function json(body: unknown, status = 200, headers?: HeadersInit): Response {
@@ -1374,4 +1509,9 @@ function withSecurityHeaders(response: Response): Response {
   secured.headers.set("Content-Security-Policy",
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:");
   return secured;
+}
+
+function retryMessage(seconds: number): string { return `请求过于频繁，请在 ${seconds} 秒后重试。`; }
+function tooManyRequests(seconds: number): Response {
+  return json({code:"rateLimited",error:retryMessage(seconds),retryAfterSeconds:seconds},429,{"Retry-After":String(seconds),"Cache-Control":"no-store"});
 }

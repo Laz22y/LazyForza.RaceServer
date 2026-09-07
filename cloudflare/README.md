@@ -31,6 +31,35 @@
 
 客户端遥测默认 10 Hz，但房间快照广播最多 10 Hz。服务端不采信遥测消息中的累计圈数，只有唯一且有效的 `lapCompleted` 事件能把服务端权威圈数增加一圈。维修区只记录停留条件和次数，不能证明游戏已经更换轮胎或重置车损。
 
+## 入口保护配置
+
+在 Cloudflare Dashboard 设置普通变量 `INGRESS_LIMITS`，或编辑 `wrangler.jsonc` 的同名变量。值为 JSON 字符串，缺省或 `{}` 使用以下默认配置；无需添加 Secret 或修改协议版本：
+
+```json
+{
+  "loginFailureLimit": 5,
+  "sourceLoginFailureLimit": 120,
+  "loginFailureWindowSeconds": 60,
+  "maximumConcurrentLogins": 32,
+  "maximumFailureBuckets": 4096,
+  "maximumUnauthenticatedConnections": 64,
+  "maximumUnauthenticatedPerSource": 32,
+  "loginTimeoutSeconds": 12,
+  "messagesPerSecond": 60,
+  "messageBurst": 120,
+  "bytesPerSecond": 131072,
+  "byteBurst": 262144
+}
+```
+
+例如 `wrangler.jsonc` 中可设置 `"INGRESS_LIMITS": "{\"loginFailureLimit\":8}"`，其余值保持默认。参数必须为正整数；来源失败额度不得小于单身份额度，单来源连接上限不得超过全局上限。字段含义与原生版相同，见根 README 的入口保护表。
+
+成功登录不消耗失败额度；玩家名字／恢复令牌摘要与来源共同隔离失败窗口，总控通道独立。不要把来源总额度设得过低，否则同 NAT 的集中重连可能遭遇短时 429。已登录的 12 名车手和 12 个 OB 不占未登录连接额度，每条连接独享消息预算。超限 HTTP 返回 `Retry-After`，WS 返回重试秒数后以 1013 关闭；无效／超时登录以 1008 关闭。旧客户端仍能读取文字提示，但可能不会自动遵守重试字段。
+
+仅当请求保留 Cloudflare 平台元数据且不是 Worker 子请求时使用平台 `CF-Connecting-IP`；其余来源回退为 `unknown`。不接受任意 X-Forwarded-For、自定义 IP 头或来自额外 Worker 的来源自报。使用额外代理／Worker／Service Binding 时应核对来源元数据，必要时在边缘做额外保护；不得用伪造头解决共享桶限速。参见 [Cloudflare 来源头说明](https://developers.cloudflare.com/fundamentals/reference/http-headers/)。
+
+失败记录保存到 `ingress-failures-v1`，额度窗口不会因 DO 重建而清空；连接预算和登录期限存于 attachment，alarm 负责超时回收，关闭过程中的未登录连接仍占名额。已部署旧连接缺失这些字段时获得一次初始额度。此存储独立于赛事数据，不需要删除房间或重建数据库。HTTP 请求体最多 64 KiB，慢请求超时会归还验证名额。Vitest 使用确定性的 DO/Socket 模拟，实际 alarm、Hibernation 和公网来源链仍需部署环境验证。
+
 ## 网页一键部署
 
 点击下面的按钮，登录自己的 Cloudflare 账号并确认创建 Worker 与 Durable Object：
@@ -172,3 +201,9 @@ Local tests and dry-runs do not prove public-network reachability or real FH6 mu
 原生与 Cloudflare 的圈完成校验和回执分类保持一致，规则及旧协议限制见上级 [README](../README.md#圈完成校验当前源码)。可选 `stageId` 与 `validationStatus` 保持协议 v2；旧客户端缺少阶段证据仍可提交。待审核圈创建调查并沿用现有计圈规则，不自动处罚。Durable Object 保存圈序和回执分类，重建后重复事件不再次计圈或创建调查。共享测试数据位于 `tests/fixtures/lap-validation-cases.json`，随独立 Cloudflare 包保留。
 
 The current source shares native lap validation and optional protocol v2 fields. Review findings do not automatically penalize drivers; accepted laps retain existing scoring rules. Durable Object state preserves sequence and receipt classification across reconstruction. Shared fixtures are included in this standalone package; see the parent README for compatibility and evidence limits.
+
+### Ingress configuration
+
+`INGRESS_LIMITS` is an optional JSON string in Dashboard variables or wrangler.jsonc. The configuration example above lists all defaults. Failed logins are partitioned by source and player identity; successful verification refunds its reservation and administrators use a separate channel. A higher source threshold bounds identity rotation. Existing authenticated drivers/observers do not consume pending-login slots and each socket has an independent message/byte budget.
+
+HTTP throttling returns 429 and Retry-After; WebSockets include retry seconds before closing with 1013. Invalid or expired logins close with 1008. Failure windows persist in a separate DO storage key, socket budgets/deadlines persist in attachments, and alarms expire pending connections across Hibernation. Only platform source metadata is used; Worker subrequests and missing metadata fall back to unknown, never arbitrary proxy headers. Validate your deployed proxy/Worker chain and use edge protection for distributed abuse; local simulated tests do not replace that validation.

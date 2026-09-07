@@ -55,6 +55,8 @@ serverOptions = serverOptions with
     TrackRevision = initialRoom.TrackRevision,
     TrackPackageHash = initialRoom.TrackPackageHash
 };
+builder.Services.AddSingleton(new IngressProtection(
+    builder.Configuration.GetSection("RaceServer:Ingress").Get<IngressOptions>() ?? new IngressOptions()));
 builder.Services.AddSingleton(serverOptions);
 builder.Services.AddSingleton(configurationStore);
 builder.Services.AddSingleton<IRaceStatePersistence, FileRaceStatePersistence>();
@@ -100,6 +102,9 @@ app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSecond
 app.Use(async (context, next) =>
 {
     var path = context.Request.Path.Value ?? string.Empty;
+    if (path.Equals("/api/admin/login", StringComparison.OrdinalIgnoreCase) &&
+        context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } bodyLimit)
+        bodyLimit.MaxRequestBodySize = RaceProtocol.MaximumMessageBytes;
     if (path.StartsWith("/api/admin/", StringComparison.OrdinalIgnoreCase) &&
         !path.Equals("/api/admin/login", StringComparison.OrdinalIgnoreCase) &&
         !path.Equals("/api/admin/logout", StringComparison.OrdinalIgnoreCase))
@@ -198,9 +203,12 @@ app.Map("/ws", (HttpContext context, RaceWebSocketHandler handler) => handler.Ha
 
 app.MapNativeSetupEndpoints();
 
-app.MapPost("/api/admin/login", (RaceAdminLoginRequest request, HttpContext context, AdminSessionStore sessions) =>
+app.MapPost("/api/admin/login", (RaceAdminLoginRequest request, HttpContext context, AdminSessionStore sessions, IngressProtection ingress) =>
 {
-    var principal = sessions.Authenticate(request.Password);
+    using var attempt = ingress.TryLogin(ingress.Source(context), "admin", "admin", out var retry);
+    if (attempt is null) return IngressHttp.TooManyRequests(context, retry);
+    var principal = request.Password is { Length: <= 128 } ? sessions.Authenticate(request.Password) : null;
+    attempt.Complete(principal is not null);
     if (principal is null) return Results.Json(new { error = "总控密码不正确。" }, statusCode: 401);
     var token = sessions.Create(principal);
     context.Response.Cookies.Append(AdminSessionStore.CookieName, token, new CookieOptions

@@ -158,7 +158,17 @@
       "targets": { "server": "RaceLoginRejected", "client": "RaceLoginRejected", "typescript": "LoginRejected" },
       "fields": [
         { "name": "code", "type": "string" },
-        { "name": "message", "type": "string" }
+        { "name": "message", "type": "string" },
+        { "name": "retryAfterSeconds", "type": "nullable<int32>", "default": null }
+      ]
+    },
+    {
+      "name": "ErrorPayload",
+      "targets": { "server": "RaceErrorPayload", "client": "RaceErrorPayload", "typescript": "ErrorPayload" },
+      "fields": [
+        { "name": "code", "type": "string" },
+        { "name": "message", "type": "string" },
+        { "name": "retryAfterSeconds", "type": "nullable<int32>", "default": null }
       ]
     },
     {
