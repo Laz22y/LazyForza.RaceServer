@@ -75,6 +75,16 @@ builder.Services.AddHostedService<RaceClockService>();
 builder.Services.AddHostedService<RaceEventProjectSyncService>();
 
 var app = builder.Build();
+try
+{
+    app.Services.GetRequiredService<RaceCoordinator>().RestorePersistedState();
+}
+catch (Exception exception) when (exception is IOException or InvalidDataException or JsonException or UnauthorizedAccessException)
+{
+    app.Logger.LogCritical(exception, "赛事恢复失败，服务器未启动，原文件已保留。");
+    Environment.ExitCode = 3;
+    return;
+}
 app.Use(async (context, next) =>
 {
     context.Response.Headers.XContentTypeOptions = "nosniff";

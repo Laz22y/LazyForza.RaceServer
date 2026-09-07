@@ -1,10 +1,17 @@
-using LazyForza.RaceServer.Protocol;
+using System.Text.Json;
 
 namespace LazyForza.RaceServer.Core;
 
+// Internal disk contract, independently versioned from the public wire protocol.
+public sealed record RaceRecoveryState(int Version, DateTimeOffset SavedAt, JsonElement State)
+{
+    public const int CurrentVersion = 1;
+}
+
 public interface IRaceStatePersistence
 {
-    void SaveImportantSnapshot(RaceSessionSnapshot snapshot);
+    RaceRecoveryState? LoadRecoveryState();
+    void SaveRecoveryState(RaceRecoveryState state);
     void AppendAudit(RaceAuditEntry entry);
 }
 
@@ -18,7 +25,7 @@ public sealed record RaceAuditEntry(
 public sealed class NullRaceStatePersistence : IRaceStatePersistence
 {
     public static NullRaceStatePersistence Instance { get; } = new();
-
-    public void SaveImportantSnapshot(RaceSessionSnapshot snapshot) { }
+    public RaceRecoveryState? LoadRecoveryState() => null;
+    public void SaveRecoveryState(RaceRecoveryState state) { }
     public void AppendAudit(RaceAuditEntry entry) { }
 }

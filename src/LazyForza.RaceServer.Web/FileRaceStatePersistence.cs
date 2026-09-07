@@ -19,14 +19,44 @@ public sealed class FileRaceStatePersistence : IRaceStatePersistence
         auditPath = Path.Combine(root, "race-audit.jsonl");
     }
 
-    public void SaveImportantSnapshot(RaceSessionSnapshot snapshot)
+    public RaceRecoveryState? LoadRecoveryState()
     {
-        var json = JsonSerializer.Serialize(snapshot, RaceProtocolJson.Options);
+        lock (sync)
+        {
+            if (!File.Exists(statePath)) return null;
+            using var document = JsonDocument.Parse(File.ReadAllBytes(statePath));
+            if (!document.RootElement.TryGetProperty("version", out _))
+            {
+                // Old snapshots contain no resume identities or deduplication ledger.
+                // Read and validate them, but never invent missing authority or overwrite evidence.
+                _ = document.RootElement.Deserialize<RaceSessionSnapshot>(RaceProtocolJson.Options)
+                    ?? throw new InvalidDataException("旧版赛事快照无效。");
+                throw new InvalidDataException(
+                    "current-race.json 是旧版公开快照，缺少恢复身份和事件去重记录，不能安全续赛。请备份该文件用于核对成绩，再移走原文件以启动新赛事。");
+            }
+            var state = document.RootElement.Deserialize<RaceRecoveryState>(RaceProtocolJson.Options)
+                ?? throw new InvalidDataException("赛事恢复文件为空。");
+            if (state.Version != RaceRecoveryState.CurrentVersion || state.SavedAt == default ||
+                state.State.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException($"不支持或无效的赛事恢复文件版本：{state.Version}。原文件已保留。");
+            return state;
+        }
+    }
+
+    public void SaveRecoveryState(RaceRecoveryState state)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(state, RaceProtocolJson.Options);
         lock (sync)
         {
             var temporary = statePath + ".tmp";
-            File.WriteAllText(temporary, json, new UTF8Encoding(false));
-            File.Move(temporary, statePath, true);
+            using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write,
+                       FileShare.None, 4096, FileOptions.WriteThrough))
+            {
+                stream.Write(bytes);
+                stream.Flush(flushToDisk: true);
+            }
+            // Same-directory replacement: never truncate the last committed checkpoint.
+            File.Move(temporary, statePath, overwrite: true);
         }
     }
 

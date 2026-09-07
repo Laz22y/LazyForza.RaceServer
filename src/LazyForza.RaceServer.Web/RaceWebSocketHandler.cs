@@ -96,6 +96,16 @@ public sealed class RaceWebSocketHandler(
             if (socket.State == WebSocketState.Open)
                 await SendErrorAsync(socket, "invalidMessage", "消息格式无效。", CancellationToken.None);
         }
+        catch (IOException exception)
+        {
+            logger.LogError(exception, "赛事状态未能持久保存；关闭连接，不发送成功回执。");
+            socket.Abort();
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            logger.LogError(exception, "赛事状态文件不可写；关闭连接，不发送成功回执。");
+            socket.Abort();
+        }
         catch (WebSocketException exception)
         {
             logger.LogDebug(exception, "Race WebSocket closed unexpectedly.");
@@ -143,6 +153,9 @@ public sealed class RaceWebSocketHandler(
                         participantId, socket, "observerReadOnly", "OB 不能提交圈速。", cancellationToken);
                 var completed = RaceProtocolJson.DeserializePayload<RaceLapCompleted>(envelope);
                 var result = coordinator.CompleteLap(participantId, completed);
+                if (result.IsDeferred)
+                    return SendRegisteredErrorAsync(participantId, socket, "commandRejected",
+                        result.Error!, cancellationToken);
                 return SendRegisteredAsync(
                     participantId,
                     socket,
@@ -157,6 +170,9 @@ public sealed class RaceWebSocketHandler(
                         participantId, socket, "observerReadOnly", "OB 不能提交维修停留。", cancellationToken);
                 var completed = RaceProtocolJson.DeserializePayload<RacePitServiceCompleted>(envelope);
                 var result = coordinator.CompletePitService(participantId, completed);
+                if (result.IsDeferred)
+                    return SendRegisteredErrorAsync(participantId, socket, "commandRejected",
+                        result.Error!, cancellationToken);
                 return SendRegisteredAsync(
                     participantId,
                     socket,

@@ -19,6 +19,7 @@ public sealed class RaceClockService(
                 {
                     var now = DateTimeOffset.UtcNow;
                     coordinator.Tick(now);
+                    coordinator.Checkpoint(now);
                     if (now < nextHeartbeatAt) continue;
                     broadcasts.Queue(coordinator.Snapshot(now));
                     nextHeartbeatAt = now.AddSeconds(1);

@@ -59,6 +59,18 @@ chmod +x ./LazyForza.RaceServer.Web
 
 公网部署应由 Caddy、Nginx 或同类反向代理终止 TLS，让客户端连接 `wss://`。不要直接暴露明文 `ws://`。
 
+### 原生重启恢复（当前源码）
+
+原生版将内部恢复状态以独立格式版本 `1` 保存到 `data/current-race.json`。状态包含房间规则、阶段及计时、车手和 OB 恢复身份、成绩与分段、处罚执行状态、阶段赛果、调查与碰撞回放，以及圈完成和维修完成事件的去重集合。此文件包含恢复令牌，仅供服务器本地使用，不是公开计时快照或可分发的赛事项目包。
+
+关键状态更改会同步保存；普通遥测通过约两秒一次的检查点保存。文件先写入同目录临时文件并刷新到磁盘，再原子替换完整状态。圈／维修的成功回执在该保存完成后发送，重复事件也必须经过保存确认。保存失败不会发送成功回执；未收到回执并不代表事件一定未被保存，客户端需使用原事件 ID 重试。JSONL 审计日志用于追溯，不作为恢复成绩的权威来源。
+
+启动时在监听端口和运行赛事时钟前加载状态。进行中的赛事恢复为红旗暂停，车手连接标记为断开；管理员核对成绩、处罚和车手重连情况后，发布**全场绿旗**确认续赛，或返回大厅开始新赛事。等待确认期间不会自动推进计时、执行停车处罚或接受新的圈／维修事件；已保存事件的重复提交仍可确认。续赛会排除从最后检查点到确认时刻的停机等待时间，重新建立遥测连续性，尚未完成的停车执行重新计时，已执行处罚保持已执行。完成的赛事和大厅不自动进入新的比赛。
+
+旧版 `current-race.json` 只有公开快照，缺少恢复令牌和去重信息，不能安全转换为可续赛状态。遇到旧版、损坏或未知版本文件时，启动会报错退出并保留原文件；旧版升级需先备份该快照用于核对成绩，再移走原文件以启动新赛事。未完成的临时文件不会替代最后完整检查点。旧版成功回执不具备可追溯补齐的完整恢复保证。
+
+内部文件版本独立于协议 v2，无需新增 Schema 字段或客户端消息。Cloudflare 已通过 Durable Object storage 保存内部状态并在保存后确认事件，常规对象唤醒继续使用原有恢复流程，不套用原生进程重启的人工续赛等待。
+
 ## Cloudflare Durable Objects
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Laz22y/LazyForza.RaceServer/tree/main/cloudflare)
@@ -184,6 +196,18 @@ After initialization, the server listens on `http://0.0.0.0:24876` by default. A
 Administrators and super admins can generate regular viewer and transparent broadcast links from the Public Live Timing panel. The read-only token is independent of Race Control accounts and is shown only when generated; rotating or disabling it invalidates every previous link immediately.
 
 For public hosting, terminate TLS through Caddy, Nginx or a similar reverse proxy and connect clients over `wss://`. Do not expose plain `ws://` publicly.
+
+#### Native restart recovery (current source)
+
+The native server stores internal recovery format version `1` in `data/current-race.json`: room rules, phases and clocks, driver and observer resume identities, lap and sector results, penalty execution state, archived stage results, investigations and collision replays, and lap/pit event deduplication records. This file contains resume tokens and must remain private to the server.
+
+Important changes are saved synchronously; ordinary telemetry is checkpointed about every two seconds. The server writes and flushes a temporary file in the same directory, then atomically replaces the complete state file. Successful lap and pit acknowledgements are sent only after persistence completes, including duplicate submissions. A failed save produces no successful acknowledgement. A missing receipt does not prove that an event was not saved: retry with its original event ID. The JSONL audit log is not the authoritative recovery source.
+
+State loads before listeners and clocks start. An active session returns under a red flag with disconnected drivers. An administrator reviews results, penalties and reconnecting drivers, then restores **full-course green** to resume, or returns to the lobby to start a new session. While awaiting confirmation, clocks and penalty service stay frozen and new lap/pit events remain deferred; saved duplicates may still be acknowledged. Resumption excludes the interval from the last checkpoint to confirmation. Live telemetry continuity is rebuilt and unfinished stationary penalty service restarts; served penalties remain served. Finished sessions and the lobby do not automatically start another race.
+
+Legacy public snapshots lack resume identities and deduplication records, so they cannot be safely converted into resumable sessions. Startup preserves legacy, corrupt or unknown-version files and exits with an error. Back up a legacy snapshot for results review, then move it out of the data directory before starting a new session. Incomplete temporary files never replace the last committed checkpoint. Older server receipts do not retroactively gain recovery guarantees.
+
+The internal format is independent of wire protocol v2 and needs no new Schema fields or client messages. Cloudflare already persists internal state in Durable Object storage before acknowledging events; normal object wakeups retain that workflow and do not enter the native process-restart confirmation gate.
 
 ### Cloudflare Durable Objects
 
