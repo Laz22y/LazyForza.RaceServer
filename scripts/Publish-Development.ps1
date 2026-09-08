@@ -136,13 +136,10 @@ if ($CloudflareLabel -or $PackageVersion) {
     foreach ($directory in @('public', 'scripts', 'src', 'tests')) {
         New-Item -ItemType Directory -Force -Path (Join-Path $cloudflareStage $directory) | Out-Null
     }
-    $cloudflarePublicInputs = Get-ChildItem -LiteralPath (Join-Path $cloudflareRoot 'public') -File -Recurse |
-        ForEach-Object { [System.IO.Path]::GetRelativePath($cloudflareRoot, $_.FullName).Replace('\', '/') }
-    foreach ($relative in @($cloudflarePublicInputs) + @(
-            'src/control-access.ts', 'src/event-projects.ts', 'src/index.ts', 'src/passwords.ts', 'src/protocol.generated.ts', 'src/protocol.ts', 'src/public-timing.ts', 'src/race-core.ts', 'src/rule-templates.ts', 'src/track-package.ts',
-            'scripts/generate-repository-assets.mjs',
-            'tests/control-access.test.ts', 'tests/event-projects.test.ts', 'tests/passwords.test.ts', 'tests/public-timing.test.ts', 'tests/race-core.test.ts', 'tests/rule-templates.test.ts', 'tests/track-package.test.ts', 'tests/web-localization.test.ts',
-            'package-lock.json', 'package.json', 'README.md', 'tsconfig.json', 'wrangler.jsonc')) {
+    $cloudflareInputsJson = & node (Join-Path $cloudflareRoot 'scripts/list-package-inputs.mjs')
+    if ($LASTEXITCODE -ne 0) { throw 'Cloudflare package input discovery failed.' }
+    $cloudflareInputs = $cloudflareInputsJson | ConvertFrom-Json
+    foreach ($relative in $cloudflareInputs) {
         $source = [System.IO.Path]::GetFullPath((Join-Path $cloudflareRoot $relative))
         if (!$source.StartsWith(
                 $cloudflareRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) +

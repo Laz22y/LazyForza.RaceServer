@@ -1,5 +1,9 @@
 // @ts-expect-error Vitest runs these source-integrity tests in Node.js.
 import { readFileSync, readdirSync } from "node:fs";
+// @ts-expect-error Package input discovery runs in Node.js.
+import { execFileSync } from "node:child_process";
+// @ts-expect-error Package input discovery runs in Node.js.
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const publicUrl = (name: string) => new URL(`../public/${name}`, import.meta.url);
@@ -59,21 +63,15 @@ describe("Race Control localization", () => {
     const localization = readFileSync(publicUrl("i18n.js"), "utf8");
     expect(localization).not.toContain("'placeholder', 'title', 'value'");
 
-    const packageScript = readFileSync(
-      new URL("../../scripts/Publish-Development.ps1", import.meta.url),
-      "utf8");
-    expect(packageScript).toContain("$cloudflarePublicInputs = Get-ChildItem");
-    expect(packageScript).toContain("GetRelativePath($cloudflareRoot, $_.FullName)");
-    expect(packageScript).toContain("'src/protocol.generated.ts'");
-    expect(packageScript).toContain("'scripts/generate-repository-assets.mjs'");
-    expect(packageScript).toContain("'src/rule-templates.ts'");
-    expect(packageScript).toContain("'tests/rule-templates.test.ts'");
-    expect(packageScript).toContain("'src/event-projects.ts'");
-    expect(packageScript).toContain("'tests/event-projects.test.ts'");
-    expect(packageScript).toContain("'src/control-access.ts'");
-    expect(packageScript).toContain("'tests/control-access.test.ts'");
-    expect(packageScript).toContain("'src/public-timing.ts'");
-    expect(packageScript).toContain("'tests/public-timing.test.ts'");
+    const inputs: string[] = JSON.parse(execFileSync("node", [
+      fileURLToPath(new URL("../scripts/list-package-inputs.mjs", import.meta.url))
+    ], { encoding: "utf8" }));
+    for (const required of ["public/index.html", "public/i18n.js", "src/protocol.generated.ts",
+      "src/lap-validation.ts", "src/ingress-protection.ts", "tests/ingress-routes.test.ts",
+      "tests/fixtures/lap-validation-cases.json", "scripts/generate-repository-assets.mjs"])
+      expect(inputs).toContain(required);
+    expect(inputs.some(path => path.startsWith("node_modules/") || path.startsWith(".wrangler/"))).toBe(false);
+
   });
 
   it("translates every fixed Chinese Web label and JavaScript literal", () => {

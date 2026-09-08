@@ -4,6 +4,8 @@
 
 ## 简体中文
 
+预览版 `0.6.0-alpha-1` 推荐搭配 LazyForza `1.5.3-alpha-1`，新增原生重启恢复、双端圈完成校验和连接限速。协议保持 v2，新增字段为可选；旧客户端仍可连接，但不能提供新的阶段与校验证据。原生成功事件回执在持久保存后发送；重启恢复先等待管理员确认。旧版公开快照缺少身份和去重信息，不能安全续赛，升级前应备份并归档旧快照。
+
 开发或修改 Cloudflare 实现前先读仓库根目录 [`AGENTS.md`](../AGENTS.md)。Cloudflare 与原生 ASP.NET 是同一服务端的两套实现，对客户端可见的协议、比赛行为、管理接口和 Web 总控必须保持一致。
 
 这个目录提供与 LazyForza 地产赛事客户端协议 v2 兼容的 Cloudflare Workers + Durable Objects 服务端。协议模型和 Web 静态资源由仓库根目录的单一 Schema 与原生 `wwwroot` 生成，Cloudflare 包保留已提交产物，因此仍可脱离上级目录独立构建和部署。一个 Worker 固定使用一个名为 `main` 的赛事房间，支持 1–12 名车手，并可额外连接最多 12 个只读 OB 席位。OB 不占车手名额，可在比赛进行中加入，只接收赛事数据用于观赛或转播。
@@ -123,6 +125,8 @@ npm run dev
 本地测试和 dry-run 不等于中国大陆网络直连或真实 FH6 多机联机验证。实际使用前仍应从参赛车手所在网络测试 HTTPS、WebSocket 握手、10 Hz 状态更新和短时断线恢复。
 
 ## English
+
+Preview `0.6.0-alpha-1` is recommended with LazyForza `1.5.3-alpha-1`, adding native restart recovery, consistent lap validation and ingress limits. Protocol v2 uses optional additions; older clients can connect but cannot supply new stage and validation evidence. Native success receipts follow durable storage, and restored races await administrator confirmation. Legacy public snapshots lack recovery identities and deduplication records; back up and archive them before starting a new race after upgrade.
 
 Read the repository-level [`AGENTS.md`](../AGENTS.md) before changing the Cloudflare implementation. Cloudflare Durable Objects and native ASP.NET are equal RaceServer targets and must keep the same client protocol, race behavior, management API and Race Control features.
 

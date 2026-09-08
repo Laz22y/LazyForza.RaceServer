@@ -4,6 +4,8 @@
 
 ## 简体中文
 
+预览版 `0.6.0-alpha-1` 推荐搭配 LazyForza `1.5.3-alpha-1`，新增原生重启恢复、双端圈完成校验和连接限速。协议保持 v2，新增字段为可选；旧客户端仍可连接，但不能提供新的阶段与校验证据。原生成功事件回执在持久保存后发送；重启恢复先等待管理员确认。旧版公开快照缺少身份和去重信息，不能安全续赛，升级前应备份并归档旧快照。
+
 LazyForza 地产赛事的独立服务端。支持原生 ASP.NET 自托管和 Cloudflare Durable Objects，两套实现保持同一协议与 Web 总控功能。
 
 0.5.0 新增令牌保护的公开实时计时、赛事规则模板、可迁移赛事项目、多角色总控账号和发车前检查；原生首次初始化改为仅限服务器终端，并恢复换胎出站后的实时 Delta。
@@ -181,6 +183,8 @@ dotnet run --project src/LazyForza.RaceServer.Web/LazyForza.RaceServer.Web.cspro
 [MIT](LICENSE)。LazyForza RaceServer 是非官方社区项目，与 Microsoft、Xbox 或 Playground Games 无隶属关系。
 
 ## English
+
+Preview `0.6.0-alpha-1` is recommended with LazyForza `1.5.3-alpha-1`, adding native restart recovery, consistent lap validation and ingress limits. Protocol v2 uses optional additions; older clients can connect but cannot supply new stage and validation evidence. Native success receipts follow durable storage, and restored races await administrator confirmation. Legacy public snapshots lack recovery identities and deduplication records; back up and archive them before starting a new race after upgrade.
 
 LazyForza RaceServer is the independent server for estate racing. Native ASP.NET self-hosting and Cloudflare Durable Objects provide the same protocol, race behavior and browser Race Control.
 
