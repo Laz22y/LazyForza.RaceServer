@@ -1836,8 +1836,8 @@ public sealed class RaceCoordinatorTests
             new RaceAdminSessionCommand(RaceSessionPhase.Race, "实机进站时序", 6, null, null),
             started).IsAccepted);
 
-        // The first grid crossing arms timing without a lap event, so live
-        // progress is already one physical lap ahead of authoritative laps.
+        // The first grid crossing arms lap zero without a scored lap event.
+        // Both drivers must remain on the same continuous distance axis.
         coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(0, .98), started.AddSeconds(1));
         coordinator.UpdateTelemetry(pitting.ParticipantId, Telemetry(0, .97), started.AddSeconds(2));
         coordinator.UpdateTelemetry(leader.ParticipantId, Telemetry(0, .01), started.AddSeconds(3));
@@ -1878,11 +1878,62 @@ public sealed class RaceCoordinatorTests
             .001,
             "实机中圈完成事件可能晚于出站；Delta 必须先按已确认的维修通行恢复。");
 
+        coordinator.UpdateTelemetry(pitting.ParticipantId, Telemetry(0, .35), started.AddSeconds(78));
+        var liveBeforeReceipt = coordinator.Snapshot(started.AddSeconds(78)).Participants
+            .Single(item => item.Id == pitting.ParticipantId).RaceDeltaSecondsByReference![leader.ParticipantId];
         CompleteLap(coordinator, pitting.ParticipantId, 1, 85, started.AddSeconds(80));
         var afterLapEvent = coordinator.Snapshot(started.AddSeconds(80));
+        Assert.AreEqual(liveBeforeReceipt, afterLapEvent.Participants.Single(item => item.Id == pitting.ParticipantId)
+            .RaceDeltaSecondsByReference![leader.ParticipantId], .001,
+            "出站超过四分之一圈后的迟到回执不能再次增加物理圈进度，也不能退回冲线时间差。");
         Assert.IsTrue(afterLapEvent.Participants.Single(item => item.Id == pitting.ParticipantId)
                 .RaceDeltaSecondsByReference!.ContainsKey(leader.ParticipantId),
             "迟到的圈完成事件不能再次补圈并破坏已经恢复的 Delta。");
+    }
+
+    [TestMethod]
+    public void RaceDeltaPitStateFlickerOnSameSideOfFinishDoesNotCreateAPhantomLap()
+    {
+        var coordinator = CreateCoordinator();
+        var leader = Join(coordinator, 1).Accepted!.ParticipantId;
+        var follower = Join(coordinator, 2).Accepted!.ParticipantId;
+        var start = DateTimeOffset.Parse("2026-09-11T14:51:00Z");
+        coordinator.ApplySessionCommand(new(RaceSessionPhase.Race, null, 10, null, null), start);
+        coordinator.UpdateTelemetry(leader, Telemetry(0, .4), start.AddSeconds(24));
+        coordinator.UpdateTelemetry(follower, Telemetry(0, .4), start.AddSeconds(27));
+        coordinator.UpdateTelemetry(follower, Telemetry(0, .42) with { IsInPitLane = true, IsOnPitRoute = true }, start.AddSeconds(28));
+        coordinator.UpdateTelemetry(leader, Telemetry(0, .5), start.AddSeconds(30));
+        coordinator.UpdateTelemetry(follower, Telemetry(0, .5), start.AddSeconds(35));
+        Assert.AreEqual(5, coordinator.Snapshot(start.AddSeconds(35)).Participants.Single(item => item.Id == follower)
+            .RaceDeltaSecondsByReference![leader], .001);
+        coordinator.UpdateTelemetry(leader, Telemetry(0, .6), start.AddSeconds(37));
+        coordinator.UpdateTelemetry(follower, Telemetry(0, .6), start.AddSeconds(43));
+        var snapshot = coordinator.Snapshot(start.AddSeconds(43));
+        Assert.AreEqual(6, snapshot.Participants.Single(item => item.Id == follower).RaceDeltaSecondsByReference![leader], .001);
+        Assert.IsTrue(snapshot.Participants.All(item => item.CompletedLaps == 0), "Telemetry must not score laps.");
+    }
+
+    [TestMethod]
+    public void RaceDeltaIgnoresStalePreFinishTelemetryAfterAcceptedEventAndContinuesUpdating()
+    {
+        var coordinator = CreateCoordinator();
+        var leader = Join(coordinator, 1).Accepted!.ParticipantId;
+        var follower = Join(coordinator, 2).Accepted!.ParticipantId;
+        var start = DateTimeOffset.Parse("2026-09-11T14:51:00Z");
+        coordinator.ApplySessionCommand(new(RaceSessionPhase.Race, null, 10, null, null), start);
+        coordinator.UpdateTelemetry(leader, Telemetry(0, .8), start.AddSeconds(48));
+        coordinator.UpdateTelemetry(follower, Telemetry(0, .8), start.AddSeconds(50));
+        CompleteLap(coordinator, leader, 1, 60, start.AddSeconds(60));
+        coordinator.UpdateTelemetry(leader, Telemetry(0, .99), start.AddSeconds(60.01));
+        CompleteLap(coordinator, follower, 1, 63, start.AddSeconds(63));
+        coordinator.UpdateTelemetry(leader, Telemetry(1, .1), start.AddSeconds(66));
+        coordinator.UpdateTelemetry(follower, Telemetry(1, .1), start.AddSeconds(70));
+        Assert.AreEqual(4, coordinator.Snapshot(start.AddSeconds(70)).Participants.Single(item => item.Id == follower)
+            .RaceDeltaSecondsByReference![leader], .001);
+        coordinator.UpdateTelemetry(leader, Telemetry(1, .2), start.AddSeconds(72));
+        coordinator.UpdateTelemetry(follower, Telemetry(1, .2), start.AddSeconds(78));
+        Assert.AreEqual(6, coordinator.Snapshot(start.AddSeconds(78)).Participants.Single(item => item.Id == follower)
+            .RaceDeltaSecondsByReference![leader], .001);
     }
 
     [TestMethod]

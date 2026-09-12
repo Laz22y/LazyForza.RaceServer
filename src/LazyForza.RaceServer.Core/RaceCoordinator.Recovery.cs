@@ -145,6 +145,9 @@ public sealed partial class RaceCoordinator
                 participant.ProgressContinuityReady = false;
                 participant.RaceProgressContinuityReady = false;
                 participant.RaceProgressSamples.Clear();
+                participant.RaceProgressInitialized = false;
+                participant.RaceProgressAwaitingWrap = false;
+                participant.RaceProgressPitTransitActive = false;
                 participant.LapValidationSamples.Clear();
                 participant.AutomaticYellowActive = false;
                 participant.HazardCandidateStartedAt = null;

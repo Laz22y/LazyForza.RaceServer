@@ -193,6 +193,9 @@ interface RaceProgressSample {
 }
 
 interface RaceProgressTracker {
+  initialized: boolean;
+  awaitingWrap: boolean;
+  pitEntryProgress: number;
   lastProgress: number;
   lapOffset: number;
   ready: boolean;
@@ -3660,6 +3663,9 @@ export class RaceCore {
     now: Date,
     isPitRoute: boolean): void {
     const tracker = this.liveProgressTrackers.get(participant.id) ?? {
+      initialized: false,
+      awaitingWrap: false,
+      pitEntryProgress: 0,
       lastProgress: 0,
       lapOffset: 0,
       ready: false,
@@ -3673,11 +3679,21 @@ export class RaceCore {
     }
 
     const progress = clamp(participant.trackProgress, 0, 1);
-    if (tracker.pitTransitActive) {
-      tracker.lapOffset = Math.max(tracker.lapOffset, tracker.pitEntryLapOffset + 1);
-      tracker.pitTransitActive = false;
+    if (!tracker.initialized) {
+      // The grid crossing arms lap zero; it is not an additional scored lap.
+      tracker.lapOffset = participant.completedLaps === 0 && this.raceElapsedSeconds(now) < 10 && progress > .75
+        ? -1 : participant.completedLaps;
+      tracker.initialized = true;
     }
-    if (tracker.ready && progress < tracker.lastProgress - .75) tracker.lapOffset++;
+    if (tracker.awaitingWrap) {
+      if (progress > .75) return; // A stale pre-line packet after its reliable event.
+      tracker.awaitingWrap = false;
+    }
+    if (tracker.pitTransitActive) {
+      if (tracker.pitEntryProgress >= .75 && progress <= .25)
+        tracker.lapOffset = Math.max(tracker.lapOffset, tracker.pitEntryLapOffset + 1);
+      tracker.pitTransitActive = false;
+    } else if (tracker.ready && progress < tracker.lastProgress - .75) tracker.lapOffset++;
     tracker.lastProgress = progress;
     tracker.ready = true;
     this.liveProgressTrackers.set(participant.id, tracker);
@@ -3689,14 +3705,18 @@ export class RaceCore {
 
   private markRaceProgressPitTransit(participantId: string): void {
     const tracker = this.liveProgressTrackers.get(participantId) ?? {
+      initialized: false,
+      awaitingWrap: false,
+      pitEntryProgress: 0,
       lastProgress: 0,
       lapOffset: 0,
       ready: false,
       pitTransitActive: false,
       pitEntryLapOffset: 0
     };
-    if (!tracker.pitTransitActive) {
+    if (!tracker.pitTransitActive && tracker.initialized) {
       tracker.pitTransitActive = true;
+      tracker.pitEntryProgress = tracker.lastProgress;
       tracker.pitEntryLapOffset = tracker.lapOffset;
     }
     this.liveProgressTrackers.set(participantId, tracker);
@@ -3704,21 +3724,25 @@ export class RaceCore {
 
   private reconcileRaceProgressAtCompletedLap(participant: ParticipantState, now: Date): void {
     const tracker = this.liveProgressTrackers.get(participant.id) ?? {
+      initialized: false,
+      awaitingWrap: false,
+      pitEntryProgress: 0,
       lastProgress: 0,
       lapOffset: 0,
       ready: false,
       pitTransitActive: false,
       pitEntryLapOffset: 0
     };
-    const crossingAlreadyObserved = tracker.lastProgress <= .25;
-    const eventOffset = tracker.lapOffset + (crossingAlreadyObserved ? 0 : 1);
-    const pitTransitOffset = tracker.pitTransitActive ? tracker.pitEntryLapOffset + 1 : 0;
-    tracker.lapOffset = Math.max(eventOffset, participant.completedLaps, pitTransitOffset);
-    const finishDistance = tracker.lapOffset;
-    tracker.lastProgress = 0;
-    tracker.ready = false;
+    // Events set a lower bound, independent of where a delayed event arrives.
+    if (!tracker.initialized || tracker.lapOffset < participant.completedLaps) {
+      tracker.initialized = true;
+      tracker.lapOffset = participant.completedLaps;
+      tracker.awaitingWrap = true;
+      tracker.lastProgress = 0;
+      tracker.ready = false;
+    }
     this.liveProgressTrackers.set(participant.id, tracker);
-    this.appendRaceProgressSample(participant.id, finishDistance, this.raceElapsedSeconds(now));
+    this.appendRaceProgressSample(participant.id, participant.completedLaps, this.raceElapsedSeconds(now));
   }
 
   private appendRaceProgressSample(participantId: string, distanceLaps: number, elapsedSeconds: number): void {

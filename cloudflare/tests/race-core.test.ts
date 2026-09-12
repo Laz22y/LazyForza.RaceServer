@@ -1339,11 +1339,51 @@ describe("RaceCore", () => {
       .participants.find(item => item.id === pitting)!;
     expect(beforeLapEvent.raceDeltaSecondsByReference?.[leader]).toBeCloseTo(10, 3);
 
+    core.updateTelemetry(pitting, { ...telemetry(), trackProgress: .35 },
+      new Date(started.getTime() + 78_000));
+    const liveBeforeReceipt = core.snapshot(new Date(started.getTime() + 78_000))
+      .participants.find(item => item.id === pitting)!.raceDeltaSecondsByReference![leader];
     core.completeLap(pitting, lap("pitting-1", 85, true, 1),
       new Date(started.getTime() + 80_000));
     const afterLapEvent = core.snapshot(new Date(started.getTime() + 80_000))
       .participants.find(item => item.id === pitting)!;
-    expect(afterLapEvent.raceDeltaSecondsByReference?.[leader]).toBeDefined();
+    expect(afterLapEvent.raceDeltaSecondsByReference?.[leader]).toBeCloseTo(liveBeforeReceipt, 3);
+  });
+
+  it("keeps Delta live after a same-side pit flicker without scoring a phantom lap", () => {
+    const core = createCore(), leader = connect(core, "甲"), follower = connect(core, "乙");
+    const start = new Date("2026-09-11T14:51:00Z");
+    const at = (s: number) => new Date(start.getTime() + s * 1000);
+    core.applySession({ phase: "race", totalRaceLaps: 10 }, start);
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .4 }, at(24));
+    core.updateTelemetry(follower, { ...telemetry(), trackProgress: .4 }, at(27));
+    core.updateTelemetry(follower, { ...telemetry(), trackProgress: .42, isInPitLane: true, isOnPitRoute: true }, at(28));
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .5 }, at(30));
+    core.updateTelemetry(follower, { ...telemetry(), trackProgress: .5 }, at(35));
+    expect(core.snapshot(at(35)).participants.find(p => p.id === follower)!.raceDeltaSecondsByReference![leader]).toBeCloseTo(5, 3);
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .6 }, at(37));
+    core.updateTelemetry(follower, { ...telemetry(), trackProgress: .6 }, at(43));
+    const snapshot = core.snapshot(at(43));
+    expect(snapshot.participants.find(p => p.id === follower)!.raceDeltaSecondsByReference![leader]).toBeCloseTo(6, 3);
+    expect(snapshot.participants.every(p => p.completedLaps === 0)).toBe(true);
+  });
+
+  it("keeps Delta updating when stale pre-finish telemetry arrives after its accepted event", () => {
+    const core = createCore(), leader = connect(core, "甲"), follower = connect(core, "乙");
+    const start = new Date("2026-09-11T14:51:00Z");
+    const at = (s: number) => new Date(start.getTime() + s * 1000);
+    core.applySession({ phase: "race", totalRaceLaps: 10 }, start);
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .8 }, at(48));
+    core.updateTelemetry(follower, { ...telemetry(), trackProgress: .8 }, at(50));
+    core.completeLap(leader, lap("leader-1", 60, true, 1), at(60));
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .99 }, at(60.01));
+    core.completeLap(follower, lap("follower-1", 63, true, 1), at(63));
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .1 }, at(66));
+    core.updateTelemetry(follower, { ...telemetry(), trackProgress: .1 }, at(70));
+    expect(core.snapshot(at(70)).participants.find(p => p.id === follower)!.raceDeltaSecondsByReference![leader]).toBeCloseTo(4, 3);
+    core.updateTelemetry(leader, { ...telemetry(), trackProgress: .2 }, at(72));
+    core.updateTelemetry(follower, { ...telemetry(), trackProgress: .2 }, at(78));
+    expect(core.snapshot(at(78)).participants.find(p => p.id === follower)!.raceDeltaSecondsByReference![leader]).toBeCloseTo(6, 3);
   });
 
   it("waits for fresh telemetry before a reconnected driver affects live order", () => {

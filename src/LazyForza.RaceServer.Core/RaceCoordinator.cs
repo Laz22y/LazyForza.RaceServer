@@ -3660,15 +3660,31 @@ public sealed partial class RaceCoordinator
         }
 
         var progress = Math.Clamp(participant.TrackProgress, 0, 1);
+        if (!participant.RaceProgressInitialized)
+        {
+            // A grid position just behind the line precedes lap zero, not lap one.
+            // Keep all drivers on the same distance axis even if their first packet
+            // arrives just after the grid crossing. This never changes scored laps.
+            participant.RaceProgressLapOffset = participant.CompletedLaps == 0 &&
+                RaceElapsedSeconds(now) < 10 && progress > .75 ? -1 : participant.CompletedLaps;
+            participant.RaceProgressInitialized = true;
+        }
+        if (participant.RaceProgressAwaitingWrap)
+        {
+            // A pre-line telemetry packet may arrive after its reliable lap event.
+            if (progress > .75) return;
+            participant.RaceProgressAwaitingWrap = false;
+        }
         if (participant.RaceProgressPitTransitActive)
         {
-            participant.RaceProgressLapOffset = Math.Max(
-                participant.RaceProgressLapOffset,
-                participant.RaceProgressPitEntryLapOffset + 1);
+            // Only a branch spanning the finish advances distance. A pit-state
+            // flicker or a detour returning on the same side cannot add a lap.
+            if (participant.RaceProgressPitEntryProgress >= .75 && progress <= .25)
+                participant.RaceProgressLapOffset = Math.Max(participant.RaceProgressLapOffset,
+                    participant.RaceProgressPitEntryLapOffset + 1);
             participant.RaceProgressPitTransitActive = false;
         }
-        if (participant.RaceProgressContinuityReady &&
-            progress < participant.LastRaceProgress - 0.75)
+        else if (participant.RaceProgressContinuityReady && progress < participant.LastRaceProgress - .75)
             participant.RaceProgressLapOffset++;
         participant.LastRaceProgress = progress;
         participant.RaceProgressContinuityReady = true;
@@ -3679,8 +3695,9 @@ public sealed partial class RaceCoordinator
 
     private static void MarkRaceProgressPitTransit(ParticipantState participant)
     {
-        if (participant.RaceProgressPitTransitActive) return;
+        if (participant.RaceProgressPitTransitActive || !participant.RaceProgressInitialized) return;
         participant.RaceProgressPitTransitActive = true;
+        participant.RaceProgressPitEntryProgress = participant.LastRaceProgress;
         participant.RaceProgressPitEntryLapOffset = participant.RaceProgressLapOffset;
     }
 
@@ -3688,21 +3705,18 @@ public sealed partial class RaceCoordinator
         ParticipantState participant,
         DateTimeOffset now)
     {
-        // If telemetry has already wrapped to the start of the route, the
-        // crossing is already reflected in the offset. Otherwise the lap event
-        // supplies the missing wrap (including a finish reached through pit lane).
-        var crossingAlreadyObserved = participant.LastRaceProgress <= 0.25;
-        var eventOffset = participant.RaceProgressLapOffset + (crossingAlreadyObserved ? 0 : 1);
-        var pitTransitOffset = participant.RaceProgressPitTransitActive
-            ? participant.RaceProgressPitEntryLapOffset + 1
-            : 0;
-        participant.RaceProgressLapOffset = Math.Max(
-            Math.Max(eventOffset, participant.CompletedLaps),
-            pitTransitOffset);
-        var finishDistance = (double)participant.RaceProgressLapOffset;
-        participant.LastRaceProgress = 0;
-        participant.RaceProgressContinuityReady = false;
-        AppendRaceProgressSample(participant, finishDistance, RaceElapsedSeconds(now));
+        // Accepted lap events supply a lower bound on physical progress. Never
+        // add another wrap based on the driver's current position: the event may
+        // arrive anywhere in the following lap, including after pit exit.
+        if (!participant.RaceProgressInitialized || participant.RaceProgressLapOffset < participant.CompletedLaps)
+        {
+            participant.RaceProgressInitialized = true;
+            participant.RaceProgressLapOffset = participant.CompletedLaps;
+            participant.RaceProgressAwaitingWrap = true;
+            participant.LastRaceProgress = 0;
+            participant.RaceProgressContinuityReady = false;
+        }
+        AppendRaceProgressSample(participant, participant.CompletedLaps, RaceElapsedSeconds(now));
     }
 
     private static void AppendRaceProgressSample(
@@ -4080,6 +4094,9 @@ public sealed partial class RaceCoordinator
             participant.DisconnectedLapRecoveryUntil = null;
             participant.RaceProgressSamples.Clear();
             participant.RaceProgressLapOffset = 0;
+            participant.RaceProgressInitialized = false;
+            participant.RaceProgressAwaitingWrap = false;
+            participant.RaceProgressPitEntryProgress = 0;
             participant.LastRaceProgress = 0;
             participant.RaceProgressContinuityReady = false;
             participant.RaceProgressPitTransitActive = false;
@@ -4166,6 +4183,9 @@ public sealed partial class RaceCoordinator
             participant.DisconnectedLapRecoveryUntil = null;
             participant.RaceProgressSamples.Clear();
             participant.RaceProgressLapOffset = 0;
+            participant.RaceProgressInitialized = false;
+            participant.RaceProgressAwaitingWrap = false;
+            participant.RaceProgressPitEntryProgress = 0;
             participant.LastRaceProgress = 0;
             participant.RaceProgressContinuityReady = false;
             participant.RaceProgressPitTransitActive = false;
@@ -4640,6 +4660,9 @@ public sealed partial class RaceCoordinator
         public DateTimeOffset? DisconnectedLapRecoveryUntil { get; set; }
         public List<RaceProgressSample> RaceProgressSamples { get; set; } = [];
         public int RaceProgressLapOffset { get; set; }
+        public bool RaceProgressInitialized { get; set; }
+        public bool RaceProgressAwaitingWrap { get; set; }
+        public double RaceProgressPitEntryProgress { get; set; }
         public double LastRaceProgress { get; set; }
         public bool RaceProgressContinuityReady { get; set; }
         public bool RaceProgressPitTransitActive { get; set; }
