@@ -18,6 +18,8 @@
     "loginAccepted": "loginAccepted",
     "loginRejected": "loginRejected",
     "ready": "ready",
+    "leave": "leave",
+    "left": "left",
     "telemetry": "telemetry",
     "lapCompleted": "lapCompleted",
     "lapAcknowledged": "lapAcknowledged",
@@ -496,7 +498,8 @@
         { "name": "occurredAt", "type": "timestamp", "names": { "server": "at" } },
         { "name": "type", "type": "string" },
         { "name": "message", "type": "string" },
-        { "name": "participantId", "type": "nullable<uuid>", "default": null }
+        { "name": "participantId", "type": "nullable<uuid>", "default": null },
+        { "name": "eventId", "type": "nullable<uuid>", "default": null }
       ]
     },
     {
@@ -587,7 +590,8 @@
         { "name": "minimumRequiredPitStops", "type": "int32", "default": 1 },
         { "name": "automaticCollisionInvestigationsEnabled", "type": "boolean", "default": false, "exclude": ["server", "client"] },
         { "name": "disconnectedLapRecoveryEnabled", "type": "boolean", "default": false },
-        { "name": "stageId", "type": "nullable<uuid>", "default": null }
+        { "name": "stageId", "type": "nullable<uuid>", "default": null },
+        { "name": "eventId", "type": "nullable<uuid>", "default": null }
       ]
     },
     {
@@ -626,7 +630,8 @@
         { "name": "trackName", "type": "nullable<string>" },
         { "name": "fastestParticipantId", "type": "nullable<uuid>" },
         { "name": "fastestLapSeconds", "type": "nullable<float64>" },
-        { "name": "participants", "type": "array<model:StageResultParticipantSnapshot>" }
+        { "name": "participants", "type": "array<model:StageResultParticipantSnapshot>" },
+        { "name": "eventId", "type": "nullable<uuid>", "default": null }
       ]
     },
     {

@@ -33,6 +33,23 @@
 
 客户端遥测默认 10 Hz，但房间快照广播最多 10 Hz。服务端不采信遥测消息中的累计圈数，只有唯一且有效的 `lapCompleted` 事件能把服务端权威圈数增加一圈。维修区只记录停留条件和次数，不能证明游戏已经更换轮胎或重置车损。
 
+## 长期房间与赛事管理（当前源码，尚未发行）
+
+总控分为「比赛现场」「赛事项目」「规则与赛程」「赛果与记录」「服务器」。顶部始终显示当前项目和比赛阶段，项目支持搜索及状态筛选。
+
+- **一场赛事、一个项目**：练习、排位和正赛属于同一场赛事。新建项目只保存当前配置、赛程与素材，不带入上一场成绩。编辑资料仅修改名称、主办方等信息；在「规则与赛程」保存时更新当前房间和活动项目。
+- **模板是规则副本**：应用模板后可以继续修改，保存房间不会反向修改模板。房间赛程也会保存，重新打开网页不会回到默认值。比赛进行中须先返回大厅才能改规则；正赛完成后先准备新一场。
+- **准备新一场**：在大厅或比赛结束后操作，先保留上一项目的成绩、处罚和记录，再清理实时成绩、处罚与离线占位。在线车手保留身份，但需要重新准备。启用草稿项目时同时载入其规则、赛程、赛道和 Logo。已完成项目需要复制后用于下一场；导入带赛果的项目视为已完成。
+- **退出与掉线分开**：客户端主动退出房间或关闭模块会发送 `leave`，服务端持久释放身份后才回复 `left` 并正常关闭连接（1000）。车手席位、名称和 OB 名额随之释放，已产生的成绩及处罚留在阶段赛果中。暂时掉线保留恢复身份；大厅中掉线占位在五分钟后释放，比赛进行中保留到主动退出、总控移除或准备新一场。旧客户端没有主动退出消息时，可等待大厅清理或由总控移除。
+
+协议仍为 v2。`leave` / `left` 与快照、阶段赛果、审计事件上的可选 `eventId` 均从现有 Schema 生成三端模型。新客户端只有收到 `left` 才删除已保存的恢复令牌；连接旧服务端时，等待最多一秒后断开并保留令牌，不承诺立即释放。旧客户端忽略可选字段，已有阶段及事件去重规则继续生效。`eventId` 是 LazyForza 服务端的赛事归属标识，不是 FH6 官方赛事 ID。
+
+原生内部恢复格式仍为 v1，新增可选赛事归属；项目交换包也保持 v1 并增加可选归属字段。缺少标识的旧记录归入旧赛事组，保留原记录，不根据名称猜测并拆分历史比赛。旧版已释放的车手记录会先保存为阶段成绩，再释放运行缓冲。只含公开快照、更早期且缺少恢复身份的文件仍按上文规则拒绝续赛。
+
+原生切换通过版本 1 的 `pending-event.json` 保存切换意图，再更新赛事、配置、素材及项目。成功响应表示这些保存已完成；中途失败保留恢复记录，阻止其他管理修改，允许重试切换。启动时在对外监听前重放未完成的切换，不会重复创建一场赛事。Cloudflare 将同一组变更放入 Durable Object 存储事务，提交后才替换内存状态和响应。升级前备份完整数据目录／导出项目；如需退回旧程序，恢复升级前的数据备份，不混用新旧运行状态。
+
+总控保留近期 24 个阶段结果；长期办赛应使用项目保存、导出和归档记录。项目数量及审计记录仍受现有容量限制。原生重启后的管理员续赛确认规则不变，Cloudflare 对象正常唤醒沿用既有行为。
+
 ## 入口保护配置
 
 在 Cloudflare Dashboard 设置普通变量 `INGRESS_LIMITS`，或编辑 `wrangler.jsonc` 的同名变量。值为 JSON 字符串，缺省或 `{}` 使用以下默认配置；无需添加 Secret 或修改协议版本：
@@ -145,6 +162,16 @@ Protocol models and browser assets are generated from the repository-level schem
 - public live timing protected by an independent read-only token, with phone, tablet and transparent broadcast layouts.
 
 Client telemetry defaults to 10 Hz and room snapshots are broadcast at no more than 10 Hz. Only a unique valid `lapCompleted` event advances the authoritative lap count. Pit state records location and dwell conditions; it cannot prove that the game changed tires or repaired damage.
+
+### Persistent rooms and event management (current source, unreleased)
+
+Race Control now separates Live race, Events, Rules & schedule, Results & log, and Server. One project owns one event across practice, qualifying and race. New projects copy configuration and assets without old results; metadata edits preserve rules. Rule templates are reusable copies. Room schedules persist, and saving rules updates the active project. Return to the lobby to change rules; after a completed race, prepare the next event first.
+
+Preparing another event retains archived results and penalties, releases offline seats and resets live competition state; connected drivers keep their identity and must ready again. Completed projects are copied for reuse. Imported projects with results are completed records. Explicit client departure uses `leave` / `left`: the server persists identity release before acknowledging and closing normally (1000). Temporary disconnections retain recovery identity; lobby reservations expire after five minutes. Older clients need lobby expiry or administrator removal.
+
+Protocol v2 remains, with Schema-generated leave messages and optional `eventId` ownership fields. New clients clear saved resume tokens only after `left`; old servers time out after one second and the token remains saved. Native recovery and project export formats stay at v1 with optional ownership. Legacy records without an event ID remain one legacy group; old released driver entries are compacted into results before removing runtime buffers.
+
+Native event switches use a versioned `pending-event.json` intent, replayed before listening after interruption. Success means event state, settings, assets and project ownership are saved. Cloudflare commits the equivalent change in one Durable Object storage transaction. Back up all data before upgrading; restore the pre-upgrade backup when reverting to older binaries. Recent room history retains 24 stages; save/export projects for long-term records. Existing native restart confirmation and Cloudflare wake-up behavior remain unchanged.
 
 ### One-click deployment
 

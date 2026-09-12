@@ -15,6 +15,36 @@ namespace LazyForza.RaceServer.Tests;
 public sealed class RaceRecoveryTests
 {
     [TestMethod]
+    public void LegacyReleasedDriversBecomeHistoryWithoutLosingTheActiveReservation()
+    {
+        using var data = new TestData();
+        var original = data.Create();
+        var joined = original.TryJoin(Login()).Accepted!;
+        StartRace(original);
+        Assert.IsTrue(original.CompleteLap(joined.ParticipantId, Lap()).IsAccepted);
+        var document = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(data.StatePath))!;
+        var state = document["state"]!;
+        var entries = state["participants"]!.AsArray();
+        var active = entries[0]!.DeepClone();
+        entries.Clear();
+        for (var i = 0; i < 12; i++)
+        {
+            var retired = active.DeepClone();
+            retired["id"] = Guid.NewGuid(); retired["resumeToken"] = $"retired-{i}";
+            retired["reservationActive"] = false; retired["isConnected"] = false;
+            entries.Add(retired);
+        }
+        entries.Add(active);
+        state.AsObject().Remove("eventId");
+        File.WriteAllText(data.StatePath, document.ToJsonString());
+        var restored = data.Restore();
+        Assert.AreEqual(joined.ParticipantId, restored.Snapshot().Participants.Single().Id);
+        Assert.AreEqual(Guid.Empty, restored.Snapshot().EventId);
+        Assert.HasCount(13, restored.Results().Single().Participants);
+        Assert.HasCount(13, data.Restore().Results().Single().Participants);
+    }
+
+    [TestMethod]
     public void RebuiltCoordinatorPreservesReviewReceiptAndLapSequence()
     {
         using var data = new TestData();
@@ -203,6 +233,42 @@ public sealed class RaceRecoveryTests
         var restoredObserver = rebuilt.TryJoin(observerLogin with { ResumeToken = observer.ResumeToken }).Accepted!;
         Assert.AreEqual(observer.ParticipantId, restoredObserver.ParticipantId);
         Assert.IsTrue(restoredObserver.IsObserver);
+    }
+
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task LeaveReceiptMeansIdentityWasReleasedBeforeProcessReconstruction(bool observer)
+    {
+        using var data = new TestData();
+        var configuration = new RaceServerConfigurationStore(data.Options);
+        Assert.IsTrue(configuration.ConfigureInitial(new("player-pass", "admin-pass", "Leave recovery", 5, 3)).Success);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var token = timeout.Token;
+        RaceLoginAccepted joined;
+        var login = Login() with { IsObserver = observer };
+        await using (var host = await NativeHost.Start(data.Options.DataDirectory, token))
+        {
+            using var socket = await host.Connect(token);
+            joined = await LoginSocket(socket, login, token);
+            await Send(socket, RaceMessageTypes.Leave, new { }, token);
+            _ = await Receive<JsonElement>(socket, RaceMessageTypes.Left, token);
+            var saved = new FileRaceStatePersistence(data.Options).LoadRecoveryState()!;
+            Assert.AreEqual(0, saved.State.GetProperty(observer ? "observers" : "participants").GetArrayLength());
+            var buffer = new byte[RaceProtocol.MaximumMessageBytes];
+            WebSocketReceiveResult closing;
+            do { closing = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token); }
+            while (closing.MessageType != WebSocketMessageType.Close);
+            Assert.AreEqual(WebSocketCloseStatus.NormalClosure, closing.CloseStatus);
+            await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "left", token);
+            host.Kill();
+        }
+        await using (var host = await NativeHost.Start(data.Options.DataDirectory, token))
+        {
+            using var socket = await host.Connect(token);
+            var next = await LoginSocket(socket, login, token);
+            Assert.AreNotEqual(joined.ParticipantId, next.ParticipantId);
+        }
     }
 
     [TestMethod]

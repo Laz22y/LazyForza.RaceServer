@@ -287,6 +287,7 @@ export interface StoredRaceState {
   eventSequence: number;
   revokedResumeTokens?: string[];
   activeResultStageId?: string | null;
+  eventId?: string | null;
   resultHistory?: StageResultSnapshot[];
 }
 
@@ -488,6 +489,7 @@ export class RaceCore {
       collisionReplays: {},
       receivedLapEvents: []
       ,receivedPitServiceEvents: []
+      ,eventId: crypto.randomUUID()
       ,activeResultStageId: null
       ,resultHistory: []
       ,sectorCount: clampInteger(configuration.sectorCount ?? 3, 1, 20)
@@ -512,6 +514,16 @@ export class RaceCore {
       ,events: []
       ,eventSequence: 0
     };
+    // Older rooms retained released drivers in the live array. Preserve their
+    // results before dropping buffers, without truncating active reservations.
+    const retired = this.state.participants.filter(p => p.reservationActive === false);
+    if (retired.length) {
+      this.archiveActiveResult(new Date(), this.currentResultIsComplete());
+      for (const p of retired) this.revokeResumeToken(p.resumeToken);
+      const ids = new Set(retired.map(p => p.id));
+      this.state.participants = this.state.participants.filter(p => !ids.has(p.id));
+      this.state.penalties = this.state.penalties.filter(p => !ids.has(p.participantId));
+    }
   }
 
   serialize(): StoredRaceState {
@@ -571,11 +583,12 @@ export class RaceCore {
     const displayName = cleanText(request.displayName, 20);
     const resumeToken = cleanText(request.resumeToken, 256);
     if (resumeToken && (this.state.revokedResumeTokens ?? []).some(token =>
-      constantTimeTextEquals(token, resumeToken)))
+      constantTimeTextEquals(token, resumeToken)) || (resumeToken && !request.isObserver &&
+      !this.state.participants.some(p => p.reservationActive !== false && constantTimeTextEquals(p.resumeToken, resumeToken))))
       return {
         ok: false,
         code: "disconnectedByControl",
-        message: "赛事总控已断开这个客户端。再次手动进入房间时可以重新申请席位。"
+        message: "原席位已释放或恢复身份已失效，请重新手动加入房间。"
       };
     const isObserver = request.isObserver === true;
     const resumed = !isObserver && resumeToken
@@ -1145,8 +1158,10 @@ export class RaceCore {
   }
 
   applyRoomSettings(command: RoomSettings, now = new Date()): CommandResult {
-    if (["outLap", "formationLap", "countdown", "race", "suspended"].includes(this.state.phase))
-      return rejected("发车后不能修改房间规则。请先返回大厅。");
+    if (this.state.resultHistory?.some(result => (result.eventId ?? "00000000-0000-0000-0000-000000000000") === this.state.eventId && result.phase === "race" && result.isComplete))
+      return rejected("本场正赛已结束，请先准备新一场或启用新项目。");
+    if (this.state.phase !== "lobby")
+      return rejected("比赛进行中不能修改房间规则。请先返回大厅。");
     const sessionName = cleanText(command.sessionName, 64);
     if (!sessionName) return rejected("赛事名称不能为空。");
     const trackName = cleanText(command.trackName, 128), trackId = cleanText(command.trackId, 128);
@@ -1294,6 +1309,9 @@ export class RaceCore {
   }
 
   applySession(command: SessionCommand, now = new Date()): CommandResult {
+    if (!["lobby", "finished"].includes(command.phase) && this.state.resultHistory?.some(result =>
+        (result.eventId ?? "00000000-0000-0000-0000-000000000000") === this.state.eventId && result.phase === "race" && result.isComplete))
+      return rejected("本场正赛已结束，请先准备新一场或启用新项目。");
     if (command.phase === "countdown" && command.forceStart !== true) {
       const preRaceCheck = this.preRaceCheck(now);
       if (preRaceCheck.warnings.length > 0)
@@ -1314,6 +1332,7 @@ export class RaceCore {
       case "lobby":
         this.resetCompetitiveState();
         this.state.phase = "lobby";
+        this.pruneLobbyReservations(now);
         this.state.flag = "green";
         this.state.flagMessage = null;
         this.state.activeResultStageId = null;
@@ -1594,7 +1613,25 @@ export class RaceCore {
     return accepted();
   }
 
-  disconnectAndReleaseClient(clientId: string, now = new Date()): CommandResult {
+  beginEvent(id: string = crypto.randomUUID(), name?: string, now = new Date()): CommandResult {
+    if (!["lobby", "finished"].includes(this.state.phase)) return rejected("请先结束当前阶段或返回大厅，再准备新赛事。");
+    if (id === this.state.eventId) return accepted();
+    this.archiveActiveResult(now, this.currentResultIsComplete());
+    for (const p of this.state.participants.filter(p => !p.isConnected)) this.revokeResumeToken(p.resumeToken);
+    this.state.participants = this.state.participants.filter(p => p.isConnected);
+    this.resetCompetitiveState();
+    this.state.eventId = id;
+    this.state.activeResultStageId = null;
+    this.state.phase = "lobby";
+    this.state.flag = "green";
+    this.state.flagMessage = null;
+    if (name?.trim()) this.state.sessionName = name.trim().slice(0,64);
+    this.recordEvent("eventPrepared", "新赛事已准备，在线车手需重新准备。", null, now);
+    this.touch();
+    return accepted();
+  }
+
+  disconnectAndReleaseClient(clientId: string, now = new Date(), voluntary = false): CommandResult {
     const participant = this.find(clientId);
     if (participant) {
       if (participant.reservationActive === false) return rejected("该车手已经由总控断开。");
@@ -1602,7 +1639,7 @@ export class RaceCore {
       this.revokeResumeToken(participant.resumeToken);
       participant.reservationActive = false;
       participant.isConnected = false;
-      participant.displayName = `${releasedName} · 已断开`;
+      // Keep the historical name; reservationActive controls name reuse.
       if (!terminal(participant.status))
         participant.status = this.state.phase === "race" ? "didNotFinish" : "disconnected";
       if (this.state.phase === "race") participant.finishedAt ??= now.toISOString();
@@ -1616,7 +1653,11 @@ export class RaceCore {
       this.completePracticeIfReady(now);
       this.refreshYellowFlag(now);
       this.tryCompleteRaceIfReady(now);
-      this.recordEvent("participantRemoved", `赛事总控断开了 ${releasedName}，显示名称已释放。`, participant.id, now);
+      this.archiveActiveResult(now, this.currentResultIsComplete());
+      this.state.participants = this.state.participants.filter(p => p.id !== participant.id);
+      this.state.penalties = this.state.penalties.filter(p => p.participantId !== participant.id);
+      this.collisionTrajectories.delete(participant.id);
+      this.recordEvent(voluntary ? "participantLeft" : "participantRemoved", voluntary ? `${releasedName} 离开房间，席位与名称已释放。` : `赛事总控断开了 ${releasedName}，显示名称已释放。`, participant.id, now);
       this.touch();
       return accepted();
     }
@@ -1629,8 +1670,18 @@ export class RaceCore {
     return accepted();
   }
 
+  private pruneLobbyReservations(now: Date): boolean {
+    if (this.state.phase !== "lobby") return false;
+    const expired = this.state.participants.filter(p => p.reservationActive === false ||
+      (!p.isConnected && now.getTime() - Date.parse(p.lastSeenAt) >= 300_000));
+    for (const p of expired) this.revokeResumeToken(p.resumeToken);
+    this.state.participants = this.state.participants.filter(p => !expired.includes(p));
+    return expired.length > 0;
+  }
+
   tick(now = new Date()): boolean {
-    let changed = this.expireDisconnectedLapRecoveries(now);
+    let changed = this.pruneLobbyReservations(now);
+    changed = this.expireDisconnectedLapRecoveries(now) || changed;
     if (this.state.phase === "countdown" && this.state.startsAt && this.state.startSequenceAt) {
       if (now.getTime() >= Date.parse(this.state.startsAt)) {
         this.state.phase = "race";
@@ -1708,11 +1759,14 @@ export class RaceCore {
       const sequenceAt = Date.parse(this.state.startSequenceAt);
       values.push(sequenceAt + this.state.illuminatedStartLights * 1_000);
     }
+    if (this.state.phase === "lobby") values.push(...this.state.participants
+      .filter(p => !p.isConnected && p.reservationActive !== false)
+      .map(p => Date.parse(p.lastSeenAt) + 300_000).filter(Number.isFinite));
     return values.length === 0 ? null : Math.min(...values);
   }
 
-  snapshot(now = new Date()): SessionSnapshot {
-    const ordered = this.orderParticipants(now).filter(participant => participant.reservationActive !== false);
+  snapshot(now = new Date(), includeReleased = false): SessionSnapshot {
+    const ordered = this.orderParticipants(now, includeReleased).filter(participant => includeReleased || participant.reservationActive !== false);
     const leader = ordered[0];
     const pairwiseRaceDeltas = this.buildPairwiseRaceDeltas(ordered, now);
     let prior: ParticipantState | undefined;
@@ -1834,6 +1888,7 @@ export class RaceCore {
         })),
       serverTime: now.toISOString(),
       stageId: this.state.activeResultStageId ?? null,
+      eventId: this.state.eventId,
       yellowZones: this.yellowZones(),
       sectorCount: this.state.sectorCount,
       allowTeams: this.state.allowTeams,
@@ -1893,7 +1948,7 @@ export class RaceCore {
         ? stored.practiceSessionMinutes.slice(0, 3).map(value => clampInteger(value, 1, 180))
         : [60],
       banner: stored.banner ?? null,
-      participants: Array.isArray(stored.participants) ? stored.participants.slice(0, 12).map(participant => ({
+      participants: Array.isArray(stored.participants) ? stored.participants.map(participant => ({
         ...participant,
         reservationActive: participant.reservationActive ?? true,
         qualifyingFinalLapPending: participant.qualifyingFinalLapPending ?? false,
@@ -2030,6 +2085,7 @@ export class RaceCore {
       ,revokedResumeTokens: Array.isArray(stored.revokedResumeTokens)
         ? stored.revokedResumeTokens.map(token => cleanText(token, 256)).filter((token): token is string => Boolean(token)).slice(-100)
         : []
+      ,eventId: stored.eventId ?? "00000000-0000-0000-0000-000000000000"
       ,activeResultStageId: cleanText(stored.activeResultStageId, 80) ??
         (["practice", "qualifying", "race", "finished", "suspended"].includes(stored.phase)
           ? crypto.randomUUID() : null)
@@ -2037,7 +2093,7 @@ export class RaceCore {
         ? stored.resultHistory.slice(-24).map(result => ({
           ...result,
           participants: Array.isArray(result.participants)
-            ? result.participants.slice(0, 12).map(participant => ({
+            ? result.participants.map(participant => ({
               ...participant,
               penalties: Array.isArray(participant.penalties)
                 ? participant.penalties.map(penalty => ({ ...penalty })) : []
@@ -3268,6 +3324,7 @@ export class RaceCore {
   }
 
   private resetCompetitiveState(): void {
+    this.state.participants = this.state.participants.filter(p => p.reservationActive !== false);
     this.clearYellowState();
     this.state.chequeredImminent = false;
     this.state.penalties = [];
@@ -3822,8 +3879,8 @@ export class RaceCore {
     return result;
   }
 
-  private orderParticipants(now: Date): ParticipantState[] {
-    const participants = this.state.participants.filter(participant => participant.reservationActive !== false);
+  private orderParticipants(now: Date, includeReleased = false): ParticipantState[] {
+    const participants = this.state.participants.filter(participant => includeReleased || participant.reservationActive !== false);
     if ((this.state.phase === "qualifying" || this.state.phase === "grid") &&
         (this.state.qualifyingSessionCount ?? 1) > 1) {
       const count = this.state.qualifyingSessionCount ?? 1;
@@ -3949,7 +4006,7 @@ export class RaceCore {
         ? this.state.phaseBeforeSuspension
         : this.state.phase;
     if (activePhase !== "practice" && activePhase !== "qualifying" && activePhase !== "race") return;
-    const snapshot = this.snapshot(now);
+    const snapshot = this.snapshot(now, true);
     const sessionNumber = activePhase === "practice"
       ? Math.max(1, this.state.practiceSessionNumber ?? 1)
       : activePhase === "qualifying"
@@ -3967,6 +4024,7 @@ export class RaceCore {
         : "正赛";
     const archived: StageResultSnapshot = {
       id,
+      eventId: this.state.eventId,
       phase: activePhase,
       label,
       sessionNumber,
@@ -3997,6 +4055,17 @@ export class RaceCore {
     };
     this.state.resultHistory ??= [];
     const existingIndex = this.state.resultHistory.findIndex(result => result.id === id);
+    if (existingIndex >= 0) {
+      const ids = new Set(archived.participants.map(p => p.id));
+      const entrants = [...this.state.resultHistory[existingIndex].participants.filter(p => !ids.has(p.id)), ...archived.participants];
+      entrants.sort(activePhase === "race" ? (a,b) => terminalRank(a.status)-terminalRank(b.status) ||
+        b.completedLaps-a.completedLaps ||
+        (a.status === "finished" ? (a.adjustedRaceTotalSeconds??Number.MAX_VALUE)-(b.adjustedRaceTotalSeconds??Number.MAX_VALUE) : 0) || b.trackProgress-a.trackProgress
+        : (a,b) => (a.bestLapSeconds??Number.MAX_VALUE)-(b.bestLapSeconds??Number.MAX_VALUE));
+      archived.participants = entrants.map((p,index)=>({...p,position:index+1}));
+      const fastest = entrants.filter(p=>p.status!=="disqualified"&&(p.bestLapSeconds??0)>0).sort((a,b)=>a.bestLapSeconds!-b.bestLapSeconds!)[0];
+      archived.fastestParticipantId=fastest?.id??null;archived.fastestLapSeconds=fastest?.bestLapSeconds??null;
+    }
     if (existingIndex >= 0) this.state.resultHistory[existingIndex] = archived;
     else this.state.resultHistory.push(archived);
     if (this.state.resultHistory.length > 24)
@@ -4025,6 +4094,7 @@ export class RaceCore {
     this.state.eventSequence = (this.state.eventSequence ?? 0) + 1;
     this.state.events.push({
       sequence: this.state.eventSequence,
+      eventId: this.state.eventId,
       occurredAt: now.toISOString(),
       type,
       message,

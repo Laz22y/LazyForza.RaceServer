@@ -1350,6 +1350,57 @@ public sealed class RaceCoordinatorTests
     }
 
     [TestMethod]
+    public void VoluntaryLeaveAndLobbyExpiryReleaseSlotsAcrossLongRunningRoom()
+    {
+        var core = CreateCoordinator(maximumParticipants: 1);
+        var first = Join(core, 1).Accepted!;
+        core.Disconnect(first.ParticipantId);
+        Assert.IsFalse(Join(core, 1).IsAccepted);
+        Assert.AreEqual(first.ParticipantId, core.TryJoin(Login(1) with { ResumeToken = first.ResumeToken }).Accepted!.ParticipantId);
+        core.Disconnect(first.ParticipantId);
+        core.Tick(DateTimeOffset.UtcNow.AddMinutes(6));
+        Assert.AreEqual(0, core.Snapshot().Participants.Count);
+        for (var i = 0; i < 150; i++)
+        {
+            var joined = Join(core, 1).Accepted!;
+            Assert.IsTrue(core.DisconnectAndReleaseClient(joined.ParticipantId, voluntary: true).IsAccepted);
+        }
+        Assert.AreEqual("disconnectedByControl", core.TryJoin(Login(1) with { ResumeToken = first.ResumeToken }).Rejected!.Code);
+        Assert.IsTrue(Join(core, 1).IsAccepted);
+        Assert.IsTrue(core.Events().Any(e => e.Type == "participantLeft"));
+    }
+
+    [TestMethod]
+    public void FinishedEventCannotStartAgainUntilExplicitlyPrepared()
+    {
+        var core = CreateCoordinator();
+        var driver = Join(core, 1).Accepted!;
+        var id = core.Snapshot().EventId;
+        Assert.IsTrue(core.ApplySessionCommand(new(RaceSessionPhase.Race, null, 1, null, null)).IsAccepted);
+        CompleteLap(core, driver.ParticipantId, 1, 60, DateTimeOffset.UtcNow);
+        Assert.AreEqual(RaceSessionPhase.Finished, core.Snapshot().Phase);
+        core.ApplySessionCommand(new(RaceSessionPhase.Lobby, null, null, null, null));
+        Assert.IsFalse(core.ApplySessionCommand(new(RaceSessionPhase.Practice, null, null, null, null)).IsAccepted);
+        Assert.IsTrue(core.BeginEvent().IsAccepted);
+        Assert.AreNotEqual(id, core.Snapshot().EventId);
+        Assert.IsTrue(core.ApplySessionCommand(new(RaceSessionPhase.Practice, null, null, null, null)).IsAccepted);
+    }
+
+    [TestMethod]
+    public void ReleasedDriverKeepsStageResultAndOriginalName()
+    {
+        var core = CreateCoordinator(); var joined = Join(core, 1).Accepted!;
+        core.ApplySessionCommand(new(RaceSessionPhase.Practice, null, null, null, null));
+        CompleteLap(core, joined.ParticipantId, 1, 60, DateTimeOffset.UtcNow);
+        core.DisconnectAndReleaseClient(joined.ParticipantId, voluntary: true);
+        core.ApplySessionCommand(new(RaceSessionPhase.Lobby, null, null, null, null));
+        var result = core.Results().Single().Participants.Single();
+        Assert.AreEqual(Login(1).DisplayName, result.DisplayName);
+        Assert.AreEqual(1, result.CompletedLaps);
+        Assert.IsTrue(Join(core, 1).IsAccepted);
+    }
+
+    [TestMethod]
     public void RaceControlDisconnectReleasesNameAndSlotWithoutDeletingAuditHistory()
     {
         var coordinator = CreateCoordinator(maximumParticipants: 1);
@@ -2289,7 +2340,9 @@ public sealed class RaceCoordinatorTests
         Assert.AreEqual(1, pendingInvestigation.LapNumber);
         Assert.AreEqual(0, warningOnly.PendingTimePenaltySeconds, 0.0001);
 
+        Assert.IsTrue(coordinator.ApplySessionCommand(new(RaceSessionPhase.Lobby, null, null, null, null)).IsAccepted);
         SetTrackLimitMode(coordinator, TrackLimitEnforcementMode.Disabled);
+        Assert.IsTrue(coordinator.ApplySessionCommand(new(RaceSessionPhase.Qualifying, null, null, null, 10), started).IsAccepted);
         var disabled = gained with
         {
             ClientMonotonicMilliseconds = 30_000,
@@ -2307,7 +2360,7 @@ public sealed class RaceCoordinatorTests
             disabled with { ClientMonotonicMilliseconds = 30_950, TrackProgress = .78, LateralOffsetMeters = 0 },
             started.AddSeconds(7.95));
         Assert.HasCount(0, coordinator.Snapshot().Participants.Single().Penalties);
-        Assert.HasCount(1, coordinator.Snapshot().Investigations!);
+        Assert.HasCount(0, coordinator.Snapshot().Investigations!);
     }
 
     [TestMethod]

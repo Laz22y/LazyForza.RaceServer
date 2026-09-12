@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/teams.css?v=20260820-1">
   <link rel="stylesheet" href="/events.css?v=20260820-1">
   <link rel="stylesheet" href="/results.css?v=20260823-1">
+  <link rel="stylesheet" href="/workspace.css?v=20260912-3">
 </head>
 <body>
   <main class="shell">
@@ -75,8 +76,8 @@
       </section>
 
       <section id="eventProjects" class="panel event-project-panel" data-permission="manage">
-        <div class="section-heading"><div><p class="eyebrow">EVENT PROJECTS</p><h2>赛事项目包</h2></div><span id="eventProjectCount" class="section-note">尚未创建赛事项目</span></div>
-        <p class="muted compact">将赛事资料、当前房间规则、赛程、车队、赛道、Logo、阶段赛果与赛事记录保存为一个可复用项目，并可通过 .lfzevent 在两种服务端之间迁移。</p>
+        <div class="section-heading"><div><p class="eyebrow">EVENT PROJECTS</p><h2>赛事项目</h2></div><span id="eventProjectCount" class="section-note">尚未创建赛事项目</span></div>
+        <p class="muted compact">一个项目对应一场赛事，包含规则、赛程、素材与本场记录。完成后复制用于下一场，或通过 .lfzevent 导出交接。</p>
         <div class="event-project-workspace">
           <form id="eventProjectForm" class="event-project-form">
             <div class="event-project-fields">
@@ -86,7 +87,7 @@
               <label>计划开始时间<input id="eventProjectStart" type="datetime-local"></label>
               <label class="event-project-description">赛事说明<textarea id="eventProjectDescription" maxlength="1000" rows="2" placeholder="选填；用于项目归档和交接"></textarea></label>
             </div>
-            <div class="event-project-form-actions"><button id="saveEventProject" type="submit" class="primary">从当前房间创建项目</button><button id="cancelEventProjectEdit" type="button" class="quiet hidden">取消编辑</button><span id="eventProjectEditHint" class="muted compact">创建时会保存当前赛程、已固化赛果与现有赛事记录。</span></div>
+            <div class="event-project-form-actions"><button id="saveEventProject" type="submit" class="primary">从当前房间创建项目</button><button id="cancelEventProjectEdit" type="button" class="quiet hidden">取消编辑</button><span id="eventProjectEditHint" class="muted compact">新项目保存当前规则、赛程和素材；启用后单独记录本场赛果。</span></div>
           </form>
           <div class="event-project-import">
             <div><strong>导入赛事项目包</strong><p class="muted compact">导入项目保持原有标识；若本机已有同一项目，则自动创建新副本。导入不会直接改变当前房间。</p></div>
@@ -281,6 +282,7 @@
     </section>
   </div>
   <script src="/i18n.js?v=20260830-1" defer></script>
-  <script src="/app.js?v=20260830-1" defer></script>
+  <script src="/app.js?v=20260912-3" defer></script>
+  <script src="/workspace.js?v=20260912-3" defer></script>
 </body>
 </html>

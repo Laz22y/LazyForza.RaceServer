@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   activateEventProject,
+  captureEventProject,
   copyEventProject,
   createEventProject,
   eventProjectContentDisposition,
@@ -55,6 +56,32 @@ describe("event projects", () => {
     expect(copied.project.auditEvents).toEqual([]);
   });
 
+  it("isolates results by event and retains rules while editing metadata", async () => {
+    const a = createEventProject([],request("A"),context());
+    const b = createEventProject(a.projects,request("B"),context());
+    const active = activateEventProject(b.projects,a.project.id,new Date(),a.project.id);
+    const own = {...result(new Date().toISOString()),eventId:a.project.id};
+    const other = {...result(new Date().toISOString()),eventId:b.project.id};
+    const updated = captureEventProject(active.projects,a.project.id,{...request("Renamed"),schedule:{countdownSeconds:7}},
+      {...context(),room:{...context().room,totalRaceLaps:99},results:[own,other],events:[
+        {sequence:1,occurredAt:new Date().toISOString(),type:"result",message:"A",eventId:a.project.id},
+        {sequence:2,occurredAt:new Date().toISOString(),type:"result",message:"B",eventId:b.project.id}]});
+    expect(updated.project.room.totalRaceLaps).toBe(20);
+    expect(updated.project.schedule).toEqual(a.project.schedule);
+    expect(updated.project.results.map(r=>r.id)).toEqual([own.id]);
+    expect(updated.project.auditEvents.map(e=>e.message)).toEqual(["A"]);
+    const next = activateEventProject(updated.projects,b.project.id,new Date(),b.project.id);
+    expect(next.projects.find(p=>p.id===a.project.id)?.status).toBe("completed");
+    expect(()=>activateEventProject(next.projects,a.project.id)).toThrow();
+    const synced = syncActiveEventProject(next.projects,[own,other],[]);
+    expect(synced.projects.find(p=>p.id===b.project.id)?.results.map(r=>r.id)).toEqual([other.id]);
+    const exported = await exportEventProjectPackage(updated.project,{trackPackage:null,organizerLogo:null});
+    expect((await importEventProjectPackage(exported)).project.eventId).toBe(a.project.id);
+    const copy = copyEventProject(next.projects,a.project.id,"Next");
+    expect(copy.project.eventId).toBeNull();
+    expect(copy.project.results).toEqual([]);
+  });
+
   it("round-trips packages and rejects modified payloads", async () => {
     const created = createEventProject([], request("耐力赛"), {
       ...context(),
@@ -68,7 +95,7 @@ describe("event projects", () => {
     const imported = await importEventProjectPackage(bytes, new Set(), new Date("2026-08-28T12:00:00Z"));
 
     expect(imported.project.id).toBe(created.project.id);
-    expect(imported.project.status).toBe("draft");
+    expect(imported.project.status).toBe("completed");
     expect(imported.project.results).toHaveLength(1);
     expect(imported.project.auditEvents).toHaveLength(1);
 

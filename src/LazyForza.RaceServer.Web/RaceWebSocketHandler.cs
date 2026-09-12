@@ -166,6 +166,8 @@ public sealed class RaceWebSocketHandler(
     {
         switch (envelope.Type)
         {
+            case RaceMessageTypes.Leave:
+                return LeaveAsync(participantId, socket, cancellationToken);
             case RaceMessageTypes.Ready:
             {
                 if (isObserver)
@@ -234,6 +236,15 @@ public sealed class RaceWebSocketHandler(
                     $"不支持消息类型：{envelope.Type}",
                     cancellationToken);
         }
+    }
+
+    private async Task LeaveAsync(Guid id, WebSocket socket, CancellationToken token)
+    {
+        var result = coordinator.DisconnectAndReleaseClient(id, voluntary: true);
+        if (!result.IsAccepted) { await ReplyToResult(id, socket, result, token); return; }
+        // Core persists the release before the client may discard its recovery identity.
+        await SendRegisteredAsync(id, socket, RaceMessageTypes.Left, new { }, token);
+        await registry.DisconnectAsync(id, "left room", token, WebSocketCloseStatus.NormalClosure);
     }
 
     private Task ReplyToResult(

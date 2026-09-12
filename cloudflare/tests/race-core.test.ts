@@ -3,6 +3,54 @@ import { defaultQualifyingEliminations, RaceCore } from "../src/race-core";
 import type { LapCompleted, LoginRequest, SessionCommand, TelemetryUpdate } from "../src/protocol";
 
 describe("RaceCore", () => {
+  it("requires an explicit new event after a finished race and isolates old laps", () => {
+    const core=createCore(),id=connect(core,"Driver"),oldEvent=core.snapshot().eventId;
+    expect(core.applySession({phase:"race",totalRaceLaps:1}).ok).toBe(true);
+    const oldLap={...lap("old",60,true,1),stageId:core.snapshot().stageId};
+    expect(core.completeLap(id,oldLap).ok).toBe(true);
+    expect(core.snapshot().phase).toBe("finished");
+    core.applySession({phase:"lobby"});
+    expect(core.applySession({phase:"practice"}).ok).toBe(false);
+    expect(core.beginEvent().ok).toBe(true);
+    expect(core.snapshot().eventId).not.toBe(oldEvent);
+    expect(core.snapshot().participants[0]).toMatchObject({id,isReady:false,completedLaps:0});
+    expect(core.results()[0].eventId).toBe(oldEvent);
+    expect(core.applySession({phase:"practice"}).ok).toBe(true);
+    expect(core.applyRoomSettings({...core.roomSettings(),totalRaceLaps:99}).ok).toBe(false);
+    expect(core.completeLap(id,oldLap).ok).toBe(true);
+    expect(core.completeLap(id,{...oldLap,eventId:"late-other"}).ok).toBe(false);
+    expect(core.snapshot().participants[0].completedLaps).toBe(0);
+  });
+
+  it("migrates legacy released entries without truncating the last active driver or scores", () => {
+    const core=createCore(),id=connect(core,"Active");
+    core.applySession({phase:"practice"});core.completeLap(id,lap("legacy",60,true,1));
+    const saved=structuredClone(core.serialize()),active=saved.participants[0];
+    delete saved.eventId;
+    saved.participants=[...Array.from({length:12},(_,i)=>({...structuredClone(active),id:`retired-${i}`,resumeToken:`retired-token-${i}`,reservationActive:false,isConnected:false})),active];
+    const restored=new RaceCore({sessionName:"Test",maximumParticipants:12,totalRaceLaps:5},saved);
+    expect(restored.snapshot().participants.map(p=>p.id)).toEqual([id]);
+    expect(restored.snapshot().eventId).toBe("00000000-0000-0000-0000-000000000000");
+    expect(restored.results()[0].participants).toHaveLength(13);
+    expect(restored.serialize().participants).toHaveLength(1);
+    const again=new RaceCore({sessionName:"Test",maximumParticipants:12,totalRaceLaps:5},restored.serialize());
+    expect(again.results()[0].participants).toHaveLength(13);
+  });
+
+  it("compacts repeated departures and restores all retained stage results", () => {
+    const core=createCore();core.applySession({phase:"practice"});
+    for(let i=0;i<150;i++) {
+      const id=connect(core,"Repeated name");
+      expect(core.completeLap(id,{...lap(`lap-${i}`,60,true,1),stageId:core.snapshot().stageId}).ok).toBe(true);
+      expect(core.disconnectAndReleaseClient(id,new Date(),true).ok).toBe(true);
+      expect(core.serialize().participants).toHaveLength(0);
+    }
+    const rebuilt=new RaceCore({sessionName:"Tests",maximumParticipants:12,totalRaceLaps:5},JSON.parse(JSON.stringify(core.serialize())));
+    expect(rebuilt.results()[0].participants).toHaveLength(150);
+    expect(rebuilt.results()[0].participants.every(p=>p.completedLaps===1&&p.displayName==="Repeated name")).toBe(true);
+    expect(rebuilt.login(login("Repeated name")).ok).toBe(true);
+  });
+
   it("keeps lap receipts idempotent and sequences isolated by stage across reconstruction", () => {
     let core = createCore();
     const id = connect(core, "校验");
@@ -822,6 +870,35 @@ describe("RaceCore", () => {
     expect(core.tick(new Date(disconnectedAt.getTime() + 31_000))).toBe(true);
     expect(core.snapshot().phase).toBe("finished");
     expect(core.snapshot().participants.find(item => item.id === trailing)?.status).toBe("didNotFinish");
+  });
+
+  it("releases voluntary and expired lobby reservations without accumulating identities", () => {
+    const core = createCore(1), first = core.login(login("同名"));
+    if (!first.ok) throw new Error(first.message);
+    core.disconnect(first.participantId);
+    expect(core.login(login("同名")).ok).toBe(false);
+    expect(core.login({...login("同名"),resumeToken:first.resumeToken})).toMatchObject({ok:true,participantId:first.participantId});
+    core.disconnect(first.participantId);
+    expect(core.nextAlarmMilliseconds()).not.toBeNull();
+    core.tick(new Date(Date.now()+360_000));
+    for(let i=0;i<150;i++) {
+      const p=core.login(login("同名")); if(!p.ok) throw new Error(p.message);
+      expect(core.disconnectAndReleaseClient(p.participantId,new Date(),true).ok).toBe(true);
+    }
+    expect(core.serialize().participants).toHaveLength(0);
+    expect(core.serialize().revokedResumeTokens!.length).toBeLessThanOrEqual(100);
+    expect(core.login({...login("同名"),resumeToken:first.resumeToken}).ok).toBe(false);
+    expect(core.login(login("同名")).ok).toBe(true);
+  });
+
+  it("keeps the departed driver's stage result and original name", () => {
+    const core=createCore(), id=connect(core,"车手");
+    core.applySession({phase:"practice"});
+    core.completeLap(id,lap("lap",60,true,1));
+    core.disconnectAndReleaseClient(id,new Date(),true);
+    core.applySession({phase:"lobby"});
+    expect(core.results()[0].participants).toMatchObject([{displayName:"车手",completedLaps:1}]);
+    expect(core.login(login("车手")).ok).toBe(true);
   });
 
   it("releases a race-control disconnected display name and participant slot", () => {

@@ -41,6 +41,7 @@ export interface EventProjectSaveRequest {
   scheduledStartAt?: string | null;
   timeZoneId?: string | null;
   schedule?: Partial<EventSchedule> | null;
+  captureConfiguration?: boolean;
 }
 
 export interface EventProjectAssetSnapshot {
@@ -79,6 +80,7 @@ export interface EventProjectSnapshot {
   organizerLogo?: EventProjectAssetSnapshot | null;
   results: StageResultSnapshot[];
   auditEvents: EventProjectAuditSnapshot[];
+  eventId?: string | null;
 }
 
 export interface EventProjectAssets {
@@ -145,8 +147,9 @@ export function captureEventProject(
   const index = existing.findIndex(item => item.id === id);
   if (index < 0) throw new RangeError("赛事项目不存在。");
   const previous = existing[index];
-  if (previous.status === "archived") throw new Error("已归档的赛事项目不能再修改。");
-  const project = buildProject(id, request, context, {
+  if (["archived","completed"].includes(previous.status)) throw new Error("已完成的赛事项目不能再修改，请复制后使用。");
+  const project = buildProject(id, request.captureConfiguration ? request : {...request,schedule:previous.schedule},
+    request.captureConfiguration ? context : {...context,room:previous.room,trackPackage:previous.trackPackage,organizerLogo:previous.organizerLogo}, {
     status: previous.status,
     revision: previous.revision + 1,
     createdAt: previous.createdAt,
@@ -155,6 +158,9 @@ export function captureEventProject(
     completedAt: previous.completedAt
   });
   const projects = [...existing];
+  project.eventId = previous.eventId;
+  project.results = previous.status === "active" ? normalizeResults([...previous.results, ...context.results.filter(r => sameEvent(r.eventId, previous.eventId))]) : previous.results;
+  project.auditEvents = previous.status === "active" ? normalizeEvents([...previous.auditEvents, ...context.events.filter(e => sameEvent(e.eventId, previous.eventId))]) : previous.auditEvents;
   projects[index] = project;
   return { projects, project };
 }
@@ -179,7 +185,8 @@ export function copyEventProject(
     activatedAt: null,
     completedAt: null,
     results: [],
-    auditEvents: []
+    auditEvents: [],
+    eventId: null
   };
   return { projects: [...existing, project], project };
 }
@@ -187,10 +194,10 @@ export function copyEventProject(
 export function activateEventProject(
   existing: EventProjectSnapshot[],
   id: string,
-  now = new Date()): { projects: EventProjectSnapshot[]; project: EventProjectSnapshot } {
+  now = new Date(), eventId?: string): { projects: EventProjectSnapshot[]; project: EventProjectSnapshot } {
   const target = existing.find(item => item.id === id);
   if (!target) throw new RangeError("赛事项目不存在。");
-  if (target.status === "archived") throw new Error("已归档的赛事项目不能直接启用，请先复制为新项目。");
+  if (["archived","completed"].includes(target.status)) throw new Error("已归档的赛事项目不能直接启用，请先复制为新项目。");
   const timestamp = now.toISOString();
   const projects = existing.map(item => {
     if (item.id === id) return {
@@ -199,16 +206,16 @@ export function activateEventProject(
       revision: item.revision + 1,
       updatedAt: timestamp,
       activatedAt: item.activatedAt ?? timestamp,
+      eventId: eventId ?? item.eventId,
       completedAt: null
     };
     if (item.status !== "active") return item;
-    const hasResults = item.results.length > 0;
     return {
       ...item,
-      status: hasResults ? "completed" as const : "draft" as const,
+      status: "completed" as const,
       revision: item.revision + 1,
       updatedAt: timestamp,
-      completedAt: hasResults ? timestamp : null
+      completedAt: timestamp
     };
   });
   return { projects, project: projects.find(item => item.id === id)! };
@@ -237,6 +244,8 @@ export function setEventProjectStatus(
   return { projects, project };
 }
 
+const sameEvent = (a?: string | null,b?: string | null) => (a ?? "00000000-0000-0000-0000-000000000000") === (b ?? "00000000-0000-0000-0000-000000000000");
+
 export function syncActiveEventProject(
   existing: EventProjectSnapshot[],
   results: StageResultSnapshot[],
@@ -245,8 +254,8 @@ export function syncActiveEventProject(
   const index = existing.findIndex(item => item.status === "active");
   if (index < 0) return { projects: existing, changed: false };
   const project = existing[index];
-  const mergedResults = normalizeResults([...project.results, ...results]);
-  const mergedEvents = normalizeEvents([...project.auditEvents, ...events]);
+  const mergedResults = normalizeResults([...project.results, ...results.filter(r => sameEvent(r.eventId, project.eventId))]);
+  const mergedEvents = normalizeEvents([...project.auditEvents, ...events.filter(e => sameEvent(e.eventId, project.eventId))]);
   if (JSON.stringify(mergedResults) === JSON.stringify(project.results) &&
       JSON.stringify(mergedEvents) === JSON.stringify(project.auditEvents))
     return { projects: existing, changed: false };
@@ -374,7 +383,7 @@ export async function importEventProjectPackage(
   const project = normalizeProject({
     ...event,
     id: existingIds.has(event.id) ? crypto.randomUUID() : event.id,
-    status: "draft",
+    status: results.length > 0 ? "completed" : "draft",
     updatedAt: timestamp,
     activatedAt: null,
     completedAt: null,
@@ -447,7 +456,7 @@ function normalizeProject(project: EventProjectSnapshot): EventProjectSnapshot {
   };
 }
 
-function normalizeSchedule(value?: Partial<EventSchedule> | null): EventSchedule {
+export function normalizeSchedule(value?: Partial<EventSchedule> | null): EventSchedule {
   const practiceSessionCount = clampInteger(value?.practiceSessionCount, 1, 3, 1);
   const qualifyingSessionCount = clampInteger(value?.qualifyingSessionCount, 1, 3, 1);
   return {

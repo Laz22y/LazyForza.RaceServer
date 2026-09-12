@@ -103,7 +103,7 @@ public sealed class RaceEventProjectStoreTests
             var destination = new RaceEventProjectStore(new RaceServerOptions { DataDirectory = destinationRoot });
             var imported = destination.Import(package, now.AddHours(1));
             Assert.AreEqual(created.Id, imported.Id);
-            Assert.AreEqual(RaceEventProjectStatus.Draft, imported.Status);
+            Assert.AreEqual(RaceEventProjectStatus.Completed, imported.Status);
             Assert.AreEqual("耐力赛", imported.Name);
             Assert.HasCount(1, imported.Results);
             Assert.HasCount(1, imported.AuditEvents);
@@ -120,6 +120,46 @@ public sealed class RaceEventProjectStoreTests
             if (Directory.Exists(sourceRoot)) Directory.Delete(sourceRoot, recursive: true);
             if (Directory.Exists(destinationRoot)) Directory.Delete(destinationRoot, recursive: true);
         }
+    }
+
+    [TestMethod]
+    public void MetadataPreservesRulesAndEventOwnershipSurvivesExportAndReload()
+    {
+        var root = TemporaryDirectory();
+        var importedRoot = TemporaryDirectory();
+        try
+        {
+            var store = new RaceEventProjectStore(new RaceServerOptions { DataDirectory = root });
+            var first = store.Create(Request("First"), Room(), [], [], null, null, null, null);
+            var second = store.Create(Request("Second"), Room(), [], [], null, null, null, null);
+            store.Activate(first.Id, eventId: first.Id);
+            var owned = Result(Guid.NewGuid(), DateTimeOffset.UtcNow) with { EventId = first.Id };
+            var unrelated = Result(Guid.NewGuid(), DateTimeOffset.UtcNow) with { EventId = second.Id };
+            var ownEvent = new RaceEventSnapshot(1, DateTimeOffset.UtcNow, "result", "First") with { EventId = first.Id };
+            var otherEvent = new RaceEventSnapshot(2, DateTimeOffset.UtcNow, "result", "Second") with { EventId = second.Id };
+            store.SyncActive([owned, unrelated], [ownEvent, otherEvent]);
+            var updated = store.Capture(first.Id, Request("Renamed") with { Schedule = new(CountdownSeconds: 7) },
+                Room() with { TotalRaceLaps = 99 }, [unrelated], [otherEvent], null, null, null, null);
+            Assert.AreEqual(20, updated.Room.TotalRaceLaps);
+            Assert.AreEqual(first.Schedule.CountdownSeconds, updated.Schedule.CountdownSeconds);
+            CollectionAssert.AreEqual(first.Schedule.PracticeSessionMinutes!.ToArray(), updated.Schedule.PracticeSessionMinutes!.ToArray());
+            Assert.AreEqual(owned.Id, updated.Results.Single().Id);
+            Assert.AreEqual("First", updated.AuditEvents.Single().Message);
+            store.Activate(second.Id, eventId: second.Id);
+            store.SyncActive([owned, unrelated], [ownEvent, otherEvent]);
+            Assert.AreEqual(unrelated.Id, store.Find(second.Id)!.Results.Single().Id);
+            Assert.AreEqual(RaceEventProjectStatus.Completed, store.Find(first.Id)!.Status);
+            Assert.ThrowsExactly<InvalidDataException>(() => store.Activate(first.Id));
+            var imported = new RaceEventProjectStore(new RaceServerOptions { DataDirectory = importedRoot }).Import(store.Export(first.Id));
+            Assert.AreEqual(first.Id, imported.EventId);
+            Assert.AreEqual(first.Id, imported.Results.Single().EventId);
+            var rebuilt = new RaceEventProjectStore(new RaceServerOptions { DataDirectory = root });
+            Assert.AreEqual(first.Id, rebuilt.Find(first.Id)!.EventId);
+            var copy = rebuilt.Copy(first.Id, "Next");
+            Assert.IsNull(copy.EventId);
+            Assert.HasCount(0, copy.Results);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); if (Directory.Exists(importedRoot)) Directory.Delete(importedRoot, true); }
     }
 
     private static RaceEventProjectSaveRequest Request(string name) => new(

@@ -125,6 +125,7 @@ public sealed partial class RaceCoordinator
     private long eventSequence;
     private long lastTelemetrySnapshotTimestamp;
     private Guid? activeResultStageId;
+    private Guid eventId = Guid.NewGuid();
 
     public RaceCoordinator(
         RaceServerOptions options,
@@ -254,11 +255,12 @@ public sealed partial class RaceCoordinator
                     $"客户端赛道为 {requestedSectorCount} 个分段，房间设置为 {sectorCount} 个分段。");
             }
             else if (!string.IsNullOrWhiteSpace(request.ResumeToken) &&
-                     revokedResumeTokens.Any(token => ConstantTimeEquals(token, request.ResumeToken)))
+                     (revokedResumeTokens.Any(token => ConstantTimeEquals(token, request.ResumeToken)) ||
+                      (!request.IsObserver && FindByResumeToken(request.ResumeToken) is null)))
             {
                 rejected = new RaceLoginRejected(
                     "disconnectedByControl",
-                    "赛事总控已断开这个客户端。再次手动进入房间时可以重新申请席位。");
+                    "原席位已释放或恢复身份已失效，请重新手动加入房间。");
             }
             else
             {
@@ -950,6 +952,34 @@ public sealed partial class RaceCoordinator
         Publish(snapshot, important: true, audit);
     }
 
+    public RaceCommandResult BeginEvent(Guid? id = null, string? name = null)
+    {
+        RaceSessionSnapshot snapshot;
+        lock (sync)
+        {
+            if (phase is not (RaceSessionPhase.Lobby or RaceSessionPhase.Finished))
+                return RaceCommandResult.Reject("请先结束当前阶段或返回大厅，再准备新赛事。");
+            if (id == eventId) { CommitRecoveryLocked(); return RaceCommandResult.Accepted; }
+            var now = DateTimeOffset.UtcNow;
+            ArchiveActiveResult(now, CurrentResultIsComplete());
+            foreach (var participant in participants.Where(p => !p.IsConnected)) RevokeResumeToken(participant.ResumeToken);
+            participants.RemoveAll(p => !p.IsConnected);
+            ResetCompetitiveState(clearParticipants: false);
+            eventId = id ?? Guid.NewGuid();
+            activeResultStageId = null;
+            phase = RaceSessionPhase.Lobby;
+            flag = RaceControlFlag.Green;
+            flagMessage = null;
+            recoveryPending = false;
+            recoveryFrozenAt = null;
+            if (!string.IsNullOrWhiteSpace(name)) sessionName = name.Trim()[..Math.Min(64, name.Trim().Length)];
+            IncrementRevision();
+            snapshot = BuildSnapshot(now);
+        }
+        Publish(snapshot, important: true, new RaceAuditEntry(snapshot.ServerTime, "eventPrepared", "新赛事已准备，在线车手需重新准备。"));
+        return RaceCommandResult.Accepted;
+    }
+
     public RaceCommandResult ApplyRoomSettings(RaceAdminRoomSettingsCommand command)
     {
         RaceSessionSnapshot snapshot;
@@ -995,9 +1025,11 @@ public sealed partial class RaceCoordinator
                     }
                 }
             }
-            if (phase is RaceSessionPhase.OutLap or RaceSessionPhase.FormationLap or
-                RaceSessionPhase.Countdown or RaceSessionPhase.Race or RaceSessionPhase.Suspended)
-                return RaceCommandResult.Reject("发车后不能修改房间规则。请先返回大厅。");
+            if (resultHistory.Any(result => (result.EventId ?? Guid.Empty) == eventId &&
+                result.Phase == RaceSessionPhase.Race && result.IsComplete))
+                return RaceCommandResult.Reject("本场正赛已结束，请先准备新一场或启用新项目。");
+            if (phase != RaceSessionPhase.Lobby)
+                return RaceCommandResult.Reject("比赛进行中不能修改房间规则。请先返回大厅。");
 
             sessionName = normalizedName;
             totalRaceLaps = Math.Clamp(command.TotalRaceLaps, 1, 999);
@@ -1072,6 +1104,10 @@ public sealed partial class RaceCoordinator
         lock (sync)
         {
             var now = invokedAt ?? DateTimeOffset.UtcNow;
+            if (command.Phase is not (RaceSessionPhase.Lobby or RaceSessionPhase.Finished) &&
+                resultHistory.Any(result => (result.EventId ?? Guid.Empty) == eventId &&
+                    result.Phase == RaceSessionPhase.Race && result.IsComplete))
+                return RaceCommandResult.Reject("本场正赛已结束，请先准备新一场或启用新项目。");
             if (recoveryPending && command.Phase != RaceSessionPhase.Lobby)
                 return RaceCommandResult.Reject(RecoveryPendingMessage);
             if (command.Phase == RaceSessionPhase.Lobby)
@@ -1104,6 +1140,7 @@ public sealed partial class RaceCoordinator
                 case RaceSessionPhase.Lobby:
                     ResetCompetitiveState(clearParticipants: false);
                     phase = RaceSessionPhase.Lobby;
+                    PruneLobbyReservations(now);
                     flag = RaceControlFlag.Green;
                     flagMessage = null;
                     activeResultStageId = null;
@@ -1618,7 +1655,7 @@ public sealed partial class RaceCoordinator
         return RaceCommandResult.Accepted;
     }
 
-    public RaceCommandResult DisconnectAndReleaseClient(Guid clientId)
+    public RaceCommandResult DisconnectAndReleaseClient(Guid clientId, bool voluntary = false)
     {
         RaceSessionSnapshot snapshot;
         RaceAuditEntry audit;
@@ -1631,10 +1668,10 @@ public sealed partial class RaceCoordinator
                 if (!participant.ReservationActive)
                     return RaceCommandResult.Reject("该车手已经由总控断开。");
                 var releasedName = participant.DisplayName;
-                revokedResumeTokens.Add(participant.ResumeToken);
+                RevokeResumeToken(participant.ResumeToken);
                 participant.ReservationActive = false;
                 participant.IsConnected = false;
-                participant.DisplayName = $"{releasedName} · 已断开";
+                // Preserve the name in completed stage records; reservation controls reuse.
                 if (participant.Status is not (RaceParticipantStatus.Finished or
                         RaceParticipantStatus.DidNotFinish or RaceParticipantStatus.Disqualified))
                     participant.Status = phase == RaceSessionPhase.Race
@@ -1651,19 +1688,23 @@ public sealed partial class RaceCoordinator
                 CompletePracticeIfReady(now);
                 RefreshYellowFlag(now);
                 TryCompleteRaceIfReady(now);
+                ArchiveActiveResult(now, CurrentResultIsComplete());
+                ResetCollisionState(participant);
+                participants.Remove(participant);
+                penalties.RemoveAll(penalty => penalty.ParticipantId == participant.Id);
                 IncrementRevision();
                 snapshot = BuildSnapshot(now);
                 audit = new RaceAuditEntry(
                     snapshot.ServerTime,
-                    "participantRemoved",
-                    $"赛事总控断开了 {releasedName}，显示名称已释放。",
+                    voluntary ? "participantLeft" : "participantRemoved",
+                    voluntary ? $"{releasedName} 离开房间，席位与名称已释放。" : $"赛事总控断开了 {releasedName}，显示名称已释放。",
                     participant.Id);
             }
             else
             {
                 var observer = observers.FirstOrDefault(candidate => candidate.Id == clientId);
                 if (observer is null) return RaceCommandResult.Reject("客户端不存在或已经离开房间。");
-                revokedResumeTokens.Add(observer.ResumeToken);
+                RevokeResumeToken(observer.ResumeToken);
                 observers.Remove(observer);
                 IncrementRevision();
                 snapshot = BuildSnapshot(now);
@@ -1678,6 +1719,26 @@ public sealed partial class RaceCoordinator
         return RaceCommandResult.Accepted;
     }
 
+    private void RevokeResumeToken(string token)
+    {
+        // A missing driver identity is also rejected, so this compatibility list is bounded.
+        if (revokedResumeTokens.Count >= 100) revokedResumeTokens.Remove(revokedResumeTokens.First());
+        revokedResumeTokens.Add(token);
+    }
+
+    private bool PruneLobbyReservations(DateTimeOffset now)
+    {
+        if (phase != RaceSessionPhase.Lobby) return false;
+        var expired = participants.Where(p => !p.ReservationActive ||
+            (!p.IsConnected && now - p.LastSeenAt >= TimeSpan.FromMinutes(5))).ToArray();
+        foreach (var participant in expired)
+        {
+            RevokeResumeToken(participant.ResumeToken);
+            participants.Remove(participant);
+        }
+        return expired.Length > 0;
+    }
+
     public void Tick(DateTimeOffset now)
     {
         RaceSessionSnapshot? snapshot = null;
@@ -1685,7 +1746,9 @@ public sealed partial class RaceCoordinator
         lock (sync)
         {
             if (recoveryPending) return;
-            if (ExpireDisconnectedLapRecoveries(now))
+            var reservationsExpired = PruneLobbyReservations(now);
+            if (reservationsExpired) audit = new RaceAuditEntry(now, "reservationsExpired", "大厅离线席位已释放。");
+            if (reservationsExpired | ExpireDisconnectedLapRecoveries(now))
             {
                 CompleteQualifyingIfReady(now);
                 CompletePracticeIfReady(now);
@@ -3553,7 +3616,7 @@ public sealed partial class RaceCoordinator
         if (resultPhase is not (RaceSessionPhase.Practice or RaceSessionPhase.Qualifying or RaceSessionPhase.Race))
             return;
 
-        var snapshot = BuildSnapshot(now);
+        var snapshot = BuildSnapshot(now, includeReleased: true);
         var stageNumber = resultPhase switch
         {
             RaceSessionPhase.Practice => Math.Max(1, practiceSessionNumber),
@@ -3599,8 +3662,24 @@ public sealed partial class RaceCoordinator
                 candidate.AdjustedRaceTotalSeconds,
                 candidate.GapToLeaderSeconds,
                 candidate.TimePenaltySeconds,
-                candidate.Penalties)).ToArray());
+                candidate.Penalties)).ToArray()) with { EventId = eventId };
         var existingIndex = resultHistory.FindIndex(candidate => candidate.Id == resultId);
+        if (existingIndex >= 0)
+        {
+            // Departed drivers retain compact results, without retaining telemetry/session buffers.
+            var currentIds = archived.Participants.Select(p => p.Id).ToHashSet();
+            var merged = resultHistory[existingIndex].Participants.Where(p => !currentIds.Contains(p.Id))
+                .Concat(archived.Participants);
+            var ordered = resultPhase == RaceSessionPhase.Race
+                ? merged.OrderBy(p => TerminalRank(p.Status)).ThenByDescending(p => p.CompletedLaps)
+                    .ThenBy(p => p.Status == RaceParticipantStatus.Finished ? p.AdjustedRaceTotalSeconds : double.MaxValue)
+                    .ThenByDescending(p => p.TrackProgress)
+                : merged.OrderBy(p => p.BestLapSeconds is null).ThenBy(p => p.BestLapSeconds);
+            var entrants = ordered.Select((p, index) => p with { Position = index + 1 }).ToArray();
+            var fastest = entrants.Where(p => p.Status != RaceParticipantStatus.Disqualified && p.BestLapSeconds > 0)
+                .OrderBy(p => p.BestLapSeconds).FirstOrDefault();
+            archived = archived with { Participants = entrants, FastestParticipantId = fastest?.Id, FastestLapSeconds = fastest?.BestLapSeconds };
+        }
         if (existingIndex >= 0) resultHistory[existingIndex] = archived;
         else resultHistory.Add(archived);
         if (resultHistory.Count > MaximumArchivedStageResults)
@@ -3835,10 +3914,10 @@ public sealed partial class RaceCoordinator
         return $"{(int)span.TotalMinutes}:{span.Seconds:00}.{span.Milliseconds:000}";
     }
 
-    private RaceSessionSnapshot BuildSnapshot(DateTimeOffset now)
+    private RaceSessionSnapshot BuildSnapshot(DateTimeOffset now, bool includeReleased = false)
     {
-        var ordered = OrderParticipants(now)
-            .Where(candidate => candidate.ReservationActive)
+        var ordered = OrderParticipants(now, includeReleased)
+            .Where(candidate => includeReleased || candidate.ReservationActive)
             .ToList();
         var snapshots = new List<RaceParticipantSnapshot>(ordered.Count);
         var leader = ordered.FirstOrDefault();
@@ -3994,12 +4073,12 @@ public sealed partial class RaceCoordinator
                 .ToArray(),
             minimumRequiredPitStops,
             disconnectedLapRecoveryEnabled,
-            activeResultStageId);
+            activeResultStageId) with { EventId = eventId };
     }
 
-    private List<ParticipantState> OrderParticipants(DateTimeOffset now)
+    private List<ParticipantState> OrderParticipants(DateTimeOffset now, bool includeReleased = false)
     {
-        var activeParticipants = participants.Where(candidate => candidate.ReservationActive);
+        var activeParticipants = participants.Where(candidate => includeReleased || candidate.ReservationActive);
         if ((phase is RaceSessionPhase.Qualifying or RaceSessionPhase.Grid) && qualifyingSessionCount > 1)
             return activeParticipants
                 .OrderBy(QualifyingClassificationGroup)
@@ -4137,6 +4216,7 @@ public sealed partial class RaceCoordinator
 
     private void ResetCompetitiveState(bool clearParticipants)
     {
+        participants.RemoveAll(p => !p.ReservationActive);
         ClearYellowState();
         chequeredImminent = false;
         penalties.Clear();
@@ -4542,7 +4622,7 @@ public sealed partial class RaceCoordinator
             foreach (var audit in audits)
             {
                 events.Add(new RaceEventSnapshot(
-                    ++eventSequence, audit.At, audit.Type, audit.Message, audit.ParticipantId));
+                    ++eventSequence, audit.At, audit.Type, audit.Message, audit.ParticipantId, eventId));
                 if (events.Count > 500) events.RemoveRange(0, events.Count - 500);
             }
             if (important) CommitRecoveryLocked();

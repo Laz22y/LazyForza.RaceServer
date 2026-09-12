@@ -31,7 +31,8 @@ public sealed record RaceEventProjectSaveRequest(
     string? Description,
     DateTimeOffset? ScheduledStartAt,
     string? TimeZoneId,
-    RaceEventSchedule? Schedule);
+    RaceEventSchedule? Schedule,
+    bool CaptureConfiguration = false);
 
 public sealed record RaceEventProjectCopyRequest(string? Name);
 
@@ -68,7 +69,8 @@ public sealed record RaceEventProjectSnapshot(
     RaceEventProjectAssetSnapshot? TrackPackage,
     RaceEventProjectAssetSnapshot? OrganizerLogo,
     IReadOnlyList<RaceStageResultSnapshot> Results,
-    IReadOnlyList<RaceEventProjectAuditSnapshot> AuditEvents);
+    IReadOnlyList<RaceEventProjectAuditSnapshot> AuditEvents,
+    Guid? EventId = null);
 
 public sealed record RaceEventProjectSummary(
     Guid Id,
@@ -187,14 +189,28 @@ public sealed class RaceEventProjectStore
             var index = projects.FindIndex(item => item.Id == id);
             if (index < 0) throw new KeyNotFoundException("赛事项目不存在。");
             var previous = projects[index];
-            if (previous.Status == RaceEventProjectStatus.Archived)
+            if (previous.Status is RaceEventProjectStatus.Archived or RaceEventProjectStatus.Completed)
                 throw new InvalidDataException("已归档的赛事项目不能再修改。");
             var now = updatedAt ?? DateTimeOffset.UtcNow;
+            if (!request.CaptureConfiguration)
+            {
+                room = previous.Room;
+                request = request with { Schedule = previous.Schedule };
+                var retained = ReadAssetsInternal(previous);
+                trackBytes = retained.TrackPackage;
+                logoBytes = retained.OrganizerLogo;
+            }
             var updated = BuildSnapshot(
                 id, request, room, results, ConvertEvents(events),
                 AssetForTrack(trackMetadata, trackBytes), AssetForLogo(logoMetadata, logoBytes),
                 previous.Status, previous.Revision + 1, previous.CreatedAt, now,
-                previous.ActivatedAt, previous.CompletedAt);
+                previous.ActivatedAt, previous.CompletedAt) with { EventId = previous.EventId,
+                    TrackPackage = request.CaptureConfiguration ? AssetForTrack(trackMetadata, trackBytes) : previous.TrackPackage,
+                    OrganizerLogo = request.CaptureConfiguration ? AssetForLogo(logoMetadata, logoBytes) : previous.OrganizerLogo,
+                    Results = previous.Status == RaceEventProjectStatus.Active
+                        ? MergeResults(previous.Results, results.Where(r => (r.EventId ?? Guid.Empty) == (previous.EventId ?? Guid.Empty)).ToArray()) : previous.Results,
+                    AuditEvents = previous.Status == RaceEventProjectStatus.Active
+                        ? MergeEvents(previous.AuditEvents, events.Where(e => (e.EventId ?? Guid.Empty) == (previous.EventId ?? Guid.Empty)).ToArray()) : previous.AuditEvents };
             SaveAssets(id, updated, trackBytes, logoBytes);
             projects[index] = updated;
             Save();
@@ -224,7 +240,8 @@ public sealed class RaceEventProjectStore
                 ActivatedAt = null,
                 CompletedAt = null,
                 Results = [],
-                AuditEvents = []
+                AuditEvents = [],
+                EventId = null
             };
             var assets = ReadAssetsInternal(source);
             SaveAssets(newId, copy, assets.TrackPackage, assets.OrganizerLogo);
@@ -234,13 +251,13 @@ public sealed class RaceEventProjectStore
         }
     }
 
-    public RaceEventProjectSnapshot Activate(Guid id, DateTimeOffset? activatedAt = null)
+    public RaceEventProjectSnapshot Activate(Guid id, DateTimeOffset? activatedAt = null, Guid? eventId = null)
     {
         lock (sync)
         {
             var index = projects.FindIndex(item => item.Id == id);
             if (index < 0) throw new KeyNotFoundException("赛事项目不存在。");
-            if (projects[index].Status == RaceEventProjectStatus.Archived)
+            if (projects[index].Status is RaceEventProjectStatus.Archived or RaceEventProjectStatus.Completed)
                 throw new InvalidDataException("已归档的赛事项目不能直接启用，请先复制为新项目。");
             var now = activatedAt ?? DateTimeOffset.UtcNow;
             for (var candidateIndex = 0; candidateIndex < projects.Count; candidateIndex++)
@@ -249,10 +266,10 @@ public sealed class RaceEventProjectStore
                 var previous = projects[candidateIndex];
                 projects[candidateIndex] = previous with
                 {
-                    Status = previous.Results.Count > 0 ? RaceEventProjectStatus.Completed : RaceEventProjectStatus.Draft,
+                    Status = RaceEventProjectStatus.Completed,
                     Revision = previous.Revision + 1,
                     UpdatedAt = now,
-                    CompletedAt = previous.Results.Count > 0 ? now : null
+                    CompletedAt = now
                 };
             }
             var project = projects[index];
@@ -262,6 +279,7 @@ public sealed class RaceEventProjectStore
                 Revision = project.Revision + 1,
                 UpdatedAt = now,
                 ActivatedAt = project.ActivatedAt ?? now,
+                EventId = eventId ?? project.EventId,
                 CompletedAt = null
             };
             projects[index] = project;
@@ -348,7 +366,7 @@ public sealed class RaceEventProjectStore
             var project = imported.Project with
             {
                 Id = id,
-                Status = RaceEventProjectStatus.Draft,
+                Status = imported.Project.Results.Count > 0 ? RaceEventProjectStatus.Completed : RaceEventProjectStatus.Draft,
                 Revision = Math.Max(1, imported.Project.Revision),
                 UpdatedAt = now,
                 ActivatedAt = null,
@@ -371,8 +389,8 @@ public sealed class RaceEventProjectStore
             var index = projects.FindIndex(item => item.Status == RaceEventProjectStatus.Active);
             if (index < 0) return;
             var project = projects[index];
-            var mergedResults = MergeResults(project.Results, results);
-            var mergedEvents = MergeEvents(project.AuditEvents, events);
+            var mergedResults = MergeResults(project.Results, results.Where(r => (r.EventId ?? Guid.Empty) == (project.EventId ?? Guid.Empty)).ToArray());
+            var mergedEvents = MergeEvents(project.AuditEvents, events.Where(e => (e.EventId ?? Guid.Empty) == (project.EventId ?? Guid.Empty)).ToArray());
             if (SerializedEquals(mergedResults, project.Results) &&
                 SerializedEquals(mergedEvents, project.AuditEvents)) return;
             projects[index] = project with
@@ -432,7 +450,7 @@ public sealed class RaceEventProjectStore
             NormalizeEvents(events));
     }
 
-    private static RaceEventSchedule NormalizeSchedule(RaceEventSchedule? schedule)
+    public static RaceEventSchedule NormalizeSchedule(RaceEventSchedule? schedule)
     {
         schedule ??= new RaceEventSchedule();
         var practiceCount = Math.Clamp(schedule.PracticeSessionCount, 1, 3);
@@ -575,7 +593,7 @@ public sealed class RaceEventProjectStore
             project.Id, project.Name, project.ShortName, project.Organizer, project.Description,
             project.ScheduledStartAt, project.TimeZoneId, project.Status, project.Revision,
             project.CreatedAt, project.UpdatedAt, project.ActivatedAt, project.CompletedAt,
-            project.TrackPackage, project.OrganizerLogo);
+            project.TrackPackage, project.OrganizerLogo, project.EventId);
         var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal)
         {
             [EventPath] = Serialize(document),
@@ -672,7 +690,7 @@ public sealed class RaceEventProjectStore
                 document.Id, request, room, results, events,
                 document.TrackPackage, document.OrganizerLogo, document.Status,
                 Math.Max(1, document.Revision), document.CreatedAt, document.UpdatedAt,
-                document.ActivatedAt, document.CompletedAt);
+                document.ActivatedAt, document.CompletedAt) with { EventId = document.EventId };
             return new ImportedProject(project, new RaceEventProjectAssets(trackBytes, logoBytes));
         }
         catch (InvalidDataException) { throw; }
@@ -812,7 +830,8 @@ public sealed class RaceEventProjectStore
         DateTimeOffset? ActivatedAt,
         DateTimeOffset? CompletedAt,
         RaceEventProjectAssetSnapshot? TrackPackage,
-        RaceEventProjectAssetSnapshot? OrganizerLogo);
+        RaceEventProjectAssetSnapshot? OrganizerLogo,
+        Guid? EventId = null);
 
     private sealed record RaceEventEntrant(
         Guid Id,

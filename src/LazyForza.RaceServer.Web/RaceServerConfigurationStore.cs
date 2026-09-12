@@ -273,6 +273,19 @@ public sealed class RaceServerConfigurationStore
         }
     }
 
+    public RaceEventSchedule Schedule { get { lock (sync) return RaceEventProjectStore.NormalizeSchedule(stored?.Schedule); } }
+
+    public void SaveSchedule(RaceEventSchedule schedule)
+    {
+        lock (sync)
+        {
+            if (stored is null) throw new InvalidOperationException("服务端尚未完成首次设置。");
+            var updated = stored with { Schedule = RaceEventProjectStore.NormalizeSchedule(schedule) };
+            Save(updated);
+            stored = updated;
+        }
+    }
+
     public void SaveRoomSettings(RaceRoomSettingsSnapshot settings)
     {
         lock (sync)
@@ -430,5 +443,6 @@ public sealed class RaceServerConfigurationStore
         StoredPassword AdminPassword,
         RaceRoomSettingsSnapshot Room,
         IReadOnlyList<StoredControlAccount>? ControlAccounts = null,
-        StoredPublicTimingAccess? PublicTiming = null);
+        StoredPublicTimingAccess? PublicTiming = null,
+        RaceEventSchedule? Schedule = null);
 }

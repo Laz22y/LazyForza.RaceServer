@@ -78,12 +78,13 @@ public sealed class RaceWebSocketRegistry
     public async Task<bool> DisconnectAsync(
         Guid clientId,
         string description,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        WebSocketCloseStatus closeStatus = WebSocketCloseStatus.PolicyViolation)
     {
         if (!connections.TryRemove(clientId, out var connection)) return false;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(2));
-        try { await connection.CloseAsync(description, timeout.Token); }
+        try { await connection.CloseAsync(description, closeStatus, timeout.Token); }
         catch (OperationCanceledException) { connection.Abort(); }
         return true;
     }
@@ -153,13 +154,13 @@ public sealed class RaceWebSocketRegistry
             }
         }
 
-        public async Task CloseAsync(string description, CancellationToken cancellationToken)
+        public async Task CloseAsync(string description, WebSocketCloseStatus closeStatus, CancellationToken cancellationToken)
         {
             broadcasts.Writer.TryComplete();
             if (Socket.State is not (WebSocketState.Open or WebSocketState.CloseReceived)) return;
             try
             {
-                await Socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, description, cancellationToken);
+                await Socket.CloseAsync(closeStatus, description, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch { }

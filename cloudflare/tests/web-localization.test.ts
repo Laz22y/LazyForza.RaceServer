@@ -4,6 +4,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 // @ts-expect-error Package input discovery runs in Node.js.
 import { fileURLToPath } from "node:url";
+// @ts-expect-error Browser behavior harness runs in Node.js.
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 
 const publicUrl = (name: string) => new URL(`../public/${name}`, import.meta.url);
@@ -19,11 +21,27 @@ describe("Race Control localization", () => {
       expect(readFileSync(publicUrl(name))).toEqual(readFileSync(nativeUrl(name)));
   });
 
-  it("restores session schedule controls when project editing is canceled", () => {
+  it("editing and canceling project details never changes the current schedule", async () => {
     const app = readFileSync(publicUrl("app.js"), "utf8");
-    expect(app).toContain("eventProjectScheduleBeforeEdit=readEventSchedule()");
-    expect(app).toContain("resetEventProjectForm(true)");
-    expect(app).toContain("applyEventSchedule(eventProjectScheduleBeforeEdit)");
+    const controls = new Map<string, {value:string;textContent:string;open:boolean;focus:()=>void;reset:()=>void;scrollIntoView:()=>void;classList:{add:()=>void;remove:()=>void}}>();
+    let scheduleWrites = 0;
+    const context = {
+      editingEventProjectId:null,
+      $:(selector:string)=>{if(!controls.has(selector))controls.set(selector,{value:"",textContent:"",open:false,focus(){},reset(){},scrollIntoView(){},classList:{add(){},remove(){}}});return controls.get(selector);},
+      fetch:async()=>({ok:true,json:async()=>({project:{id:"p",name:"Other event",schedule:{countdownSeconds:99}}})}),
+      raceI18n:{isEnglish:false},workspaceText:(zh:string)=>zh,
+      applyEventSchedule:()=>scheduleWrites++,renderEventProjects:()=>{},
+      editEventProject:null as unknown as (p:unknown)=>Promise<void>,resetEventProjectForm:null as unknown as ()=>void
+    };
+    const edit = app.split("\n").find((line:string)=>line.startsWith("async function editEventProject("));
+    const reset = app.split("\n").find((line:string)=>line.startsWith("function resetEventProjectForm("));
+    runInNewContext(`${edit}\n${reset}`,context);
+    await context.editEventProject({id:"p"});
+    expect(controls.get("#eventProjectName")?.value).toBe("Other event");
+    expect(controls.get("#projectEditor")?.open).toBe(true);
+    context.resetEventProjectForm();
+    expect(scheduleWrites).toBe(0);
+    expect(context.editingEventProjectId).toBeNull();
   });
 
   it("lets role permissions control the account panel instead of hiding it permanently", () => {

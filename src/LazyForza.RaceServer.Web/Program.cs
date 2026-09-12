@@ -69,6 +69,7 @@ builder.Services.AddSingleton<HostedTrackPackageStore>();
 builder.Services.AddSingleton<HostedOrganizerLogoStore>();
 builder.Services.AddSingleton<RaceRuleTemplateStore>();
 builder.Services.AddSingleton<RaceEventProjectStore>();
+builder.Services.AddSingleton<RaceEventLifecycle>();
 builder.Services.AddSingleton<RaceBroadcastService>();
 builder.Services.AddSingleton<RaceWebSocketHandler>();
 builder.Services.AddSingleton(new AdminSessionStore(configurationStore.AuthenticateControlAccount));
@@ -80,6 +81,7 @@ var app = builder.Build();
 try
 {
     app.Services.GetRequiredService<RaceCoordinator>().RestorePersistedState();
+    await app.Services.GetRequiredService<RaceEventLifecycle>().RecoverAsync();
 }
 catch (Exception exception) when (exception is IOException or InvalidDataException or JsonException or UnauthorizedAccessException)
 {
@@ -99,6 +101,7 @@ app.Use(async (context, next) =>
 app.UseDefaultFiles();
 app.UseStaticFiles();
 app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(20) });
+var adminMutations = new SemaphoreSlim(1, 1);
 app.Use(async (context, next) =>
 {
     var path = context.Request.Path.Value ?? string.Empty;
@@ -124,6 +127,24 @@ app.Use(async (context, next) =>
             await context.Response.WriteAsJsonAsync(new { error = "当前总控角色没有执行此操作的权限。" });
             return;
         }
+    }
+    if (path.StartsWith("/api/admin/", StringComparison.OrdinalIgnoreCase) &&
+        context.Request.Method is not ("GET" or "HEAD") && !path.EndsWith("/login") && !path.EndsWith("/logout"))
+    {
+        await adminMutations.WaitAsync(context.RequestAborted);
+        try
+        {
+            if (context.RequestServices.GetRequiredService<RaceEventLifecycle>().HasPending &&
+                !path.EndsWith("/activate") && path != "/api/admin/events/new")
+            {
+                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                await context.Response.WriteAsJsonAsync(new { error = "上次赛事切换尚未完成，请重试准备新一场或启用项目。" });
+                return;
+            }
+            await next();
+        }
+        finally { adminMutations.Release(); }
+        return;
     }
     await next();
 });
@@ -364,7 +385,7 @@ app.MapPost("/api/admin/event-projects", async (
         var assets = await ReadCurrentProjectAssets(
             trackPackages, organizerLogos, coordinator.RoomSettings(), cancellationToken);
         var project = projects.Create(
-            request, coordinator.RoomSettings(), coordinator.Results(), coordinator.Events(500),
+            request, coordinator.RoomSettings(), [], [],
             assets.TrackMetadata, assets.TrackBytes, assets.LogoMetadata, assets.LogoBytes);
         return Results.Ok(new { project });
     }
@@ -391,6 +412,8 @@ app.MapPut("/api/admin/event-projects/{projectId:guid}", async (
         projects.SyncActive(coordinator.Results(), coordinator.Events(500));
         var assets = await ReadCurrentProjectAssets(
             trackPackages, organizerLogos, coordinator.RoomSettings(), cancellationToken);
+        if (request.CaptureConfiguration && !CanEditEventConfiguration(coordinator))
+            return Results.BadRequest(new { error = "比赛进行中不能替换项目配置。" });
         var project = projects.Capture(
             projectId, request, coordinator.RoomSettings(), coordinator.Results(), coordinator.Events(500),
             assets.TrackMetadata, assets.TrackBytes, assets.LogoMetadata, assets.LogoBytes);
@@ -420,52 +443,18 @@ app.MapPost("/api/admin/event-projects/{projectId:guid}/copy", (
 });
 
 app.MapPost("/api/admin/event-projects/{projectId:guid}/activate", async (
-    Guid projectId,
-    HttpContext context,
-    AdminSessionStore sessions,
-    RaceEventProjectStore projects,
-    RaceCoordinator coordinator,
-    RaceServerConfigurationStore settings,
-    HostedTrackPackageStore trackPackages,
-    HostedOrganizerLogoStore organizerLogos,
-    RaceBroadcastService broadcasts,
-    CancellationToken cancellationToken) =>
+    Guid projectId, RaceEventLifecycle lifecycle, RaceEventProjectStore projects,
+    RaceCoordinator coordinator, RaceBroadcastService broadcasts, CancellationToken token) =>
 {
-    if (!Authorized(context, sessions)) return Results.Unauthorized();
     try
     {
-        if (coordinator.Snapshot().Phase is not (RaceSessionPhase.Lobby or RaceSessionPhase.Finished))
-            return Results.BadRequest(new { error = "练习赛、排位赛或正赛进行期间不能切换赛事项目。请先返回大厅。" });
-        var project = projects.Find(projectId) ?? throw new KeyNotFoundException();
-        var assets = projects.ReadAssets(projectId);
-        var applied = coordinator.ApplyRoomSettings(ToRoomCommand(project.Room));
-        if (!applied.IsAccepted) return Results.BadRequest(new { error = applied.Error });
-
-        if (project.TrackPackage is not null && assets.TrackPackage is not null)
-        {
-            await using var trackStream = new MemoryStream(assets.TrackPackage, writable: false);
-            await trackPackages.SaveAsync(trackStream, project.TrackPackage.FileName, cancellationToken);
-        }
-        else await trackPackages.DeleteAsync(cancellationToken);
-
-        if (project.OrganizerLogo is not null && assets.OrganizerLogo is not null)
-        {
-            await using var logoStream = new MemoryStream(assets.OrganizerLogo, writable: false);
-            await organizerLogos.SaveAsync(
-                logoStream, project.OrganizerLogo.FileName, project.OrganizerLogo.MimeType, cancellationToken);
-        }
-        else await organizerLogos.DeleteAsync(cancellationToken);
-
-        settings.SaveRoomSettings(coordinator.RoomSettings());
-        project = projects.Activate(projectId);
+        await lifecycle.PrepareAsync(projectId, token);
         broadcasts.Queue(coordinator.Snapshot());
-        return Results.Ok(new { project, room = coordinator.RoomSettings() });
+        return Results.Ok(new { project = projects.Find(projectId), room = coordinator.RoomSettings() });
     }
     catch (KeyNotFoundException) { return Results.NotFound(new { error = "赛事项目不存在。" }); }
     catch (Exception exception) when (exception is InvalidDataException or IOException or JsonException)
-    {
-        return Results.BadRequest(new { error = exception.Message });
-    }
+    { return Results.BadRequest(new { error = exception.Message }); }
 });
 
 app.MapPost("/api/admin/event-projects/{projectId:guid}/complete", (
@@ -473,16 +462,18 @@ app.MapPost("/api/admin/event-projects/{projectId:guid}/complete", (
     HttpContext context,
     AdminSessionStore sessions,
     RaceEventProjectStore projects,
-    RaceCoordinator coordinator) =>
-    ChangeProjectStatus(projectId, RaceEventProjectStatus.Completed, context, sessions, projects, coordinator));
+    RaceCoordinator coordinator,
+    RaceEventLifecycle lifecycle) =>
+    ChangeProjectStatus(projectId, RaceEventProjectStatus.Completed, context, sessions, projects, coordinator, lifecycle));
 
 app.MapPost("/api/admin/event-projects/{projectId:guid}/archive", (
     Guid projectId,
     HttpContext context,
     AdminSessionStore sessions,
     RaceEventProjectStore projects,
-    RaceCoordinator coordinator) =>
-    ChangeProjectStatus(projectId, RaceEventProjectStatus.Archived, context, sessions, projects, coordinator));
+    RaceCoordinator coordinator,
+    RaceEventLifecycle lifecycle) =>
+    ChangeProjectStatus(projectId, RaceEventProjectStatus.Archived, context, sessions, projects, coordinator, lifecycle));
 
 app.MapDelete("/api/admin/event-projects/{projectId:guid}", (
     Guid projectId,
@@ -613,6 +604,27 @@ app.MapDelete("/api/admin/rule-templates/{templateId:guid}", (
         : Results.NotFound(new { error = "规则模板不存在。" });
 });
 
+app.MapGet("/api/admin/schedule", (RaceServerConfigurationStore settings) => Results.Ok(new { schedule = settings.Schedule }));
+app.MapPut("/api/admin/schedule", (RaceEventSchedule schedule, RaceServerConfigurationStore settings, RaceCoordinator coordinator) =>
+{
+    if (!CanEditEventConfiguration(coordinator))
+        return Results.BadRequest(new { error = "请先返回大厅；本场正赛已结束时，先准备新一场再修改赛程。" });
+    settings.SaveSchedule(schedule);
+    return Results.Ok(new { schedule = settings.Schedule });
+});
+app.MapPost("/api/admin/events/new", async (RaceEventLifecycle lifecycle,
+    RaceCoordinator coordinator, RaceBroadcastService broadcasts, CancellationToken token) =>
+{
+    try
+    {
+        await lifecycle.PrepareAsync(null, token);
+        broadcasts.Queue(coordinator.Snapshot());
+        return Results.Ok(new { snapshot = coordinator.Snapshot() });
+    }
+    catch (Exception exception) when (exception is InvalidDataException or IOException or JsonException)
+    { return Results.BadRequest(new { error = exception.Message }); }
+});
+
 app.MapGet("/api/admin/events", (HttpContext context, AdminSessionStore sessions, RaceCoordinator coordinator, int? limit, long? after) =>
     Authorized(context, sessions)
         ? Results.Ok(coordinator.Events(Math.Clamp(limit ?? 200, 20, 500), after))
@@ -695,8 +707,8 @@ app.MapPost("/api/admin/track-package", async (
     if (!context.Request.HasFormContentType) return Results.BadRequest(new { error = "请使用表单上传 .lfzestate 文件。" });
     try
     {
-        if (coordinator.Snapshot().Phase is not (RaceSessionPhase.Lobby or RaceSessionPhase.Finished))
-            return Results.BadRequest(new { error = "排位赛或正赛进行期间不能更换赛事赛道。请先返回大厅。" });
+        if (!CanEditEventConfiguration(coordinator))
+            return Results.BadRequest(new { error = "请先返回大厅；本场正赛已结束时，先准备新一场再更换赛道。" });
         var form = await context.Request.ReadFormAsync(cancellationToken);
         var file = form.Files.GetFile("file");
         if (file is null) return Results.BadRequest(new { error = "请选择要托管的 .lfzestate 文件。" });
@@ -834,45 +846,39 @@ static string? BearerToken(HttpRequest request)
         : null;
 }
 
-static IResult ChangeProjectStatus(
+static bool CanEditEventConfiguration(RaceCoordinator coordinator)
+{
+    var state = coordinator.Snapshot();
+    return state.Phase == RaceSessionPhase.Lobby && !coordinator.Results().Any(result =>
+        (result.EventId ?? Guid.Empty) == state.EventId && result.Phase == RaceSessionPhase.Race && result.IsComplete);
+}
+
+static async Task<IResult> ChangeProjectStatus(
     Guid projectId,
     RaceEventProjectStatus status,
     HttpContext context,
     AdminSessionStore sessions,
     RaceEventProjectStore projects,
-    RaceCoordinator coordinator)
+    RaceCoordinator coordinator,
+    RaceEventLifecycle lifecycle)
 {
     if (!Authorized(context, sessions)) return Results.Unauthorized();
     try
     {
         projects.SyncActive(coordinator.Results(), coordinator.Events(500));
+        if (projects.Find(projectId)?.Status == RaceEventProjectStatus.Active &&
+            coordinator.Snapshot().Phase is not (RaceSessionPhase.Lobby or RaceSessionPhase.Finished))
+            return Results.BadRequest(new { error = "请先结束当前阶段或返回大厅，再完成项目。" });
+        if (status == RaceEventProjectStatus.Completed && projects.Find(projectId)?.Status == RaceEventProjectStatus.Active)
+        {
+            await lifecycle.PrepareAsync(null, context.RequestAborted);
+            return Results.Ok(new { project = projects.Find(projectId) });
+        }
         return Results.Ok(new { project = projects.SetStatus(projectId, status) });
     }
     catch (KeyNotFoundException) { return Results.NotFound(new { error = "赛事项目不存在。" }); }
     catch (InvalidDataException exception) { return Results.BadRequest(new { error = exception.Message }); }
 }
-
-static RaceAdminRoomSettingsCommand ToRoomCommand(RaceRoomSettingsSnapshot room) => new(
-    room.SessionName,
-    room.TotalRaceLaps,
-    room.SectorCount,
-    room.AutomaticYellowEnabled,
-    room.SlowSpeedKph,
-    room.SlowDurationSeconds,
-    room.SevereLateralOffsetMeters,
-    room.RecoveryDurationSeconds,
-    room.AllowTeams,
-    room.TrackName,
-    room.TrackId,
-    room.TrackRevision,
-    room.TrackPackageHash,
-    room.TeamCount,
-    room.DriversPerTeam,
-    room.Teams,
-    room.TrackLimitMode,
-    room.MinimumRequiredPitStops,
-    room.AutomaticCollisionInvestigationsEnabled,
-    room.DisconnectedLapRecoveryEnabled);
 
 static async Task<(
     HostedTrackPackageMetadata? TrackMetadata,

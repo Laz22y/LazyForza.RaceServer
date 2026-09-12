@@ -11,13 +11,28 @@ class Socket {
   close(code:number):void {if(this.readyState===3)return;this.closeCode=code;this.readyState=this.holdClose?2:3;}
   wire():WebSocket {return this as unknown as WebSocket;}
 }
+interface TestStorage {
+  get<T>(key:string):Promise<T|undefined>;
+  put(key:string|Record<string,unknown>,value?:unknown):Promise<void>;
+  delete(keys:string|string[]):Promise<boolean|number>;
+  transaction<T>(callback:(storage:TestStorage)=>Promise<T>):Promise<T>;
+  setAlarm(at:number):Promise<void>;
+  deleteAlarm():Promise<void>;
+}
 class State {
-  values=new Map<string,unknown>();sockets:Socket[]=[];alarmAt:number|null=null;
-  storage={
+  values=new Map<string,unknown>();sockets:Socket[]=[];alarmAt:number|null=null;failWrite=false;failTransaction=false;
+  storage:TestStorage={
     get:async <T>(key:string):Promise<T|undefined>=>structuredClone(this.values.get(key)) as T|undefined,
     put:async (key:string|Record<string,unknown>,value?:unknown):Promise<void>=>{
+      if(this.failWrite)throw new Error("Injected storage failure");
       if(typeof key==="string") this.values.set(key,structuredClone(value));
       else for(const [k,v] of Object.entries(key)) this.values.set(k,structuredClone(v));
+    },
+    delete:async (keys:string|string[]):Promise<boolean|number>=>{let count=0;for(const key of typeof keys==="string"?[keys]:keys)if(this.values.delete(key))count++;return count;},
+    transaction:async <T>(callback:(storage:TestStorage)=>Promise<T>):Promise<T>=>{
+      const before=structuredClone(this.values);
+      try {const value=await callback(this.storage);if(this.failTransaction)throw new Error("Injected commit failure");return value;}
+      catch(error){this.values=before;throw error;}
     },
     setAlarm:async (at:number):Promise<void>=>{this.alarmAt=at;},
     deleteAlarm:async ():Promise<void>=>{this.alarmAt=null;}
@@ -61,6 +76,74 @@ function login(name:string,isObserver=false) {return {password:"player-pass",dis
 function message(socket:Socket,type:string) {return socket.messages.slice().reverse().find(item=>item.type===type)?.payload;}
 
 describe("ingress routes",()=>{
+  it.each([false,true])("persists leave before acknowledgement and releases name across reconstruction (observer=%s)",async observer=>{
+    let {room,state,env}=setup();
+    const socket=await connect(room,state);await send(room,socket,"login",login("Reusable",observer));
+    const old=message(socket,"loginAccepted")!;
+    await send(room,socket,"leave");
+    expect(message(socket,"left")).toBeTruthy();expect(socket.closeCode).toBe(1000);
+    await send(room,socket,"leave");
+    expect(socket.messages.filter(m=>m.type==="left")).toHaveLength(1);
+    room=new RaceRoom(state.wire(),env);
+    const next=await connect(room,state);await send(room,next,"login",login("Reusable",observer));
+    expect(message(next,"loginAccepted")?.participantId).not.toBe(old.participantId);
+    expect(message(next,"loginAccepted")).toBeTruthy();
+  });
+  it("never acknowledges leave when durable storage fails",async()=>{
+    const {room,state}=setup();const socket=await connect(room,state);
+    await send(room,socket,"login",login("Failure"));
+    const before=structuredClone(state.values);state.failWrite=true;
+    await send(room,socket,"leave");
+    expect(message(socket,"left")).toBeUndefined();
+    expect(state.values).toEqual(before);
+  });
+  it("ignores queued leave from a socket replaced by reconnection",async()=>{
+    const {room,state}=setup();const old=await connect(room,state);old.holdClose=true;
+    await send(room,old,"login",login("Resume"));const accepted=message(old,"loginAccepted")!;
+    const replacement=await connect(room,state);await send(room,replacement,"login",{...login("Resume"),resumeToken:accepted.resumeToken});
+    expect(message(replacement,"loginAccepted")?.participantId).toBe(accepted.participantId);
+    await send(room,old,"leave");await send(room,replacement,"ping");
+    expect(message(old,"left")).toBeUndefined();expect(message(replacement,"pong")).toBeTruthy();
+  });
+  it("commits event ownership, assets and schedule together and rolls back a failed switch",async()=>{
+    let {room,state,env}=setup();
+    const authenticated=await room.fetch(request("/api/admin/login",{password:"admin-pass"}));
+    const cookie=authenticated.headers.get("set-cookie")!.split(";")[0];
+    const admin=async(path:string,body?:unknown,method=body===undefined?"GET":"POST")=>{
+      const command=new Request("https://race.test/api/admin/"+path,
+        {method,headers:{cookie,"Content-Type":"application/json"},body:body===undefined?undefined:JSON.stringify(body)});
+      const response=await room.fetch(command);
+      if(body!==undefined&&(/\/(activate|complete)$/.test(path)||path==="events/new"))expect(command.bodyUsed).toBe(true);
+      return response;
+    };
+    const create=async(name:string,countdown:number)=>((await (await admin("event-projects",{name,schedule:{countdownSeconds:countdown}})).json()) as {project:{id:string;results:unknown[]}}).project;
+    const first=await create("First",13),second=await create("Second",21);
+    expect(first.results).toEqual([]);
+    expect((await admin(`event-projects/${first.id}/activate`,{})).status).toBe(200);
+    const before=structuredClone(state.values);state.failTransaction=true;
+    expect((await admin(`event-projects/${second.id}/activate`,{})).status).toBe(400);
+    expect(state.values).toEqual(before);
+    expect((await (await admin("state")).json() as {eventId:string}).eventId).toBe(first.id);
+    state.failTransaction=false;
+    expect((await admin(`event-projects/${second.id}/activate`,{})).status).toBe(200);
+    room=new RaceRoom(state.wire(),env);
+    expect((await (await admin("state")).json() as {eventId:string}).eventId).toBe(second.id);
+    expect(await (await admin("schedule")).json()).toMatchObject({schedule:{countdownSeconds:21}});
+    expect(await (await admin(`event-projects/${first.id}`)).json()).toMatchObject({project:{status:"completed",eventId:first.id}});
+    expect((await admin(`event-projects/${first.id}/activate`,{})).status).toBe(400);
+    expect((await admin("session",{phase:"practice"})).status).toBe(200);
+    expect((await admin("schedule",{countdownSeconds:90},"PUT")).status).toBe(400);
+    expect(await (await admin("schedule")).json()).toMatchObject({schedule:{countdownSeconds:21}});
+    expect((await admin(`event-projects/${second.id}/complete`,{})).status).toBe(400);
+    expect((await admin("session",{phase:"lobby"})).status).toBe(200);
+    expect((await admin(`event-projects/${second.id}/complete`,{})).status).toBe(200);
+    room=new RaceRoom(state.wire(),env);
+    const next=await (await admin("state")).json() as {eventId:string;phase:string};
+    expect(next.eventId).not.toBe(second.id);expect(next.phase).toBe("lobby");
+    expect(await (await admin(`event-projects/${second.id}`)).json()).toMatchObject({project:{status:"completed",eventId:second.id}});
+    expect((await admin("events/new",{})).status).toBe(200);
+  });
+
   it("returns HTTP 429 with retry hints, retains failures across reconstruction and recovers",async()=>{
     let {room,state,env}=setup({loginFailureLimit:1,loginFailureWindowSeconds:2});
     expect((await room.fetch(request("/api/admin/login",{password:"wrong"}))).status).toBe(401);

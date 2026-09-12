@@ -51,7 +51,7 @@ public sealed partial class RaceCoordinator
             receivedPitServiceEvents.Clear();
             receivedPitServiceEvents.UnionWith(saved.ReceivedPitServiceEvents);
             revokedResumeTokens.Clear();
-            revokedResumeTokens.UnionWith(saved.RevokedResumeTokens);
+            revokedResumeTokens.UnionWith(saved.RevokedResumeTokens.TakeLast(100));
             manualSectorYellows.Clear();
             foreach (var item in saved.ManualSectorYellows) manualSectorYellows.Add(item.Key, item.Value);
             manualFullCourseYellow = saved.ManualFullCourseYellow;
@@ -101,6 +101,17 @@ public sealed partial class RaceCoordinator
             revision = saved.Revision;
             eventSequence = saved.EventSequence;
             activeResultStageId = saved.ActiveResultStageId;
+            eventId = saved.EventId ?? Guid.Empty;
+            // Compact legacy released entries before freezing the recovered phase.
+            var retired = participants.Where(p => !p.ReservationActive).ToArray();
+            if (retired.Length > 0)
+            {
+                ArchiveActiveResult(envelope.SavedAt, CurrentResultIsComplete());
+                foreach (var participant in retired) RevokeResumeToken(participant.ResumeToken);
+                var retiredIds = retired.Select(p => p.Id).ToHashSet();
+                participants.RemoveAll(p => retiredIds.Contains(p.Id));
+                penalties.RemoveAll(p => retiredIds.Contains(p.ParticipantId));
+            }
             recoveryPending = saved.RecoveryPending;
             recoveryFrozenAt = saved.RecoveryFrozenAt;
             recoveryFlag = saved.RecoveryFlag;
@@ -234,6 +245,7 @@ public sealed partial class RaceCoordinator
             Revision = revision,
             EventSequence = eventSequence,
             ActiveResultStageId = activeResultStageId,
+            EventId = eventId,
             RecoveryPending = recoveryPending,
             RecoveryFrozenAt = recoveryFrozenAt,
             RecoveryFlag = recoveryFlag,
@@ -328,6 +340,7 @@ public sealed partial class RaceCoordinator
         public required long Revision { get; init; }
         public required long EventSequence { get; init; }
         public required Guid? ActiveResultStageId { get; init; }
+        public Guid? EventId { get; init; }
         public required bool RecoveryPending { get; init; }
         public required DateTimeOffset? RecoveryFrozenAt { get; init; }
         public required RaceControlFlag RecoveryFlag { get; init; }

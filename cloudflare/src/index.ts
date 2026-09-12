@@ -65,6 +65,8 @@ import {
   maximumEventProjectPackageBytes,
   maximumEventProjects,
   normalizeEventProjects,
+  normalizeSchedule,
+  type EventSchedule,
   setEventProjectStatus,
   summarizeEventProject,
   syncActiveEventProject,
@@ -161,6 +163,7 @@ export class RaceRoom {
   private organizerLogo: OrganizerLogoMetadata | null = null;
   private ruleTemplates: RaceRuleTemplateSnapshot[] = [];
   private eventProjects: EventProjectSnapshot[] = [];
+  private schedule: EventSchedule = normalizeSchedule();
   private setupInProgress = false;
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
@@ -184,6 +187,7 @@ export class RaceRoom {
       this.organizerLogo = await this.state.storage.get<OrganizerLogoMetadata>(organizerLogoMetadataKey) ?? null;
       this.ruleTemplates = normalizeRuleTemplates(
         await this.state.storage.get<RaceRuleTemplateSnapshot[]>(ruleTemplatesKey));
+      this.schedule = normalizeSchedule(await this.state.storage.get<EventSchedule>("room-schedule-v1"));
       this.eventProjects = normalizeEventProjects(
         await this.state.storage.get<EventProjectSnapshot[]>(eventProjectsKey));
       this.core = new RaceCore({
@@ -289,6 +293,19 @@ export class RaceRoom {
     }
     if (url.pathname === "/api/admin/results" && request.method === "GET")
       return json(this.core.results());
+    if (url.pathname === "/api/admin/schedule" && request.method === "GET") return json({schedule:this.schedule});
+    if (url.pathname === "/api/admin/schedule" && request.method === "PUT") {
+      const schedule = normalizeSchedule(await readJson(request) as EventSchedule);
+      if (!this.canEditEventConfiguration())
+        return json({error:"请先返回大厅；本场正赛已结束时，先准备新一场再修改赛程。"},400);
+      await this.state.storage.put("room-schedule-v1",schedule);
+      this.schedule = schedule;
+      return json({schedule:this.schedule});
+    }
+    if (url.pathname === "/api/admin/events/new" && request.method === "POST") {
+      if (request.body) await readJson(request);
+      return this.prepareEvent();
+    }
     if (url.pathname === "/api/admin/event-projects" && request.method === "GET")
       return json({
         projects: [...this.eventProjects]
@@ -420,6 +437,17 @@ export class RaceRoom {
         return;
       }
 
+      if (envelope.type === "leave") {
+        const result = this.core.disconnectAndReleaseClient(attachment.participantId, new Date(), true);
+        if (!result.ok) { this.send(webSocket, "error", {code:"commandRejected", message:result.error}); return; }
+        await this.persist();
+        this.send(webSocket, "left", {});
+        webSocket.serializeAttachment({...attachment,closed:true});
+        webSocket.close(1000, "left room");
+        await this.scheduleAlarm();
+        this.broadcastSnapshot(true);
+        return;
+      }
       if (envelope.type === "ping") {
         const payload = envelope.payload as { clientMonotonicMilliseconds?: number };
         this.send(webSocket, "pong", {
@@ -786,6 +814,7 @@ export class RaceRoom {
           code: "connectionReplaced",
           message: result.isObserver ? "该 OB 已从新的连接恢复。" : "该车手已从新的连接恢复比赛。"
         });
+        other.serializeAttachment({...attachmentOf(other),closed:true});
         other.close(1000, "Connection replaced");
       }
     }
@@ -900,7 +929,7 @@ export class RaceRoom {
     try {
       const body = await readJson(request) as EventProjectSaveRequest;
       const capture = await this.currentEventProjectCapture();
-      const created = createEventProject(this.eventProjects, body, capture.context);
+      const created = createEventProject(this.eventProjects, body, {...capture.context,results:[],events:[]});
       this.eventProjects = created.projects;
       await this.saveEventProjectAssets(created.project.id, capture.assets);
       await this.state.storage.put(eventProjectsKey, this.eventProjects);
@@ -914,9 +943,10 @@ export class RaceRoom {
     try {
       const body = await readJson(request) as EventProjectSaveRequest;
       const capture = await this.currentEventProjectCapture();
+      if (body.captureConfiguration && !this.canEditEventConfiguration()) return json({error:"比赛进行中不能替换项目配置。"},400);
       const captured = captureEventProject(this.eventProjects, projectId, body, capture.context);
       this.eventProjects = captured.projects;
-      await this.saveEventProjectAssets(captured.project.id, capture.assets);
+      if (body.captureConfiguration) await this.saveEventProjectAssets(captured.project.id, capture.assets);
       await this.state.storage.put(eventProjectsKey, this.eventProjects);
       return json({ project: captured.project });
     } catch (error) {
@@ -930,8 +960,10 @@ export class RaceRoom {
     action: string,
     request: Request): Promise<Response> {
     try {
+      // Consume the command before returning a response, including actions with
+      // no parameters. Workerd must not retain a live incoming request stream.
+      const body = (request.body ? await readJson(request) : {}) as { name?: string | null };
       if (action === "copy") {
-        const body = await readJson(request) as { name?: string | null };
         const assets = await this.readEventProjectAssets(projectId);
         const copied = copyEventProject(this.eventProjects, projectId, body.name);
         this.eventProjects = copied.projects;
@@ -940,6 +972,12 @@ export class RaceRoom {
         return json({ project: copied.project });
       }
       if (action === "activate") return this.activateEventProject(projectId);
+      if (this.eventProjects.find(p => p.id === projectId)?.status === "active" && !["lobby","finished"].includes(this.core.snapshot().phase))
+        return json({error:"请先结束当前阶段或返回大厅，再完成项目。"},400);
+      if (action === "complete" && this.eventProjects.find(p => p.id === projectId)?.status === "active") {
+        const response = await this.prepareEvent();
+        return response.ok ? json({project:this.eventProjects.find(p=>p.id===projectId)}) : response;
+      }
       const synchronized = syncActiveEventProject(this.eventProjects, this.core.results(), this.core.events(500));
       this.eventProjects = synchronized.projects;
       const changed = setEventProjectStatus(
@@ -953,64 +991,72 @@ export class RaceRoom {
     }
   }
 
-  private async activateEventProject(projectId: string): Promise<Response> {
-    if (!["lobby", "finished"].includes(this.core.snapshot().phase))
-      return json({ error: "练习赛、排位赛或正赛进行期间不能切换赛事项目。请先返回大厅。" }, 400);
-    const project = this.eventProjects.find(item => item.id === projectId);
-    if (!project) return json({ error: "赛事项目不存在。" }, 404);
-    if (project.status === "archived")
-      return json({ error: "已归档的赛事项目不能直接启用，请先复制为新项目。" }, 400);
-    const assets = await this.readEventProjectAssets(projectId);
-    const result = this.core.applyRoomSettings(project.room);
-    if (!result.ok) return json({ error: result.error }, 400);
+  private activateEventProject(projectId: string): Promise<Response> { return this.prepareEvent(projectId); }
 
-    if (project.trackPackage && assets.trackPackage) {
-      if (!project.room.trackId || !project.room.trackName || !project.room.trackPackageHash)
-        return json({ error: "赛事项目的赛道标识不完整。" }, 400);
-      const metadata: HostedTrackPackageMetadata = {
-        trackId: project.room.trackId,
-        trackName: project.room.trackName,
-        trackRevision: project.room.trackRevision ?? null,
-        trackPackageHash: project.room.trackPackageHash,
-        fileSha256: project.trackPackage.sha256,
-        sizeBytes: project.trackPackage.sizeBytes,
-        uploadedAt: new Date().toISOString(),
-        fileName: project.trackPackage.fileName
-      };
-      await this.state.storage.put({
-        [hostedTrackPackageKey]: assets.trackPackage,
-        [hostedTrackPackageMetadataKey]: metadata
-      });
-      this.hostedTrackPackage = metadata;
-    } else {
-      await this.state.storage.delete([hostedTrackPackageKey, hostedTrackPackageMetadataKey]);
-      this.hostedTrackPackage = null;
-    }
+  private canEditEventConfiguration(): boolean {
+    const state = this.core.snapshot();
+    return state.phase === "lobby" && !this.core.results().some(result =>
+      (result.eventId ?? "00000000-0000-0000-0000-000000000000") === state.eventId && result.phase === "race" && result.isComplete);
+  }
 
-    if (project.organizerLogo && assets.organizerLogo) {
-      const metadata: OrganizerLogoMetadata = {
-        sha256: project.organizerLogo.sha256,
-        mimeType: project.organizerLogo.mimeType as "image/png" | "image/jpeg",
-        sizeBytes: project.organizerLogo.sizeBytes,
-        uploadedAt: new Date().toISOString(),
-        fileName: project.organizerLogo.fileName
-      };
-      await this.state.storage.put({
-        [organizerLogoKey]: assets.organizerLogo,
-        [organizerLogoMetadataKey]: metadata
-      });
-      this.organizerLogo = metadata;
-    } else {
-      await this.state.storage.delete([organizerLogoKey, organizerLogoMetadataKey]);
-      this.organizerLogo = null;
-    }
-
-    const activated = activateEventProject(this.eventProjects, projectId);
-    this.eventProjects = activated.projects;
-    await this.persist();
-    await this.scheduleAlarm();
-    this.broadcastSnapshot(true);
-    return json({ project: activated.project, room: this.core.roomSettings() });
+  private async prepareEvent(projectId?: string): Promise<Response> {
+    // Serialize the short lifecycle operation against HTTP, alarms and WS events.
+    return this.state.blockConcurrencyWhile(async () => {
+      try {
+        if (!["lobby", "finished"].includes(this.core.snapshot().phase))
+          return json({error:"请先结束当前阶段或返回大厅，再准备新赛事。"},400);
+        const project = projectId ? this.eventProjects.find(p => p.id === projectId) : null;
+        if (projectId && !project) return json({error:"赛事项目不存在。"},404);
+        if (project?.status === "active" && project.eventId === this.core.snapshot().eventId)
+          return json({project,room:this.core.roomSettings()});
+        if (project && (project.status !== "draft" || project.results.length > 0))
+          return json({error:"该项目已有赛事记录，请复制为新赛事后使用。"},400);
+        const assets = project ? await this.readEventProjectAssets(project.id) : null;
+        const next = new RaceCore({sessionName:this.env.SESSION_NAME,totalRaceLaps:Number.parseInt(this.env.TOTAL_RACE_LAPS,10),maximumParticipants:Number.parseInt(this.env.MAXIMUM_PARTICIPANTS,10)},this.core.serialize());
+        let nextProjects = syncActiveEventProject(this.eventProjects,this.core.results(),this.core.events(500)).projects;
+        const eventId = project?.id ?? crypto.randomUUID();
+        const prepared = next.beginEvent(eventId,project?.name);
+        if (!prepared.ok) return json({error:prepared.error},400);
+        if (project) {
+          const applied = next.applyRoomSettings({...project.room,sessionName:project.name});
+          if (!applied.ok) return json({error:applied.error},400);
+          nextProjects = activateEventProject(nextProjects,project.id,new Date(),eventId).projects;
+        } else {
+          for (const active of nextProjects.filter(p => p.status === "active"))
+            nextProjects = setEventProjectStatus(nextProjects,active.id,"completed").projects;
+        }
+        const nextSchedule = project ? normalizeSchedule(project.schedule) : this.schedule;
+        let track = this.hostedTrackPackage, logo = this.organizerLogo;
+        const values: Record<string,unknown> = {
+          [storedStateKey]:next.serialize(), [eventProjectsKey]:nextProjects, "room-schedule-v1":nextSchedule
+        };
+        const deletions: string[] = [];
+        if (project && assets) {
+          if (project.trackPackage && assets.trackPackage) {
+            if (!project.room.trackId || !project.room.trackName || !project.room.trackPackageHash)
+              return json({error:"赛事项目的赛道标识不完整。"},400);
+            track = {trackId:project.room.trackId,trackName:project.room.trackName,
+              trackRevision:project.room.trackRevision??null,trackPackageHash:project.room.trackPackageHash,
+              fileSha256:project.trackPackage.sha256,sizeBytes:project.trackPackage.sizeBytes,
+              uploadedAt:new Date().toISOString(),fileName:project.trackPackage.fileName};
+            values[hostedTrackPackageKey]=assets.trackPackage;values[hostedTrackPackageMetadataKey]=track;
+          } else {track=null;deletions.push(hostedTrackPackageKey,hostedTrackPackageMetadataKey);}
+          if (project.organizerLogo && assets.organizerLogo) {
+            logo={sha256:project.organizerLogo.sha256,mimeType:project.organizerLogo.mimeType as "image/png"|"image/jpeg",
+              sizeBytes:project.organizerLogo.sizeBytes,uploadedAt:new Date().toISOString(),fileName:project.organizerLogo.fileName};
+            values[organizerLogoKey]=assets.organizerLogo;values[organizerLogoMetadataKey]=logo;
+          } else {logo=null;deletions.push(organizerLogoKey,organizerLogoMetadataKey);}
+        }
+        await this.state.storage.transaction(async transaction => {
+          await transaction.put(values);
+          if (deletions.length) await transaction.delete(deletions);
+        });
+        this.core=next;this.eventProjects=nextProjects;this.schedule=nextSchedule;
+        this.hostedTrackPackage=track;this.organizerLogo=logo;
+        await this.scheduleAlarm();this.broadcastSnapshot(true);
+        return project ? json({project:nextProjects.find(p=>p.id===project.id),room:next.roomSettings()}) : json({snapshot:next.snapshot()});
+      } catch(error) { return json({error:error instanceof Error?error.message:"赛事准备失败，请重试。"},400); }
+    });
   }
 
   private async deleteEventProject(projectId: string): Promise<Response> {
@@ -1166,8 +1212,8 @@ export class RaceRoom {
 
   private async uploadTrackPackage(request: Request): Promise<Response> {
     try {
-      if (!["lobby", "finished"].includes(this.core.snapshot().phase))
-        return json({ error: "排位赛或正赛进行期间不能更换赛事赛道。请先返回大厅。" }, 400);
+      if (!this.canEditEventConfiguration())
+        return json({ error: "请先返回大厅；本场正赛已结束时，先准备新一场再更换赛道。" }, 400);
       const form = await request.formData();
       const file = form.get("file");
       if (!(file instanceof File)) return json({ error: "请选择要托管的 .lfzestate 文件。" }, 400);
