@@ -154,11 +154,7 @@ public sealed partial class RaceCoordinator
                 ResetLivePenaltyServiceState(participant);
                 ResetTrackLimitExcursion(participant);
                 participant.ProgressContinuityReady = false;
-                participant.RaceProgressContinuityReady = false;
-                participant.RaceProgressSamples.Clear();
-                participant.RaceProgressInitialized = false;
-                participant.RaceProgressAwaitingWrap = false;
-                participant.RaceProgressPitTransitActive = false;
+                participant.RaceProgress.Reset();
                 participant.LapValidationSamples.Clear();
                 participant.AutomaticYellowActive = false;
                 participant.HazardCandidateStartedAt = null;

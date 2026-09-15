@@ -1181,6 +1181,29 @@ describe("RaceCore", () => {
     expect(result.raceElapsedSeconds).toBe(121);
   });
 
+  it.each([false, true])("follows early pit approach without lap receipts (pause=%s)", pauseAtLine => {
+    const core = createCore(), leader = connect(core, "Leader"), follower = connect(core, "Follower");
+    const start = new Date("2026-09-15T14:53:00Z");
+    const at = (seconds: number) => new Date(start.getTime() + seconds * 1000);
+    core.applySession({ phase: "race", totalRaceLaps: 10 }, start);
+    const send = (id: string, progress: number, seconds: number, route = false, approach = false) =>
+      core.updateTelemetry(id, { ...telemetry(), trackProgress: progress,
+        clientMonotonicMilliseconds: seconds * 1000, isOnPitRoute: route, isApproachingPit: approach }, at(seconds));
+    send(leader, .70, 42); send(follower, .70, 45);
+    send(follower, .85, 51, false, true);
+    send(leader, .98, 58); send(follower, .98, 59, true);
+    if (pauseAtLine) core.updateTelemetry(follower, { ...telemetry(), trackProgress: .98,
+      isTelemetryValid: false, isPausedOrRewinding: true, isInServiceZone: true,
+      clientMonotonicMilliseconds: 60_000 }, at(60));
+    send(leader, .02, 61); send(leader, .15, 69);
+    send(follower, .03, 73, true); send(leader, .30, 78); send(follower, .15, 82);
+    expect(core.snapshot(at(82)).participants.find(p => p.id === follower)!.raceDeltaSecondsByReference![leader]).toBeCloseTo(13, 3);
+    send(follower, .30, 93);
+    const snapshot = core.snapshot(at(93));
+    expect(snapshot.participants.find(p => p.id === follower)!.raceDeltaSecondsByReference![leader]).toBeCloseTo(15, 3);
+    expect(snapshot.participants.every(p => p.completedLaps === 0)).toBe(true);
+  });
+
   it("updates race deltas at common track progress without waiting for a lap event", () => {
     const core = createCore();
     const leader = connect(core, "甲"), trailing = connect(core, "乙");

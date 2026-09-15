@@ -238,3 +238,7 @@ The current source shares native lap validation and optional protocol v2 fields.
 `INGRESS_LIMITS` is an optional JSON string in Dashboard variables or wrangler.jsonc. The configuration example above lists all defaults. Failed logins are partitioned by source and player identity; successful verification refunds its reservation and administrators use a separate channel. A higher source threshold bounds identity rotation. Existing authenticated drivers/observers do not consume pending-login slots and each socket has an independent message/byte budget.
 
 HTTP throttling returns 429 and Retry-After; WebSockets include retry seconds before closing with 1013. Invalid or expired logins close with 1008. Failure windows persist in a separate DO storage key, socket budgets/deadlines persist in attachments, and alarms expire pending connections across Hibernation. Only platform source metadata is used; Worker subrequests and missing metadata fall back to unknown, never arbitrary proxy headers. Validate your deployed proxy/Worker chain and use edge protection for distributed abuse; local simulated tests do not replace that validation.
+
+### Delta 距离跟踪
+
+与原生端共用相同规则：有效主路线和维修通路进度持续进入有界距离时间线，进站与换胎标记不控制采样。迟到圈事件只提供距离下界，接收时刻不作为过线时间；遥测不补记成绩。阶段切换和对象恢复后重新建立实时历史，已保存的成绩、处罚与去重记录继续保留。协议保持 v2，详见[距离跟踪说明](../README.md#实时-delta-的距离跟踪当前源码)。

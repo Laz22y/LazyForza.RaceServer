@@ -1943,6 +1943,46 @@ public sealed class RaceCoordinatorTests
     }
 
     [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public void RaceDeltaFollowsProgressThroughEarlyPitApproachWithoutLapReceipts(bool pauseAtLine)
+    {
+        var coordinator = CreateCoordinator();
+        var leader = Join(coordinator, 1).Accepted!.ParticipantId;
+        var follower = Join(coordinator, 2).Accepted!.ParticipantId;
+        var start = DateTimeOffset.Parse("2026-09-15T14:53:00Z");
+        coordinator.ApplySessionCommand(new(RaceSessionPhase.Race, null, 10, null, null), start);
+        void Send(Guid id, double progress, double seconds, bool route = false, bool approach = false) =>
+            coordinator.UpdateTelemetry(id, Telemetry(0, progress) with
+            {
+                ClientMonotonicMilliseconds = (long)(seconds * 1000),
+                IsOnPitRoute = route, IsApproachingPit = approach
+            }, start.AddSeconds(seconds));
+        Send(leader, .70, 42);
+        Send(follower, .70, 45);
+        Send(follower, .85, 51, approach: true);
+        Send(leader, .98, 58);
+        Send(follower, .98, 59, route: true);
+        if (pauseAtLine)
+            coordinator.UpdateTelemetry(follower, Telemetry(0, .98) with
+            {
+                IsTelemetryValid = false, IsPausedOrRewinding = true, IsInServiceZone = true,
+                ClientMonotonicMilliseconds = 60_000
+            }, start.AddSeconds(60));
+        Send(leader, .02, 61);
+        Send(leader, .15, 69);
+        Send(follower, .03, 73, route: true);
+        Send(leader, .30, 78);
+        Send(follower, .15, 82);
+        Assert.AreEqual(13, coordinator.Snapshot(start.AddSeconds(82)).Participants.Single(p => p.Id == follower)
+            .RaceDeltaSecondsByReference![leader], .001);
+        Send(follower, .30, 93);
+        var snapshot = coordinator.Snapshot(start.AddSeconds(93));
+        Assert.AreEqual(15, snapshot.Participants.Single(p => p.Id == follower).RaceDeltaSecondsByReference![leader], .001);
+        Assert.IsTrue(snapshot.Participants.All(p => p.CompletedLaps == 0), "Distance samples never score laps.");
+    }
+
+    [TestMethod]
     public void RaceDeltaPitStateFlickerOnSameSideOfFinishDoesNotCreateAPhantomLap()
     {
         var coordinator = CreateCoordinator();

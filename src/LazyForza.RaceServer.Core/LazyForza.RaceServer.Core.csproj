@@ -3,6 +3,7 @@
     <TargetFramework>net9.0</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="LazyForza.RaceServer.Tests" />
     <ProjectReference Include="..\LazyForza.RaceServer.Protocol\LazyForza.RaceServer.Protocol.csproj" />
   </ItemGroup>
 </Project>

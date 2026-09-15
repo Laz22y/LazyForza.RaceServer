@@ -73,6 +73,15 @@ public sealed class RaceRecoveryTests
         Assert.IsTrue(original.CompleteLap(login.ParticipantId, lap).IsAccepted);
         Assert.IsTrue(original.ApplyPenalty(new(login.ParticipantId, RacePenaltyKind.Time, 6, null, "test penalty")).IsAccepted);
         var penalty = original.Snapshot().Penalties!.Single();
+        // Legacy snapshots included ephemeral pit/Delta fields. Ignore them on restart.
+        var document = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(data.StatePath))!;
+        var savedParticipant = document["state"]!["participants"]![0]!;
+        savedParticipant["raceProgressInitialized"] = true;
+        savedParticipant["raceProgressLapOffset"] = 99;
+        savedParticipant["raceProgressPitTransitActive"] = true;
+        savedParticipant["raceProgressSamples"] = System.Text.Json.Nodes.JsonNode.Parse(
+            "[{\"distanceLaps\":99.8,\"elapsedSeconds\":999}]");
+        File.WriteAllText(data.StatePath, document.ToJsonString());
         var rebuilt = data.Restore();
         Assert.IsTrue(rebuilt.AwaitingRecoveryConfirmation);
         Assert.AreEqual(RaceSessionPhase.Suspended, rebuilt.Snapshot().Phase);
