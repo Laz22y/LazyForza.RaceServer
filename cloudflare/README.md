@@ -4,13 +4,13 @@
 
 ## 简体中文
 
-预览版 `0.6.0-alpha-1` 推荐搭配 LazyForza `1.5.3-alpha-1`，新增原生重启恢复、双端圈完成校验和连接限速。协议保持 v2，新增字段为可选；旧客户端仍可连接，但不能提供新的阶段与校验证据。原生成功事件回执在持久保存后发送；重启恢复先等待管理员确认。旧版公开快照缺少身份和去重信息，不能安全续赛，升级前应备份并归档旧快照。
+当前正式版为 `0.6.0`，推荐搭配 LazyForza `1.5.3`。本版新增连接限速，改进圈完成校验、长期房间管理及进站后的实时 Delta；房间状态继续使用 Durable Object 持久保存。协议保持 v2。
 
 开发或修改 Cloudflare 实现前先读仓库根目录 [`AGENTS.md`](../AGENTS.md)。Cloudflare 与原生 ASP.NET 是同一服务端的两套实现，对客户端可见的协议、比赛行为、管理接口和 Web 总控必须保持一致。
 
 这个目录提供与 LazyForza 地产赛事客户端协议 v2 兼容的 Cloudflare Workers + Durable Objects 服务端。协议模型和 Web 静态资源由仓库根目录的单一 Schema 与原生 `wwwroot` 生成，Cloudflare 包保留已提交产物，因此仍可脱离上级目录独立构建和部署。一个 Worker 固定使用一个名为 `main` 的赛事房间，支持 1–12 名车手，并可额外连接最多 12 个只读 OB 席位。OB 不占车手名额，可在比赛进行中加入，只接收赛事数据用于观赛或转播。
 
-正式服务端 `v0.5.0` 推荐搭配 LazyForza `1.5.2`，并与 `1.4.2`–`1.5.1` 的协议 v2 主要比赛流程兼容。断线计圈恢复需要 `1.4.8` 或更高版本，并由总控主动开启。旧客户端不会使用其版本发布后新增的练习项目、进站策略预测、OB 登录、主办方 Logo、赛道文件按需下载和后续维修区路线修正；1.4.2 没有服务端车队下拉框，填写名称能匹配时按名称加入，否则由服务端自动分配空余车队。完整兼容说明见仓库根目录 `README.md`。
+正式服务端 `v0.6.0` 推荐搭配 LazyForza `1.5.3`，并与 `1.4.2`–`1.5.2` 的协议 v2 主要比赛流程兼容。断线计圈恢复需要 `1.4.8` 或更高版本，并由总控主动开启。主动退出释放、阶段归属和客户端换胎区计圈修复需要 1.5.3；其他较旧版本的功能范围见仓库根目录 `README.md`。
 
 实现范围：
 
@@ -33,7 +33,7 @@
 
 客户端遥测默认 10 Hz，但房间快照广播最多 10 Hz。服务端不采信遥测消息中的累计圈数，只有唯一且有效的 `lapCompleted` 事件能把服务端权威圈数增加一圈。维修区只记录停留条件和次数，不能证明游戏已经更换轮胎或重置车损。
 
-## 长期房间与赛事管理（当前源码，尚未发行）
+## 长期房间与赛事管理
 
 总控分为「比赛现场」「赛事项目」「规则与赛程」「赛果与记录」「服务器」。顶部始终显示当前项目和比赛阶段，项目支持搜索及状态筛选。
 
@@ -143,11 +143,11 @@ npm run dev
 
 ## English
 
-Preview `0.6.0-alpha-1` is recommended with LazyForza `1.5.3-alpha-1`, adding native restart recovery, consistent lap validation and ingress limits. Protocol v2 uses optional additions; older clients can connect but cannot supply new stage and validation evidence. Native success receipts follow durable storage, and restored races await administrator confirmation. Legacy public snapshots lack recovery identities and deduplication records; back up and archive them before starting a new race after upgrade.
+Stable release `0.6.0` is recommended with LazyForza `1.5.3`. It adds native restart recovery and ingress limits, with improved lap validation, persistent-room management and live Delta after pit stops. Protocol v2 remains in use.
 
 Read the repository-level [`AGENTS.md`](../AGENTS.md) before changing the Cloudflare implementation. Cloudflare Durable Objects and native ASP.NET are equal RaceServer targets and must keep the same client protocol, race behavior, management API and Race Control features.
 
-RaceServer `0.5.0` is recommended with LazyForza `1.5.2` and remains compatible with the main protocol v2 race flow in LazyForza `1.4.2–1.5.1`. Disconnected-lap recovery requires client `1.4.8` or later and must be explicitly enabled from Race Control.
+RaceServer `0.6.0` is recommended with LazyForza `1.5.3` and remains compatible with the main protocol v2 race flow in LazyForza `1.4.2–1.5.2`. Disconnected-lap recovery requires client `1.4.8` or later and must be explicitly enabled from Race Control. Explicit departure, stage ownership and the client-side service-box lap fix require `1.5.3`.
 
 Protocol models and browser assets are generated from the repository-level schema and native `wwwroot`. Their committed outputs keep this Cloudflare package independently buildable and deployable. The Worker uses one Durable Object race room named `main`, with 1–12 drivers and up to 12 read-only observers. It supports:
 
@@ -163,7 +163,7 @@ Protocol models and browser assets are generated from the repository-level schem
 
 Client telemetry defaults to 10 Hz and room snapshots are broadcast at no more than 10 Hz. Only a unique valid `lapCompleted` event advances the authoritative lap count. Pit state records location and dwell conditions; it cannot prove that the game changed tires or repaired damage.
 
-### Persistent rooms and event management (current source, unreleased)
+### Persistent rooms and event management
 
 Race Control now separates Live race, Events, Rules & schedule, Results & log, and Server. One project owns one event across practice, qualifying and race. New projects copy configuration and assets without old results; metadata edits preserve rules. Rule templates are reusable copies. Room schedules persist, and saving rules updates the active project. Return to the lobby to change rules; after a completed race, prepare the next event first.
 
@@ -227,11 +227,11 @@ npm run dev
 
 Local tests and dry-runs do not prove public-network reachability or real FH6 multi-PC behavior. Test HTTPS, the WebSocket handshake, 10 Hz state updates and short reconnect recovery from the drivers' actual networks before an event.
 
-## 当前源码的圈校验兼容
+## 圈校验兼容
 
-原生与 Cloudflare 的圈完成校验和回执分类保持一致，规则及旧协议限制见上级 [README](../README.md#圈完成校验当前源码)。可选 `stageId` 与 `validationStatus` 保持协议 v2；旧客户端缺少阶段证据仍可提交。待审核圈创建调查并沿用现有计圈规则，不自动处罚。Durable Object 保存圈序和回执分类，重建后重复事件不再次计圈或创建调查。共享测试数据位于 `tests/fixtures/lap-validation-cases.json`，随独立 Cloudflare 包保留。
+原生与 Cloudflare 的圈完成校验和回执分类保持一致，规则及旧协议限制见上级 [README](../README.md#圈完成校验)。可选 `stageId` 与 `validationStatus` 保持协议 v2；旧客户端缺少阶段证据仍可提交。待审核圈创建调查并沿用现有计圈规则，不自动处罚。Durable Object 保存圈序和回执分类，重建后重复事件不再次计圈或创建调查。共享测试数据位于 `tests/fixtures/lap-validation-cases.json`，随独立 Cloudflare 包保留。
 
-The current source shares native lap validation and optional protocol v2 fields. Review findings do not automatically penalize drivers; accepted laps retain existing scoring rules. Durable Object state preserves sequence and receipt classification across reconstruction. Shared fixtures are included in this standalone package; see the parent README for compatibility and evidence limits.
+Cloudflare shares native lap validation and optional protocol v2 fields. Review findings do not automatically penalize drivers; accepted laps retain existing scoring rules. Durable Object state preserves sequence and receipt classification across reconstruction. Shared fixtures are included in this standalone package; see the parent README for compatibility and evidence limits.
 
 ### Ingress configuration
 
@@ -241,4 +241,4 @@ HTTP throttling returns 429 and Retry-After; WebSockets include retry seconds be
 
 ### Delta 距离跟踪
 
-与原生端共用相同规则：有效主路线和维修通路进度持续进入有界距离时间线，进站与换胎标记不控制采样。迟到圈事件只提供距离下界，接收时刻不作为过线时间；遥测不补记成绩。阶段切换和对象恢复后重新建立实时历史，已保存的成绩、处罚与去重记录继续保留。协议保持 v2，详见[距离跟踪说明](../README.md#实时-delta-的距离跟踪当前源码)。
+与原生端共用相同规则：有效主路线和维修通路进度持续进入有界距离时间线，进站与换胎标记不控制采样。迟到圈事件只提供距离下界，接收时刻不作为过线时间；遥测不补记成绩。阶段切换和对象恢复后重新建立实时历史，已保存的成绩、处罚与去重记录继续保留。协议保持 v2，详见[距离跟踪说明](../README.md#实时-delta-的距离跟踪)。

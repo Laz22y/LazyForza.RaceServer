@@ -4,11 +4,11 @@
 
 ## 简体中文
 
-预览版 `0.6.0-alpha-1` 推荐搭配 LazyForza `1.5.3-alpha-1`，新增原生重启恢复、双端圈完成校验和连接限速。协议保持 v2，新增字段为可选；旧客户端仍可连接，但不能提供新的阶段与校验证据。原生成功事件回执在持久保存后发送；重启恢复先等待管理员确认。旧版公开快照缺少身份和去重信息，不能安全续赛，升级前应备份并归档旧快照。
+当前正式版为 `0.6.0`，推荐搭配 LazyForza `1.5.3`。本版新增原生重启恢复和连接限速，改进圈完成校验、长期房间管理及进站后的实时 Delta。协议保持 v2。
 
 LazyForza 地产赛事的独立服务端。支持原生 ASP.NET 自托管和 Cloudflare Durable Objects，两套实现保持同一协议与 Web 总控功能。
 
-0.5.0 新增令牌保护的公开实时计时、赛事规则模板、可迁移赛事项目、多角色总控账号和发车前检查；原生首次初始化改为仅限服务器终端，并恢复换胎出站后的实时 Delta。
+总控将比赛现场、赛事项目、规则与赛程、赛果与记录分开管理，适合持续运行和连续办赛。
 
 [客户端下载](https://github.com/Laz22y/LazyForza/releases/latest) · [完整文档](https://laz22y.github.io/LazyForza/docs/#race-server) · [服务端 Releases](https://github.com/Laz22y/LazyForza.RaceServer/releases/latest)
 
@@ -61,7 +61,7 @@ chmod +x ./LazyForza.RaceServer.Web
 
 公网部署应由 Caddy、Nginx 或同类反向代理终止 TLS，让客户端连接 `wss://`。不要直接暴露明文 `ws://`。
 
-### 原生重启恢复（当前源码）
+### 原生重启恢复
 
 原生版将内部恢复状态以独立格式版本 `1` 保存到 `data/current-race.json`。状态包含房间规则、阶段及计时、车手和 OB 恢复身份、成绩与分段、处罚执行状态、阶段赛果、调查与碰撞回放，以及圈完成和维修完成事件的去重集合。此文件包含恢复令牌，仅供服务器本地使用，不是公开计时快照或可分发的赛事项目包。
 
@@ -91,7 +91,7 @@ chmod +x ./LazyForza.RaceServer.Web
 
 总控可上传不超过 1.5 MiB 的 `.lfzestate`。服务端校验文件清单与 SHA-256；客户端缺少匹配赛道时，由车手确认下载并再次校验。
 
-## 入口保护（当前源码）
+## 入口保护
 
 原生与 Cloudflare 版均限制登录失败窗口、未认证连接名额和每连接消息／字节预算。原生版使用 `RaceServer:Ingress` 配置。可通过 `appsettings.json` 的 `RaceServer.Ingress` 对象或 `RaceServer__Ingress__字段名` 环境变量设置；启动时拒绝无效配置。下表列出默认值：
 
@@ -121,9 +121,9 @@ Cloudflare 将失败窗口写入独立的 `ingress-failures-v1` 存储，将登�
 
 协议仍为 v2：从 Schema 生成的 `LoginRejected` 与通用错误载荷增加可选 `retryAfterSeconds`，旧客户端仍可读取原有 `code`／`message`。旧客户端可能不按新字段自动退避，重试提示也包含秒数文字；不要将未知错误码视为赛事事件的成功确认。
 
-## 圈完成校验（当前源码）
+## 圈完成校验
 
-原生与 Cloudflare 共用同一组校验契约测试。圈事件携带快照提供的可选 `stageId`；阶段不符、已处理或倒退的圈序、分段数量不符、非有限／负时间等明确错误会被拒绝且不计圈。有效圈仍限定 3–21600 秒。首个圈序作为基线；此后的缺号进入待审核，客户端放弃无效圈后允许同圈序重新完成。
+原生与 Cloudflare 使用相同的圈完成校验规则。圈事件携带快照提供的可选 `stageId`；阶段不符、已处理或倒退的圈序、分段数量不符、非有限／负时间等明确错误会被拒绝且不计圈。有效圈仍限定 3–21600 秒。首个圈序作为基线；此后的缺号进入待审核，客户端放弃无效圈后允许同圈序重新完成。
 
 回执的可选 `validationStatus` 区分 `verified`、`insufficientEvidence`、`pendingReview`、`rejected`。分段合计按客户端非负分段时长规则核对（容差为 0.05 秒与圈时的 0.1% 中较大者），正常进站耗时仍包含在圈时内。合计矛盾、圈序缺口或充分连续遥测中的进度矛盾生成待审核调查，不自动判作弊或处罚；这些事件仍按原有有效圈规则计圈及更新成绩，管理员通过调查流程裁定。客户端主动报告的无效圈仍可获成功命令回执，但状态为 `rejected`，且不计入有效圈。
 
@@ -131,7 +131,7 @@ Cloudflare 将失败窗口写入独立的 `ingress-failures-v1` 存储，将登�
 
 协议保持 v2。`stageId`（快照与圈事件）及 `validationStatus`（回执）由现有 Schema 生成三端模型，默认均为空。旧客户端忽略新属性，缺少阶段标识时仍能按既有流程提交，但无法可靠识别跨阶段旧消息；新客户端连接旧服务端时使用原有快照阶段推断，旧服务端忽略事件的新属性，不提供新增校验保证。新服务端保留已接收事件的原回执分类，重试及跨阶段重放不重复计圈／创建调查。原生恢复文件 v1 新增可选参与者字段，旧文件缺少这些字段时使用空证据和既有去重集合；已有持久化提交后才成功回执的约束不变。
 
-## 实时 Delta 的距离跟踪（当前源码）
+## 实时 Delta 的距离跟踪
 
 原生与 Cloudflare 使用独立的连续距离时间线计算共同位置的通过时间差。有效的主路线和维修通路进度都会进入时间线，进站、换胎和处罚状态不参与距离恢复。暂停期间不采样；恢复后的有效位置继续提供跨线顺序。出站后无需等到下一条圈完成事件，Delta 即可随进度刷新。起跑线前的首次穿越用于开始第零圈。
 
@@ -139,7 +139,7 @@ Cloudflare 将失败窗口写入独立的 `ingress-failures-v1` 存储，将登�
 
 协议保持 v2，无需修改 Schema，旧客户端也可使用服务端修复。原生恢复格式仍为 v1，旧文件中的临时 Delta 字段会被忽略；两端在恢复和阶段切换后重新建立有界实时历史，保留原有身份、成绩、处罚及事件去重数据。客户端换胎区计时范围的修复需要更新客户端。
 
-## 长期房间与赛事管理（当前源码，尚未发行）
+## 长期房间与赛事管理
 
 总控分为「比赛现场」「赛事项目」「规则与赛程」「赛果与记录」「服务器」。顶部始终显示当前项目和比赛阶段，项目支持搜索及状态筛选。
 
@@ -158,10 +158,10 @@ Cloudflare 将失败窗口写入独立的 `ingress-failures-v1` 存储，将登�
 
 ## 兼容性
 
-当前正式服务端为 `v0.5.0`：
+当前正式服务端为 `v0.6.0`：
 
-- LazyForza `1.5.2`：推荐版本，完整支持当前协议模型、服务器收藏与连接测试；
-- LazyForza `1.5.1`：完整支持当前协议模型、服务器收藏与连接测试；
+- LazyForza `1.5.3`：推荐版本，支持可靠圈回执、阶段归属、主动退出释放和换胎区计圈修复；
+- LazyForza `1.5.1–1.5.2`：主要赛事流程兼容，但没有主动退出释放及新增阶段证据；
 - LazyForza `1.5.0`：协议 v2 主要赛事流程兼容，但不具备其版本发布后新增的全部客户端能力；
 - LazyForza `1.4.9`：支持路线收益切弯证据、碰撞识别和维修区轨迹保护；
 - LazyForza `1.4.8`：完整支持弱网状态提示与可选断线计圈恢复；
@@ -209,11 +209,11 @@ dotnet run --project src/LazyForza.RaceServer.Web/LazyForza.RaceServer.Web.cspro
 
 ## English
 
-Preview `0.6.0-alpha-1` is recommended with LazyForza `1.5.3-alpha-1`, adding native restart recovery, consistent lap validation and ingress limits. Protocol v2 uses optional additions; older clients can connect but cannot supply new stage and validation evidence. Native success receipts follow durable storage, and restored races await administrator confirmation. Legacy public snapshots lack recovery identities and deduplication records; back up and archive them before starting a new race after upgrade.
+Stable release `0.6.0` is recommended with LazyForza `1.5.3`. It adds native restart recovery and ingress limits, with improved lap validation, persistent-room management and live Delta after pit stops. Protocol v2 remains in use.
 
 LazyForza RaceServer is the independent server for estate racing. Native ASP.NET self-hosting and Cloudflare Durable Objects provide the same protocol, race behavior and browser Race Control.
 
-Version 0.5.0 adds token-protected public live timing, reusable rule templates, portable event projects, multi-role Race Control accounts and warning-only pre-race checks. Native first setup is now restricted to the server terminal, and live Delta resumes correctly after a tire-change pit exit.
+Race Control separates the live event, event projects, rules and schedule, and results for persistent servers running consecutive events.
 
 [Client downloads](https://github.com/Laz22y/LazyForza/releases/latest) · [Documentation](https://laz22y.github.io/LazyForza/docs/#race-server) · [Server releases](https://github.com/Laz22y/LazyForza.RaceServer/releases/latest)
 
@@ -266,7 +266,7 @@ Administrators and super admins can generate regular viewer and transparent broa
 
 For public hosting, terminate TLS through Caddy, Nginx or a similar reverse proxy and connect clients over `wss://`. Do not expose plain `ws://` publicly.
 
-#### Native restart recovery (current source)
+#### Native restart recovery
 
 The native server stores internal recovery format version `1` in `data/current-race.json`: room rules, phases and clocks, driver and observer resume identities, lap and sector results, penalty execution state, archived stage results, investigations and collision replays, and lap/pit event deduplication records. This file contains resume tokens and must remain private to the server.
 
@@ -296,7 +296,7 @@ Drivers need the server domain or IP, room password, matching estate circuit, di
 
 Race Control accepts `.lfzestate` packages up to 1.5 MiB. The server verifies the manifest and SHA-256; clients without the matching track confirm the download and verify it again.
 
-### Ingress protection (current source)
+### Ingress protection
 
 Native `RaceServer:Ingress` and Cloudflare `INGRESS_LIMITS` configure failure windows, pending WebSocket capacity and per-connection message/byte token budgets. The JSON Cloudflare variable uses camelCase versions of the native option names; defaults and an example are listed above and in the Cloudflare README. Successful authentication refunds the failure reservation, player identities are isolated within a shared exit, and administrator attempts use a separate channel. A larger source-wide threshold bounds identity rotation; extreme abuse may temporarily delay new logins from that exit but never disconnect existing players.
 
@@ -304,7 +304,7 @@ HTTP throttling returns 429 with `Retry-After` and `retryAfterSeconds`. WebSocke
 
 Native ignores proxy headers unless the immediate peer appears in `TrustedProxyAddresses`; configure that proxy to overwrite X-Forwarded-For with exactly one address and firewall direct origin access. Cloudflare uses platform metadata with CF-Connecting-IP and rejects Worker-subrequest identity assumptions; unknown sources fall back to a shared bucket with identity isolation. No arbitrary custom IP header is trusted. Validate real proxy/Worker chains and use edge protections for distributed abuse. Automated tests and local dry-run do not establish public-deployment security or real multi-machine FH6 validation.
 
-### Lap completion validation (current source)
+### Lap completion validation
 
 Both authority implementations run shared validation fixtures. Optional snapshot/lap `stageId` isolates stages; stale/reused lap numbers, wrong sector counts and invalid times are rejected without counting. Valid laps remain limited to 3–21600 seconds. The first lap number establishes a baseline; gaps create a review, and an abandoned invalid lap may reuse its number.
 
@@ -314,7 +314,7 @@ Progress checks use the original client event window, never arrival spacing. The
 
 Wire protocol remains v2: all new fields are nullable and generated from the existing Schema for all three targets. Older peers ignore them. New servers accept legacy unstamped events with reduced evidence and cannot guarantee their stage origin; old servers provide no new validation guarantee. Accepted event classifications survive retries, stage transitions and persistence without duplicate laps or investigations. Native recovery v1 adds optional participant fields; older files retain their existing deduplication fallback and empty evidence. Successful acknowledgements still follow persistence.
 
-### Persistent rooms and event management (current source, unreleased)
+### Persistent rooms and event management
 
 Race Control now separates Live race, Events, Rules & schedule, Results & log, and Server. One project owns one event across practice, qualifying and race. New projects copy configuration and assets without old results; metadata edits preserve rules. Rule templates are reusable copies. Room schedules persist, and saving rules updates the active project. Return to the lobby to change rules; after a completed race, prepare the next event first.
 
@@ -326,7 +326,7 @@ Native event switches use a versioned `pending-event.json` intent, replayed befo
 
 ### Compatibility
 
-RaceServer `0.5.0` is recommended with LazyForza `1.5.2`. The main protocol v2 race flow remains compatible with LazyForza `1.4.2–1.5.1`; features introduced after a client version are unavailable to that older client. Disconnected-lap recovery requires client `1.4.8` or later and must be enabled from Race Control.
+RaceServer `0.6.0` is recommended with LazyForza `1.5.3`. The main protocol v2 race flow remains compatible with LazyForza `1.4.2–1.5.2`; features introduced after a client version are unavailable to that older client. Disconnected-lap recovery requires client `1.4.8` or later and must be enabled from Race Control.
 
 ### Local development
 
