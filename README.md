@@ -4,7 +4,7 @@
 
 ## 简体中文
 
-当前正式版为 `0.6.0`，推荐搭配 LazyForza `1.5.3`。本版新增原生重启恢复和连接限速，改进圈完成校验、长期房间管理及进站后的实时 Delta。协议保持 v2。
+当前正式版为 `0.6.0`，推荐搭配 LazyForza `1.5.4`。本版新增原生重启恢复和连接限速，改进圈完成校验、长期房间管理及进站后的实时 Delta。协议保持 v2。
 
 LazyForza 地产赛事的独立服务端。支持原生 ASP.NET 自托管和 Cloudflare Durable Objects，两套实现保持同一协议与 Web 总控功能。
 
@@ -160,7 +160,8 @@ Cloudflare 将失败窗口写入独立的 `ingress-failures-v1` 存储，将登�
 
 当前正式服务端为 `v0.6.0`：
 
-- LazyForza `1.5.3`：推荐版本，支持可靠圈回执、阶段归属、主动退出释放和换胎区计圈修复；
+- LazyForza `1.5.4`：推荐版本，使用协议 v2，可连接独立部署的 RaceServer `0.6.0`；
+- LazyForza `1.5.3`：支持可靠圈回执、阶段归属、主动退出释放和换胎区计圈修复；
 - LazyForza `1.5.1–1.5.2`：主要赛事流程兼容，但没有主动退出释放及新增阶段证据；
 - LazyForza `1.5.0`：协议 v2 主要赛事流程兼容，但不具备其版本发布后新增的全部客户端能力；
 - LazyForza `1.4.9`：支持路线收益切弯证据、碰撞识别和维修区轨迹保护；
@@ -209,7 +210,7 @@ dotnet run --project src/LazyForza.RaceServer.Web/LazyForza.RaceServer.Web.cspro
 
 ## English
 
-Stable release `0.6.0` is recommended with LazyForza `1.5.3`. It adds native restart recovery and ingress limits, with improved lap validation, persistent-room management and live Delta after pit stops. Protocol v2 remains in use.
+Stable release `0.6.0` is recommended with LazyForza `1.5.4`. It adds native restart recovery and ingress limits, with improved lap validation, persistent-room management and live Delta after pit stops. Protocol v2 remains in use.
 
 LazyForza RaceServer is the independent server for estate racing. Native ASP.NET self-hosting and Cloudflare Durable Objects provide the same protocol, race behavior and browser Race Control.
 
@@ -326,7 +327,7 @@ Native event switches use a versioned `pending-event.json` intent, replayed befo
 
 ### Compatibility
 
-RaceServer `0.6.0` is recommended with LazyForza `1.5.3`. The main protocol v2 race flow remains compatible with LazyForza `1.4.2–1.5.2`; features introduced after a client version are unavailable to that older client. Disconnected-lap recovery requires client `1.4.8` or later and must be enabled from Race Control.
+RaceServer `0.6.0` is recommended with LazyForza `1.5.4`. The main protocol v2 race flow remains compatible with LazyForza `1.4.2–1.5.3`; features introduced after a client version are unavailable to that older client. Disconnected-lap recovery requires client `1.4.8` or later and must be enabled from Race Control.
 
 ### Local development
 
